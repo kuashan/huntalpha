@@ -1,0 +1,75 @@
+# Local Python runtimes and caches
+.venv/
+.chanlun-venv/
+**/__pycache__/
+*.py[cod]
+
+# Frontend dependencies and generated output
+frontend/node_modules/
+frontend/dist/
+
+# Private/local runtime state
+db.sqlite3
+db.sqlite3-*
+local_backups/
+*.log
+
+# Environment and secrets (keep only the non-secret template)
+.env
+.env.*
+!.env.example
+*.secret
+secrets/
+config/secrets/
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa*
+id_ed25519*
+
+# Databases and backups
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.dump
+*.bak
+
+# Credentials and service-account exports
+credentials*.json
+secrets*.json
+service-account*.json
+*token*.json
+
+# Cookie/session artifacts (targeted to runtime data, not source modules)
+cookies/
+sessions/
+*.cookie
+*.session
+cookie*.json
+*cookie*.json
+session*.json
+*session*.json
+
+# Coverage output
+.coverage
+htmlcov/
+
+# Temporary diagnostics and downloaded archives
+.tmp*
+tmp_*.json
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Cloned experiments that are not part of the production adapter
+vendor/chanlun-pro/
