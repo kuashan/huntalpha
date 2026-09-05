@@ -57,6 +57,19 @@ if not SECRET_KEY:
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
+
+def _env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# This is deliberately a development-only switch.  Even if the environment
+# variable is accidentally present in production, DEBUG=False keeps the
+# review gate disabled.
+DEV_ADMIN_REVIEW_MODE = DEBUG and _env_flag("HUNTALPHA_ADMIN_REVIEW_MODE")
+
 ALLOWED_HOSTS = []
 
 

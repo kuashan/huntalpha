@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta
 import json as json_module
+import math
 import os
 import re
+import socket
 import subprocess
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -31,10 +33,19 @@ def json(data, status=200):
     return result
 
 
+def admin_review_mode_enabled():
+    return bool(getattr(settings, "DEV_ADMIN_REVIEW_MODE", False))
+
+
+def review_allowed(user):
+    return bool(user.is_staff or user.is_superuser)
+
+
 def user_payload(user):
     return {
         "email": user.email,
         "name": user.get_full_name() or user.first_name or user.email.split("@", 1)[0],
+        "review_allowed": review_allowed(user),
     }
 
 
@@ -53,10 +64,15 @@ def is_visitor(request):
 
 
 def api_terminal_required(view):
-    """Members and the limited visitor mode may access the terminal APIs."""
+    """Require a normal member, or a staff reviewer when review mode is on."""
     def wrapped(request, *args, **kwargs):
-        if not request.user.is_authenticated and not is_visitor(request):
-            return json({"error": "请先登录后访问量化终端", "authenticated": False}, 401)
+        if not request.user.is_authenticated:
+            if admin_review_mode_enabled() and is_visitor(request):
+                return json({"error": "当前为管理员审查模式，仅允许 Django staff/superuser 进入", "authenticated": False, "admin_review_mode": True}, 403)
+            if not is_visitor(request):
+                return json({"error": "请先登录后访问量化终端", "authenticated": False}, 401)
+        if admin_review_mode_enabled() and not review_allowed(request.user):
+            return json({"error": "当前为管理员审查模式，仅允许 Django staff/superuser 进入", "authenticated": False, "admin_review_mode": True}, 403)
         return view(request, *args, **kwargs)
     return wrapped
 
@@ -118,11 +134,16 @@ def ai_analysis_status(request, task_id):
 
 @require_GET
 def auth_session(request):
+    review_mode = admin_review_mode_enabled()
     if request.user.is_authenticated:
-        return json({"authenticated": True, "visitor": False, "user": user_payload(request.user)})
+        if review_mode and not review_allowed(request.user):
+            return json({"error": "当前为管理员审查模式，仅允许 Django staff/superuser 进入", "authenticated": False, "admin_review_mode": True}, 403)
+        return json({"authenticated": True, "visitor": False, "admin_review_mode": review_mode, "user": user_payload(request.user)})
     if is_visitor(request):
+        if review_mode:
+            return json({"error": "当前为管理员审查模式，仅允许 Django staff/superuser 进入", "authenticated": False, "admin_review_mode": True}, 403)
         return json({"authenticated": True, "visitor": True, "user": {"email": "", "name": "访客模式"}})
-    return json({"authenticated": False}, 401)
+    return json({"authenticated": False, "admin_review_mode": review_mode}, 401)
 
 
 def auth_body(request):
@@ -135,6 +156,8 @@ def auth_body(request):
 @csrf_exempt
 @require_POST
 def auth_register(request):
+    if admin_review_mode_enabled():
+        return json({"error": "当前为管理员审查模式，注册入口已关闭", "admin_review_mode": True}, 403)
     payload = auth_body(request)
     if not isinstance(payload, dict):
         return json({"error": "请求格式无效"}, 400)
@@ -172,9 +195,11 @@ def auth_login(request):
     user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
     if not user or not user.is_active or not user.check_password(password):
         return json({"error": "邮箱或密码不正确"}, 401)
+    if admin_review_mode_enabled() and not review_allowed(user):
+        return json({"error": "当前为管理员审查模式，仅允许 Django staff/superuser 登录", "admin_review_mode": True}, 403)
     request.session.pop("quantscope_visitor", None)
     login(request, user)
-    return json({"authenticated": True, "user": user_payload(user)})
+    return json({"authenticated": True, "admin_review_mode": admin_review_mode_enabled(), "user": user_payload(user)})
 
 
 @csrf_exempt
@@ -188,11 +213,26 @@ def auth_logout(request):
 @csrf_exempt
 @require_POST
 def auth_guest(request):
+    if admin_review_mode_enabled():
+        return json({"error": "当前为管理员审查模式，访客入口已关闭", "admin_review_mode": True}, 403)
     request.session["quantscope_visitor"] = True
     return json({"authenticated": True, "visitor": True, "user": {"email": "", "name": "访客模式"}})
 
 def context():
+    try:
+        with socket.create_connection(("127.0.0.1", 11111), timeout=1):
+            pass
+    except OSError as exc:
+        raise RuntimeError("无法连接富途 OpenD（127.0.0.1:11111）") from exc
     return OpenQuoteContext(host="127.0.0.1", port=11111, ai_type=1)
+
+
+def numeric_value(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def bar_rows(frame):
@@ -242,36 +282,62 @@ def request_page(client, code, period, count, before=None):
 @require_GET
 @api_terminal_required
 def quote(request, code):
-    client = context()
+    client = None
     try:
+        client = context()
         ret, frame = client.get_market_snapshot([code.upper()])
-        if ret != RET_OK or frame.empty: return json({"error": str(frame)}, 502)
-        row = frame.iloc[0]; price = float(row["last_price"] or 0); previous = float(row["prev_close_price"] or 0)
-        return json({"code": row["code"], "name": row["name"], "price": price, "change": round((price - previous) / previous * 100, 3) if previous else 0, "open": float(row["open_price"] or 0), "high": float(row["high_price"] or 0), "low": float(row["low_price"] or 0), "updated_at": row["update_time"], "source": "futu-opend"})
-    finally: client.close()
+        if ret != RET_OK or frame.empty:
+            return json({"error": f"富途 OpenD 未返回 {code.upper()} 的真实报价", "source": "futu-opend"}, 502)
+        row = frame.iloc[0]
+        price = numeric_value(row.get("last_price"))
+        if price is None:
+            return json({"error": f"富途 OpenD 未返回 {code.upper()} 的有效最新价", "source": "futu-opend"}, 502)
+        previous = numeric_value(row.get("prev_close_price"))
+        return json({
+            "code": row["code"], "name": row["name"], "price": price,
+            "change": round((price - previous) / previous * 100, 3) if previous else None,
+            "open": numeric_value(row.get("open_price")),
+            "high": numeric_value(row.get("high_price")),
+            "low": numeric_value(row.get("low_price")),
+            "updated_at": row.get("update_time"), "source": "futu-opend",
+        })
+    except Exception as exc:
+        return json({"error": f"富途 OpenD 不可用：{exc}", "source": "futu-opend"}, 503)
+    finally:
+        if client is not None:
+            client.close()
 
 @require_GET
 @api_terminal_required
 def kline(request, code):
     period = request.GET.get("period", "日线")
-    count = min(max(int(request.GET.get("count", KLINE_PAGE_SIZE)), 50), KLINE_PAGE_SIZE)
+    try:
+        count = min(max(int(request.GET.get("count", KLINE_PAGE_SIZE)), 50), KLINE_PAGE_SIZE)
+    except ValueError:
+        return json({"error": "count 必须是整数"}, 400)
     try:
         before = int(request.GET["before"]) if request.GET.get("before") else None
     except ValueError:
         return json({"error": "before 必须是 Unix 时间戳"}, 400)
-    client = context()
+    client = None
     try:
+        client = context()
         if period == "分时":
             if before:
                 return json({"code": code.upper(), "period": period, "bars": [], "source": "futu-opend", "has_more": False})
             ret, frame = client.get_rt_data(code.upper())
-            if ret != RET_OK: return json({"error": str(frame)}, 502)
+            if ret != RET_OK or frame.empty:
+                return json({"error": f"富途 OpenD 未返回 {code.upper()} 的真实分时数据", "source": "futu-opend"}, 502)
             bars = [{"time": int(datetime.strptime(f"{datetime.now().date()} {row.time}", "%Y-%m-%d %H:%M:%S").timestamp()), "open": float(row.cur_price), "high": float(row.cur_price), "low": float(row.cur_price), "close": float(row.cur_price), "volume": float(row.volume)} for row in frame.itertuples() if not row.is_blank]
             return json({"code": code.upper(), "period": period, "bars": bars, "source": "futu-opend", "adjustment": "实时分时", "has_more": False})
         bars, has_more, error = request_page(client, code, period, count, before)
         if error: return json({"error": error}, 502)
         return json({"code": code.upper(), "period": period, "bars": bars, "source": "futu-opend", "adjustment": "前复权", "has_more": has_more})
-    finally: client.close()
+    except Exception as exc:
+        return json({"error": f"富途 OpenD 不可用：{exc}", "source": "futu-opend"}, 503)
+    finally:
+        if client is not None:
+            client.close()
 
 
 def live_float_shares(client, code):

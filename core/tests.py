@@ -2,9 +2,12 @@ import json
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.conf import settings
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
+from django.contrib.auth import get_user_model
+from futu import RET_OK
 
 from .views import bar_rows
 
@@ -36,6 +39,150 @@ class AuthenticationApiTests(TestCase):
         self.client.post('/api/auth/guest/')
         response = self.client.post('/api/ai-analysis/', data=json.dumps({'code': 'SH.600519'}), content_type='application/json')
         self.assertEqual(response.status_code, 403)
+
+
+class AdminReviewModeTests(TestCase):
+    def make_user(self, *, staff=False):
+        user = get_user_model().objects.create_user(
+            username='reviewer@example.com' if staff else 'member@example.com',
+            email='reviewer@example.com' if staff else 'member@example.com',
+            password='A-safe-password-42',
+        )
+        if staff:
+            user.is_staff = True
+            user.save(update_fields=['is_staff'])
+        return user
+
+    @override_settings(DEV_ADMIN_REVIEW_MODE=True)
+    def test_anonymous_session_advertises_admin_review_mode(self):
+        response = self.client.get('/api/auth/session/')
+        self.assertEqual(response.status_code, 401)
+        self.assertTrue(response.json()['admin_review_mode'])
+
+    @override_settings(DEV_ADMIN_REVIEW_MODE=True)
+    def test_registration_and_guest_entry_are_disabled(self):
+        registration = self.client.post(
+            '/api/auth/register/',
+            data=json.dumps({'email': 'new@example.com', 'password': 'A-safe-password-42'}),
+            content_type='application/json',
+        )
+        guest = self.client.post('/api/auth/guest/')
+        self.assertEqual(registration.status_code, 403)
+        self.assertEqual(guest.status_code, 403)
+        self.assertFalse(get_user_model().objects.filter(email='new@example.com').exists())
+
+    @override_settings(DEV_ADMIN_REVIEW_MODE=True)
+    def test_non_staff_cannot_login_or_bypass_terminal_api(self):
+        member = self.make_user()
+        login = self.client.post(
+            '/api/auth/login/',
+            data=json.dumps({'email': member.email, 'password': 'A-safe-password-42'}),
+            content_type='application/json',
+        )
+        self.assertEqual(login.status_code, 403)
+        self.client.force_login(member)
+        terminal = self.client.get('/api/indicators/')
+        self.assertEqual(terminal.status_code, 403)
+        self.assertTrue(terminal.json()['admin_review_mode'])
+
+    @override_settings(DEV_ADMIN_REVIEW_MODE=True)
+    def test_staff_login_is_allowed_and_declares_review_permission(self):
+        staff = self.make_user(staff=True)
+        response = self.client.post(
+            '/api/auth/login/',
+            data=json.dumps({'email': staff.email, 'password': 'A-safe-password-42'}),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['admin_review_mode'])
+        self.assertTrue(response.json()['user']['review_allowed'])
+        self.assertEqual(self.client.get('/api/auth/session/').status_code, 200)
+
+    def test_quote_returns_only_the_real_opend_snapshot(self):
+        self.client.force_login(self.make_user(staff=True))
+
+        class Frame:
+            empty = False
+            iloc = None
+
+            def __init__(self, row):
+                self.iloc = self
+                self.row = row
+
+            def __getitem__(self, index):
+                if index != 0:
+                    raise IndexError(index)
+                return self.row
+
+        class Client:
+            def __init__(self):
+                self.frame = Frame({
+                    'code': 'SH.600519', 'name': '贵州茅台', 'last_price': 1500.25,
+                    'prev_close_price': 1490.0, 'open_price': 1495.0,
+                    'high_price': 1505.0, 'low_price': 1488.0,
+                    'update_time': '2026-09-05 10:00:00',
+                })
+
+            def get_market_snapshot(self, codes):
+                self.codes = codes
+                return RET_OK, self.frame
+
+            def close(self):
+                pass
+
+        client = Client()
+        with patch('core.views.context', return_value=client):
+            response = self.client.get('/api/quote/SH.600519/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            'code': 'SH.600519', 'name': '贵州茅台', 'price': 1500.25,
+            'change': 0.688, 'open': 1495.0, 'high': 1505.0, 'low': 1488.0,
+            'updated_at': '2026-09-05 10:00:00', 'source': 'futu-opend',
+        })
+        self.assertEqual(client.codes, ['SH.600519'])
+
+    def test_quote_reports_missing_real_data_instead_of_zero(self):
+        self.client.force_login(self.make_user(staff=True))
+
+        class Frame:
+            empty = False
+
+            def __init__(self):
+                self.iloc = self
+
+            def __getitem__(self, index):
+                return {
+                    'code': 'CC.BTCUSD', 'name': 'Bitcoin / USD', 'last_price': None,
+                    'prev_close_price': None, 'open_price': None, 'high_price': None,
+                    'low_price': None, 'update_time': '',
+                }
+
+        class Client:
+            def get_market_snapshot(self, codes):
+                return RET_OK, Frame()
+
+            def close(self):
+                pass
+
+        with patch('core.views.context', return_value=Client()):
+            response = self.client.get('/api/quote/CC.BTCUSD/')
+        self.assertEqual(response.status_code, 502)
+        self.assertIn('有效最新价', response.json()['error'])
+
+    def test_kline_error_does_not_return_generated_bars(self):
+        self.client.force_login(self.make_user(staff=True))
+
+        class Client:
+            def request_history_kline(self, *args, **kwargs):
+                return 1, 'OpenD unavailable', None
+
+            def close(self):
+                pass
+
+        with patch('core.views.context', return_value=Client()):
+            response = self.client.get('/api/kline/SH.600519/?period=日线')
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn('bars', response.json())
 
 
 class TongdaxinFormulaEngineTests(SimpleTestCase):

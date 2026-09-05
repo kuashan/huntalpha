@@ -1,9 +1,13 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { languages, locale, setLocale, t } from '../i18n'
 
+const props = defineProps({
+  adminReviewMode: { type: Boolean, default: false },
+})
 const emit = defineEmits(['authenticated'])
-const mode = ref(new URLSearchParams(window.location.search).get('register') === '1' ? 'register' : 'login')
+const registerRequested = new URLSearchParams(window.location.search).get('register') === '1'
+const mode = ref(!props.adminReviewMode && registerRequested ? 'register' : 'login')
 const email = ref('')
 const password = ref('')
 const name = ref('')
@@ -14,16 +18,22 @@ const streams = Array.from({ length: 27 }, (_, index) => ({
   left: `${(index * 3.9 + (index % 4) * 1.4) % 100}%`,
   delay: `${-(index * 0.37)}s`,
   duration: `${7 + (index % 6)}s`,
-  code: ['SH.600519 1493.62 +0.83%', 'HK.00700 438.80 +1.41%', 'US.NVDA 178.24 +1.83%', 'CC.BTCUSD 104821.60', 'MACD  DIF  DEA', 'BOLL  MID  UPPER', 'KDJ  K  D  J', 'SZ.300750 188.46 -1.24%'][index % 8],
+  code: ['SH.600519', 'HK.00700', 'US.NVDA', 'CC.BTCUSD', 'MACD  DIF  DEA', 'BOLL  MID  UPPER', 'KDJ  K  D  J', 'SZ.300750'][index % 8],
 }))
 const submitLabel = computed(() => pending.value ? '…' : mode.value === 'login' ? t('enter') : t('create'))
-function switchMode(next) { mode.value = next; error.value = '' }
+watch(() => props.adminReviewMode, enabled => {
+  if (enabled) {
+    mode.value = 'login'
+    error.value = ''
+  }
+})
+function switchMode(next) { if (props.adminReviewMode && next !== 'login') return; mode.value = next; error.value = '' }
 async function submit() {
   error.value = ''
   if (mode.value === 'register' && password.value !== confirm.value) { error.value = '两次输入的密码不一致'; return }
   pending.value = true
   try {
-    const endpoint = mode.value === 'login' ? 'login' : 'register'
+    const endpoint = props.adminReviewMode || mode.value === 'login' ? 'login' : 'register'
     const reply = await fetch(`http://127.0.0.1:8003/api/auth/${endpoint}/`, {
       method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: email.value, password: password.value, name: name.value }),
@@ -57,10 +67,10 @@ async function enterGuest() {
     </svg>
     <header class="auth-header"><div class="auth-brand"><b>Q</b><span>QuantScope</span><small>量化结构终端</small></div><select class="language" :value="locale" @change="setLocale($event.target.value)"><option v-for="item in languages" :key="item.code" :value="item.code">{{ item.label }}</option></select></header>
     <section class="auth-card">
-      <p class="eyebrow">PRIVATE RESEARCH ACCESS</p><h1>{{ mode === 'login' ? t('welcome') : t('createAccount') }}</h1><p class="sub">{{ t('research') }}</p>
-      <div class="auth-tabs"><button :class="{ active: mode === 'login' }" @click="switchMode('login')">{{ t('login') }}</button><button :class="{ active: mode === 'register' }" @click="switchMode('register')">{{ t('register') }}</button></div>
+      <p class="eyebrow">{{ props.adminReviewMode ? t('adminReviewMode') : 'PRIVATE RESEARCH ACCESS' }}</p><h1>{{ props.adminReviewMode ? t('adminReviewLogin') : mode === 'login' ? t('welcome') : t('createAccount') }}</h1><p class="sub">{{ props.adminReviewMode ? t('adminReviewOnly') : t('research') }}</p>
+      <div v-if="!props.adminReviewMode" class="auth-tabs"><button :class="{ active: mode === 'login' }" @click="switchMode('login')">{{ t('login') }}</button><button :class="{ active: mode === 'register' }" @click="switchMode('register')">{{ t('register') }}</button></div>
       <form @submit.prevent="submit"><label v-if="mode === 'register'">{{ t('nickname') }}<input v-model.trim="name" autocomplete="name" /></label><label>{{ t('email') }}<input v-model.trim="email" type="email" autocomplete="email" placeholder="name@example.com" required /></label><label>{{ t('password') }}<input v-model="password" type="password" :autocomplete="mode === 'login' ? 'current-password' : 'new-password'" required /></label><label v-if="mode === 'register'">{{ t('confirm') }}<input v-model="confirm" type="password" autocomplete="new-password" required /></label><p v-if="error" class="auth-error">{{ error }}</p><button class="auth-submit" :disabled="pending">{{ submitLabel }} <span>→</span></button></form>
-      <button type="button" class="guest-button" :disabled="pending" @click="enterGuest">{{ t('guest') }} <span>{{ t('guestHint') }}</span></button>
+      <button v-if="!props.adminReviewMode" type="button" class="guest-button" :disabled="pending" @click="enterGuest">{{ t('guest') }} <span>{{ t('guestHint') }}</span></button>
     </section>
     <section class="auth-showcase" aria-label="平台能力预览"><article class="feature visual-preview"><small>01 · 结构识别</small><h2>缠论结构</h2><img src="/login-previews/chanlun-preview.png" alt="缠论结构预览"/><p>笔、线段、中枢和确认信号</p></article><article class="markets-preview"><small>可研究市场</small><div><b>A 股</b><b>美 股</b><b>港 股</b><b>加 密</b></div><p>统一图表、周期与指标工作流</p></article><article class="feature visual-preview"><small>02 · 趋势判断</small><h2>顺势而为</h2><img src="/login-previews/trend-preview.png" alt="顺势而为指标预览"/><p>趋势色带、通道与风险边界</p></article></section>
   </main>
