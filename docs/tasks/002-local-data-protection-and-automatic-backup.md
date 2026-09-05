@@ -105,8 +105,8 @@ HuntAlpha 当前本地开发仍使用 SQLite `db.sqlite3`。该数据库包含�
 ## Codex Completion Report
 
 - Branch: `codex/002-local-data-protection-and-backup`
-- Commit: `f714071`（实现提交；最终状态/报告提交见本分支后续历史）
-- Push: 待完成
+- Commit: `f714071`（实现提交）、`d8d9020`（状态与 Completion Report）、本次 PR 信息更新提交见分支最新历史
+- Push: 已成功推送到 `origin/codex/002-local-data-protection-and-backup`
 - Summary: 新增安全的 SQLite 一致性备份命令、SHA-256/integrity_check 校验、仓库内路径拒绝、不可覆盖发布和自动备份保留策略；新增 Windows 计划任务入口、操作说明和临时数据库测试。
 - Files changed: `AGENTS.md`、`core/management/commands/backup_local_db.py`、`core/tests.py`、`docs/operations/local-database-backup.md`、本任务文档、`scripts/manage_local_db_backup_task.ps1`
 - Checks run: `git diff --check` 通过；`python manage.py check` 通过（仅有既存的两个 `DEFAULT_AUTO_FIELD` 警告）；`python manage.py test core` 23/23 通过；PowerShell 脚本语法检查通过。
@@ -117,7 +117,7 @@ HuntAlpha 当前本地开发仍使用 SQLite `db.sqlite3`。该数据库包含�
 - Design choices: 源库以只读 SQLite URI 打开，使用 `Connection.backup()` 生成一致性副本；临时文件先完成完整性和哈希校验，再通过同目录非覆盖原子发布；失败时清理临时文件且不输出数据库内容。
 - Real local backup verification: `C:\Users\Administrator\Documents\ChatGPT\huntalpha-db-backups\huntalpha-local-db-20260905-031549-149897.sqlite3`，180224 bytes，SHA-256 `251C994F9A8D2716340158694F6657031EC9D95190C5349B09398F7A13E22A37`，`integrity_check: ok`；只读 ORM 确认 Formula 仍为 4 条。
 - Unresolved issues/risks: 本地备份未加密，备份目录必须按敏感本地数据保护；计划任务运行账户需能访问已配置的备份目录；Django 仍有两个既存的主键类型警告。
-- PR: 待 Push 后创建
+- PR: [#4](https://github.com/kuashan/huntalpha/pull/4)，不在本任务中自动合并
 
 ## Review
 
