@@ -1,6 +1,6 @@
 # Task 004 — 动态证券目录与市场市值 Top 5
 
-Status: READY_FOR_CODEX
+Status: IMPLEMENTED
 
 ## 背景
 
@@ -270,30 +270,32 @@ Codex 在编码前必须先实测当前 Futu/OpenD SDK：
 
 完成后填写：
 
-- Branch:
-- Commit:
-- PR:
-- Provider capability investigation:
-- A 股 catalog count:
-- 港股 catalog count:
-- 美股 catalog count:
-- 北交所 support result:
-- Market-cap source/method:
-- A 股 Top 5:
-- 港股 Top 5:
-- 美股 Top 5:
-- Search verification:
-- Automatic sync command:
-- Scheduler entry point:
-- DB migration: yes/no
-- Backup path / integrity_check（如涉及 DB 写入）:
-- Formula count before/after:
-- Formula source changed: yes/no
-- Tests:
-- `python manage.py check`:
-- `npm run build`:
-- `git diff --check`:
-- Unresolved provider limitations:
+- Branch: `codex/004-dynamic-symbol-catalog`
+- Commit: `7823c83`, `bcaace2`（本次 review 修复实现）
+- PR: [#8](https://github.com/kuashan/huntalpha/pull/8), open against `main`; not merged
+- Provider capability investigation: Futu SDK `10.10.7008` with the local OpenD. `get_stock_basicinfo(..., stock_type="STOCK")` returned the complete ordinary-stock catalogs; CN uses separate `Market.SH` and `Market.SZ` market-cap requests, then merges the two candidate sets. The current OpenD returned mixed SH/SZ rows for both A-share filter calls, so the adapter isolates provider-code prefixes and pages until it has at most 200 candidates for each exchange. `ETF`, `BOND`, and `WARRANT` are separate provider security-type queries and are excluded. `get_stock_filter` with `MARKET_VAL` and descending sort returned the real market-cap candidates, with a 200-row maximum. `get_market_snapshot` accepted 400 codes and rejected 401, but is not needed on every page or for the daily leader cache.
+- A 股 catalog count: 5347
+- 港股 catalog count: 3777
+- 美股 catalog count: 13046
+- 北交所 support result: unsupported by this OpenD/SDK version; no `Market.BJ`, `get_stock_basicinfo("BJ", ...)` and `get_market_snapshot(["BJ.*"])` both failed. No BJ static fallback was added.
+- Market-cap source/method: real Futu `get_stock_filter` `StockField.MARKET_VAL` descending results. CN calls `Market.SH` and `Market.SZ` separately, limits each exchange to 200 provider candidates, merges them, and lets the local API sort the combined CNY values. US caches up to 200 USD candidates. HK caches up to 200 primary-counter HKD candidates; OpenD basic-info and snapshot probes returned no currency field for HK counters, so alternate-currency counters are conservatively excluded from market-cap ranking. Explicit provider currency metadata is preserved when available, and no unknown-currency value is labeled HKD. The API sorts each market independently and returns the top 5 only when the value is positive and valid.
+- A 股 Top 5: `SH.688825` 长鑫科技（3,720,048,629,419.6 CNY）, `SH.601398` 工商银行（2,897,582,870,133.57 CNY）, `SH.601939` 建设银行（2,872,372,188,419.82 CNY）, `SH.601288` 农业银行（2,435,881,915,756.08 CNY）, `SH.600941` 中国移动（2,175,601,046,696.2 CNY）
+- 港股 Top 5: `HK.00700` 腾讯控股（4,030,876,536,735.6 HKD）, `HK.00005` 汇丰控股（2,861,687,522,026.1 HKD）, `HK.01398` 工商银行（2,742,546,142,299.85 HKD）, `HK.03750` 宁德时代（2,658,079,605,545 HKD）, `HK.00939` 建设银行（2,553,219,723,039.84 HKD）
+- 美股 Top 5: `US.NVDA` 英伟达（5,551,676,000,000 USD）, `US.AAPL` 苹果（4,669,699,774,600 USD）, `US.GOOGL` 谷歌-A（4,139,365,800,000 USD）, `US.GOOG` 谷歌-C（4,100,841,300,000 USD）, `US.MSFT` 微软（3,710,545,081,852.7 USD）
+- Search verification: API name search, code search, market scoping, limit and page pagination passed; empty search returns Top 5. Provider failure returns an error/unavailable state and no static data. Frontend runtime catalog no longer contains hand-written securities and only requests quotes for the visible result set.
+- Automatic sync command: `python manage.py sync_symbol_catalog`；可用 `--market cn|hk|us` 单独同步市场。
+- Scheduler entry point: `scripts/manage_symbol_catalog_task.ps1 -Action Install -Time 04:00`；移除使用 `-Action Remove`。脚本只在用户明确执行时安装/移除当前用户每日任务，任务动作只调用 `python manage.py sync_symbol_catalog`。
+- DB migration: yes, `core/migrations/0006_marketsymbol.py`
+- Backup path / integrity_check（如涉及 DB 写入）: `C:\Users\Administrator\Documents\ChatGPT\huntalpha-db-backups\huntalpha-local-db-20260905-070543-308251.sqlite3`; `integrity_check: ok`，SHA-256 `fca0b42a51abf7489b8e46ee3459ab8ba8d2f8a56cdd735ac350de053e087cd9`
+- Formula count before/after: 4 / 4
+- Formula source changed: no
+- Tests: `python manage.py test core` passed, 42 tests; temporary databases and synthetic provider fixtures only. Added coverage for SH+SZ candidate merging and ranking, HK alternate-currency exclusion, and successful-empty catalog protection.
+- `python manage.py check`: passed; existing `models.W042` warnings remain for the three core models using the project's historical AutoField convention.
+- `npm run build`: passed
+- `git diff --check`: passed
+- Empty catalog protection: a successful provider response with zero valid ordinary stocks raises `suspicious_empty_catalog`; the existing market is left unchanged and no inactive update is run.
+- HK counter handling: the current OpenD probe exposed no explicit HK currency field. Primary counters are eligible for the HKD leader cache; provider alternate-counter attributes (explicit currency/counter metadata when available, otherwise the provider name/code convention) remain searchable but have no ranking market cap. The directory therefore can still contain multiple counters for one company, while the leader list excludes alternate-currency duplicates; the current HK Top 5 has no duplicate counter.
+- Unresolved provider limitations: OpenD must be running and account permissions determine data availability. The provider's stock filter exposes only 200 rows per request and the current A-share endpoint may mix SH/SZ rows, so the adapter needs bounded pagination to collect up to 200 candidates per exchange. Non-leader catalog rows may have no current market-cap cache; if the market-cap request fails, stale values are cleared and leaders are reported unavailable. Northbound/BJ coverage is not available in this SDK version. Crypto remains unavailable until a real provider is connected.
 
 ## Review
 
