@@ -69,7 +69,7 @@ Status: IMPLEMENTED
 ### Final verification
 
 - `python manage.py check`：通过（仅保留 Django `W042` 模型主键 warning）。
-- `python manage.py test core`：76 tests passed。
+- `python manage.py test core`：77 tests passed。
 - `python manage.py makemigrations --check`：No changes detected。
 - `npm run build`：通过。
 - `git diff --check`：通过。
@@ -80,4 +80,4 @@ Status: IMPLEMENTED
 - Personal Center 偏好页只保留涨跌颜色、默认市场和默认 K 线周期；语言仍由 Header 选择。偏好绑定真实用户并跨会话持久化，首次进入行情时应用默认市场/周期，用户之后的手动选择不会被自动覆盖。
 - AccountProfile API 的显示名称写入 Django User 的 `first_name`（trim 后 1–50 个 Unicode 字符），邮箱、tier、额度、AI 豆和权限字段不可由资料接口修改。头像替换遵守“先保存新文件、再提交数据库、最后清理旧文件”；删除同样只操作当前账户。
 - AI 豆仍是未来充值后永久有效的独立余额；当前 `status=not_enabled`、`balance=null`、`permanent=true`，不包含任何周期重置字段，也未伪造余额、Pro entitlement 或会员到期日。
-- 最终验证：`python manage.py test core` 通过 76 个测试；`python manage.py check` 通过（仅有 Django `W042` 模型主键 warning）；`python manage.py makemigrations --check` 返回 No changes detected；`npm run build` 与 `git diff --check` 均通过。
+- 最终验证：`python manage.py test core` 通过 77 个测试；`python manage.py check` 通过（仅有 Django `W042` 模型主键 warning）；`python manage.py makemigrations --check` 返回 No changes detected；`npm run build` 与 `git diff --check` 均通过。
