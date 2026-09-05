@@ -11,12 +11,15 @@ from urllib.request import Request, urlopen
 from django.conf import settings
 from django.contrib.auth import get_user_model, login, logout
 from django.contrib.auth.password_validation import validate_password
+from django.db.models import Q
 from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 from futu import AuType, KLType, OpenQuoteContext, RET_OK
 from formula_editor.models import Formula
+from .models import MarketSymbol
+from .symbol_catalog import FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 
 PERIODS = {"1分": KLType.K_1M, "5分": KLType.K_5M, "15分": KLType.K_15M, "30分": KLType.K_30M, "60分": KLType.K_60M, "2小时": KLType.K_120M, "4小时": KLType.K_240M, "日线": KLType.K_DAY, "周线": KLType.K_WEEK, "月线": KLType.K_MON}
 KLINE_PAGE_SIZE = 1000
@@ -344,6 +347,130 @@ def indicator_data(item, include_source=False):
     if include_source:
         data["source"] = item.source
     return data
+
+
+def symbol_data(item):
+    return {
+        "code": item.code,
+        "name": item.name,
+        "market": item.market,
+        "exchange": item.exchange,
+        "security_type": item.security_type,
+        "active": item.active,
+        "provider": item.provider,
+        "source": item.provider,
+        "provider_symbol": item.provider_symbol,
+        "market_cap": float(item.market_cap) if item.market_cap is not None else None,
+        "market_cap_currency": item.market_cap_currency,
+        "market_cap_updated_at": item.market_cap_updated_at.isoformat() if item.market_cap_updated_at else None,
+        "catalog_updated_at": item.catalog_updated_at.isoformat(),
+    }
+
+
+def _market_catalog_queryset(market):
+    return MarketSymbol.objects.filter(market=market, active=True, security_type="STOCK")
+
+
+def _catalog_status(market, leaders_available=None):
+    definition = MARKET_DEFINITIONS.get(market)
+    if definition is None:
+        return {
+            "market": market,
+            "name": "加密资产" if market == "crypto" else market,
+            "provider": None,
+            "catalog_available": False,
+            "leaders_available": False,
+            "status": "unavailable",
+            "error": "真实数据源未接入" if market == "crypto" else "不支持的市场",
+        }
+    catalog_available = _market_catalog_queryset(market).exists()
+    if leaders_available is None:
+        leaders_available = _market_catalog_queryset(market).filter(market_cap__gt=0).exists()
+    latest = _market_catalog_queryset(market).order_by("-catalog_updated_at").first()
+    status_error = None
+    if not catalog_available:
+        status_error = "真实证券目录尚未同步"
+    elif not leaders_available:
+        status_error = "真实总市值榜单暂不可用"
+    return {
+        "market": market,
+        "name": definition.name,
+        "provider": FUTU_PROVIDER,
+        "catalog_available": catalog_available,
+        "leaders_available": leaders_available,
+        "status": "ok" if catalog_available else "unavailable",
+        "error": status_error,
+        "updated_at": latest.catalog_updated_at.isoformat() if latest else None,
+    }
+
+
+@require_GET
+@api_terminal_required
+def markets(request):
+    return json({"markets": [_catalog_status(market) for market in SUPPORTED_MARKETS] + [_catalog_status("crypto")]})
+
+
+def _parse_catalog_paging(request):
+    try:
+        limit = int(request.GET.get("limit", 20))
+        page = int(request.GET.get("page", 1))
+    except ValueError:
+        return None, None, "limit 和 page 必须是整数"
+    if limit < 1 or limit > 50:
+        return None, None, "limit 必须在 1 到 50 之间"
+    if page < 1:
+        return None, None, "page 必须是正整数"
+    return limit, page, None
+
+
+def _catalog_response(market, items, query="", page=1, limit=5, total=None, mode="leaders", error=None):
+    status = _catalog_status(market, leaders_available=bool(items) if mode == "leaders" else None)
+    return json({
+        **status,
+        "query": query,
+        "page": page,
+        "limit": limit,
+        "total": len(items) if total is None else total,
+        "mode": mode,
+        "leader_metric": "market_cap" if mode == "leaders" else None,
+        "items": [symbol_data(item) for item in items],
+        **({"error": error} if error else {}),
+    })
+
+
+@require_GET
+@api_terminal_required
+def market_leaders(request, market):
+    if market not in MARKET_DEFINITIONS:
+        return _catalog_response(market, [], mode="leaders", error="真实数据源未接入") if market == "crypto" else json({"error": "不支持的市场"}, 400)
+    metric = request.GET.get("metric", "market_cap").strip() or "market_cap"
+    leader_metrics = {"market_cap": "-market_cap"}
+    if metric not in leader_metrics:
+        return json({"error": "不支持的榜单指标"}, 400)
+    items = list(_market_catalog_queryset(market).filter(**{f"{metric}__gt": 0}).order_by(leader_metrics[metric], "code")[:5])
+    return _catalog_response(market, items, limit=5, mode="leaders")
+
+
+@require_GET
+@api_terminal_required
+def symbols(request, market):
+    if market not in MARKET_DEFINITIONS:
+        return _catalog_response(market, [], mode="unavailable", error="真实数据源未接入") if market == "crypto" else json({"error": "不支持的市场"}, 400)
+    query = request.GET.get("q", "").strip()
+    if len(query) > 80:
+        return json({"error": "搜索内容过长"}, 400)
+    if not query:
+        return market_leaders(request, market)
+    limit, page, error = _parse_catalog_paging(request)
+    if error:
+        return json({"error": error}, 400)
+    queryset = _market_catalog_queryset(market).filter(
+        Q(code__icontains=query) | Q(name__icontains=query)
+    ).order_by("name", "code")
+    total = queryset.count()
+    start = (page - 1) * limit
+    items = list(queryset[start:start + limit])
+    return _catalog_response(market, items, query=query, page=page, limit=limit, total=total, mode="search")
 
 
 @require_GET

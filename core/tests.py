@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sqlite3
 import tempfile
+from decimal import Decimal
 from types import SimpleNamespace
 from datetime import datetime, timezone as datetime_timezone
 from unittest import mock
@@ -18,6 +19,8 @@ from django.contrib.auth import get_user_model
 from futu import RET_OK
 
 from formula_editor.models import Formula
+from .models import MarketSymbol
+from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol
 from .views import bar_rows
 
 
@@ -174,6 +177,186 @@ class AuthenticationApiTests(TestCase):
         self.client.post('/api/auth/guest/')
         response = self.client.post('/api/ai-analysis/', data=json.dumps({'code': 'SH.600519'}), content_type='application/json')
         self.assertEqual(response.status_code, 403)
+
+
+class SymbolCatalogSyncTests(TestCase):
+    def symbol(self, code, name, market='cn', active=True, exchange='CN_SH'):
+        return ProviderSymbol(code, name, market, exchange, 'STOCK', active)
+
+    def run_sync(self, snapshot, market='cn'):
+        class FakeProvider:
+            def fetch_market(self, requested_market):
+                self.requested_market = requested_market
+                return snapshot
+
+        with patch('core.management.commands.sync_symbol_catalog.FutuOpenDAdapter', FakeProvider):
+            output = io.StringIO()
+            call_command('sync_symbol_catalog', market=market, stdout=output)
+        return output.getvalue()
+
+    def test_sync_is_idempotent_and_updates_name_and_status(self):
+        snapshot = ProviderCatalogSnapshot(
+            'cn',
+            (self.symbol('SH.600001', '甲公司'), self.symbol('SZ.000001', '乙公司')),
+            {'SH.600001': Decimal('1200000000'), 'SZ.000001': Decimal('900000000')},
+        )
+        first = self.run_sync(snapshot)
+        second = self.run_sync(snapshot)
+        self.assertIn('added=2', first)
+        self.assertIn('added=0', second)
+        self.assertEqual(MarketSymbol.objects.count(), 2)
+
+        changed = ProviderCatalogSnapshot('cn', (self.symbol('SH.600001', '甲公司（更名）', active=False),), {'SH.600001': Decimal('1300000000')})
+        self.run_sync(changed)
+        row = MarketSymbol.objects.get(code='SH.600001')
+        self.assertEqual(row.name, '甲公司（更名）')
+        self.assertFalse(row.active)
+        self.assertTrue(MarketSymbol.objects.filter(code='SZ.000001', active=False).exists())
+
+    def test_provider_missing_symbol_is_inactivated_not_deleted(self):
+        MarketSymbol.objects.create(
+            code='HK.09999', name='历史证券', market='hk', exchange='HK_MAINBOARD',
+            security_type='STOCK', provider='futu-opend', provider_symbol='HK.09999',
+        )
+        snapshot = ProviderCatalogSnapshot('hk', (), {})
+        output = self.run_sync(snapshot, market='hk')
+        self.assertIn('inactive=1', output)
+        row = MarketSymbol.objects.get(code='HK.09999')
+        self.assertFalse(row.active)
+        self.assertEqual(MarketSymbol.objects.count(), 1)
+
+    def test_one_market_failure_does_not_block_other_markets(self):
+        snapshots = {
+            'cn': ProviderCatalogSnapshot('cn', (self.symbol('SH.600001', '甲公司'),), {'SH.600001': Decimal('10')}),
+            'us': ProviderCatalogSnapshot('us', (self.symbol('US.TEST', 'Test Corp', 'us', exchange='US_NYSE'),), {'US.TEST': Decimal('20')}),
+        }
+
+        class FakeProvider:
+            def fetch_market(self, market):
+                if market == 'hk':
+                    raise RuntimeError('provider unavailable')
+                return snapshots[market]
+
+        with patch('core.management.commands.sync_symbol_catalog.FutuOpenDAdapter', FakeProvider):
+            output = io.StringIO()
+            call_command('sync_symbol_catalog', stdout=output)
+        self.assertIn('market=hk status=error', output.getvalue())
+        self.assertTrue(MarketSymbol.objects.filter(code='SH.600001').exists())
+        self.assertTrue(MarketSymbol.objects.filter(code='US.TEST').exists())
+
+    def test_market_cap_failure_clears_stale_leader_values(self):
+        MarketSymbol.objects.create(
+            code='US.TEST', name='Test Corp', market='us', exchange='US_NYSE', security_type='STOCK',
+            provider='futu-opend', provider_symbol='US.TEST', market_cap=Decimal('100'), market_cap_currency='USD',
+        )
+        snapshot = ProviderCatalogSnapshot(
+            'us', (self.symbol('US.TEST', 'Test Corp', 'us', exchange='US_NYSE'),), {}, 'market_cap_fetch_failed'
+        )
+        self.run_sync(snapshot, market='us')
+        row = MarketSymbol.objects.get(code='US.TEST')
+        self.assertIsNone(row.market_cap)
+        self.assertIsNone(row.market_cap_updated_at)
+
+    def test_futu_adapter_maps_stock_catalog_and_filters_invalid_caps(self):
+        class Frame:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def itertuples(self, index=False):
+                return iter(self.rows)
+
+        class Client:
+            def get_stock_basicinfo(self, market, stock_type):
+                return 0, Frame([
+                    SimpleNamespace(code='HK.00001', name='真实公司', stock_type='STOCK', exchange_type='HK_MAINBOARD', delisting=False),
+                    SimpleNamespace(code='HK.00002', name='ETF fixture', stock_type='ETF', exchange_type='HK_MAINBOARD', delisting=False),
+                ])
+
+            def get_stock_filter(self, *args, **kwargs):
+                return 0, (False, 2, [
+                    SimpleNamespace(stock_code='HK.00001', market_val='123.45'),
+                    SimpleNamespace(stock_code='HK.00002', market_val='nan'),
+                ])
+
+            def close(self):
+                pass
+
+        snapshot = FutuOpenDAdapter(context_factory=Client).fetch_market('hk')
+        self.assertEqual([item.code for item in snapshot.symbols], ['HK.00001'])
+        self.assertEqual(snapshot.market_caps, {'HK.00001': Decimal('123.4500')})
+
+
+class SymbolCatalogApiTests(TestCase):
+    def setUp(self):
+        self.client.force_login(get_user_model().objects.create_user(username='catalog@example.com', password='A-safe-password-42'))
+        for index in range(6):
+            MarketSymbol.objects.create(
+                code=f'SH.6000{index + 1}', name=f'测试公司{index + 1}', market='cn', exchange='CN_SH',
+                security_type='STOCK', provider='futu-opend', provider_symbol=f'SH.6000{index + 1}',
+                market_cap=Decimal(str((6 - index) * 100)), market_cap_currency='CNY',
+            )
+        MarketSymbol.objects.create(
+            code='SH.000000', name='无效市值', market='cn', exchange='CN_SH', security_type='STOCK',
+            provider='futu-opend', provider_symbol='SH.000000', market_cap=Decimal('0'), market_cap_currency='CNY',
+        )
+        MarketSymbol.objects.create(
+            code='HK.00700', name='港股公司', market='hk', exchange='HK_MAINBOARD', security_type='STOCK',
+            provider='futu-opend', provider_symbol='HK.00700', market_cap=Decimal('999'), market_cap_currency='HKD',
+        )
+
+    def test_leaders_are_sorted_filtered_and_market_specific(self):
+        response = self.client.get('/api/market-leaders/cn/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['code'] for item in response.json()['items']], [f'SH.6000{index}' for index in range(1, 6)])
+        self.assertEqual(response.json()['items'][0]['market_cap_currency'], 'CNY')
+        self.assertNotIn('SH.000000', [item['code'] for item in response.json()['items']])
+
+        hk = self.client.get('/api/market-leaders/hk/').json()
+        self.assertEqual([item['code'] for item in hk['items']], ['HK.00700'])
+
+    def test_search_supports_name_code_limit_and_pagination(self):
+        name_search = self.client.get('/api/symbols/cn/?q=测试公司&limit=2&page=2')
+        self.assertEqual(name_search.status_code, 200)
+        self.assertEqual(name_search.json()['total'], 6)
+        self.assertEqual([item['code'] for item in name_search.json()['items']], ['SH.60003', 'SH.60004'])
+
+        code_search = self.client.get('/api/symbols/cn/?q=60006&limit=10')
+        self.assertEqual([item['code'] for item in code_search.json()['items']], ['SH.60006'])
+
+    def test_empty_search_returns_top_five_and_crypto_is_unavailable(self):
+        response = self.client.get('/api/symbols/cn/')
+        self.assertEqual(response.json()['mode'], 'leaders')
+        self.assertEqual(len(response.json()['items']), 5)
+        crypto = self.client.get('/api/symbols/crypto/').json()
+        self.assertEqual(crypto['status'], 'unavailable')
+        self.assertEqual(crypto['items'], [])
+
+    def test_provider_failure_has_no_static_fallback(self):
+        class FakeProvider:
+            def fetch_market(self, market):
+                raise RuntimeError('OpenD unavailable')
+
+        with patch('core.management.commands.sync_symbol_catalog.FutuOpenDAdapter', FakeProvider):
+            output = io.StringIO()
+            call_command('sync_symbol_catalog', market='us', stdout=output)
+        self.assertIn('market=us status=error', output.getvalue())
+        self.assertFalse(MarketSymbol.objects.filter(market='us').exists())
+
+
+class SymbolCatalogFrontendContractTests(SimpleTestCase):
+    def test_runtime_catalog_has_no_hand_written_securities(self):
+        source = (Path(settings.BASE_DIR) / 'frontend' / 'src' / 'data' / 'marketData.js').read_text(encoding='utf-8')
+        self.assertNotIn('贵州茅台', source)
+        self.assertNotIn('SH.600519', source)
+        self.assertNotIn('CC.BTCUSD', source)
+        self.assertNotIn('symbolsFor', source)
+
+    def test_scheduler_invokes_only_the_sync_management_command(self):
+        source = (Path(settings.BASE_DIR) / 'scripts' / 'manage_symbol_catalog_task.ps1').read_text(encoding='utf-8')
+        self.assertIn('Install', source)
+        self.assertIn('Remove', source)
+        self.assertIn('manage.py sync_symbol_catalog', source)
+        self.assertNotIn('get_stock_basicinfo', source)
 
 
 class RealMarketDataApiTests(TestCase):

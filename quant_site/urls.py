@@ -29,6 +29,9 @@ urlpatterns = [
     path('api/ai-analysis/status/<str:task_id>/', views.ai_analysis_status),
     path('api/quote/<str:code>/', views.quote),
     path('api/kline/<str:code>/', views.kline),
+    path('api/markets/', views.markets),
+    path('api/market-leaders/<str:market>/', views.market_leaders),
+    path('api/symbols/<str:market>/', views.symbols),
     path('api/indicators/', views.indicators),
     path('api/indicator-render/<str:code>/<str:symbol>/', views.indicator_render),
 ]
