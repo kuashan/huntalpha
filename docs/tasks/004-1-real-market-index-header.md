@@ -1,6 +1,6 @@
 # Task 004.1 — 真实大盘指数顶部行情
 
-Status: READY_FOR_CODEX
+Status: IMPLEMENTED
 
 ## 背景
 
@@ -281,3 +281,23 @@ Completion Report 必须包含：
 
 - Result:
 - Notes:
+
+## Completion Report
+
+- Branch: `codex/004-1-real-market-index-header`
+- Implementation: added the provider-neutral `core/market_indices.py` adapter and `GET /api/market-index-snapshots/`; the frontend now renders three real-data market cards and hides crypto from the main page.
+- Verified SDK: `futu-api 10.10.7008`.
+- Verified OpenD mappings and provider names:
+  - `SH.000001` — 上证指数 — snapshot succeeded.
+  - `SZ.399001` — 深证成指 — snapshot succeeded.
+  - `HK.800000` — 恒生指数 — snapshot succeeded.
+  - `HK.800700` — 恒生科技指数 — snapshot succeeded.
+  - `US..SPX` — 标普500指数 — current OpenD returned “暂不支持美股指数”, so unavailable.
+  - `US..IXIC` — 纳斯达克综合指数 — current OpenD returned “暂不支持美股指数”, so unavailable.
+  - `US..DJI` — 道琼斯指数 — current OpenD returned “暂不支持美股指数”, so unavailable.
+- OpenD snapshot strategy: one batch per CN/HK/US market per refresh (3 calls on the normal path); failed market batches are isolated and may be retried per symbol. Current OpenD cannot serve the three US index identities, and their rows remain `— / 暂不可用`; US ETFs are not used as proxies.
+- Refresh strategy: one request on authenticated page entry, then one backend request every 60 seconds; the timer stops when the page is hidden or unmounted.
+- Real public validation: CN and HK returned real `last_price`, `prev_close_price`, `open_price`, `high_price`, `low_price`, and `update_time`; US index snapshots were unavailable because of the provider limitation above.
+- No hard-coded index prices, no static point fallback, no random data, and no fake fallback were added.
+- No migration and no database write were performed. The local Formula table remained at 4 records; Formula source was not read or modified.
+- Checks: `git diff --check`, `python manage.py check`, `python manage.py test core` (49 passed), and `npm run build` passed. Existing Django model warnings remain unchanged.

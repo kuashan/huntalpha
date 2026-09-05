@@ -19,6 +19,7 @@ from django.views.decorators.http import require_GET, require_POST
 from futu import AuType, KLType, OpenQuoteContext, RET_OK
 from formula_editor.models import Formula
 from .models import MarketSymbol
+from .market_indices import FutuOpenDIndexAdapter, grouped_snapshot_response, unavailable_index_items
 from .symbol_catalog import FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 
 PERIODS = {"1分": KLType.K_1M, "5分": KLType.K_5M, "15分": KLType.K_15M, "30分": KLType.K_30M, "60分": KLType.K_60M, "2小时": KLType.K_120M, "4小时": KLType.K_240M, "日线": KLType.K_DAY, "周线": KLType.K_WEEK, "月线": KLType.K_MON}
@@ -408,6 +409,18 @@ def _catalog_status(market, leaders_available=None):
 @api_terminal_required
 def markets(request):
     return json({"markets": [_catalog_status(market) for market in SUPPORTED_MARKETS] + [_catalog_status("crypto")]})
+
+
+@require_GET
+@api_terminal_required
+def market_index_snapshots(request):
+    """Return only real, lightweight OpenD index snapshots for the header."""
+    adapter = FutuOpenDIndexAdapter(context)
+    try:
+        items = adapter.fetch()
+    except Exception:
+        items = unavailable_index_items()
+    return json(grouped_snapshot_response(items))
 
 
 def _parse_catalog_paging(request):

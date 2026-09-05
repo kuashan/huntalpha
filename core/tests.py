@@ -19,6 +19,7 @@ from django.contrib.auth import get_user_model
 from futu import Market, RET_OK
 
 from formula_editor.models import Formula
+from .market_indices import INDEX_DEFINITIONS, FutuOpenDIndexAdapter, convert_snapshot_frame
 from .models import MarketSymbol
 from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
 from .views import bar_rows
@@ -788,3 +789,127 @@ class TongdaxinFormulaEngineTests(SimpleTestCase):
         # 20,000 monetary turnover amount as a 100% rate would incorrectly
         # replace them all and return a value near 20 instead.
         self.assertLess(latest, 15)
+
+
+class MarketIndexSnapshotTests(SimpleTestCase):
+    class Frame:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def iterrows(self):
+            return enumerate(self.rows)
+
+    class Context:
+        def __init__(self, responses):
+            self.responses = responses
+            self.calls = []
+
+        def get_market_snapshot(self, codes):
+            key = tuple(codes)
+            self.calls.append(key)
+            return self.responses[key]
+
+        def close(self):
+            pass
+
+    def test_definitions_contain_the_seven_verified_index_mappings(self):
+        self.assertEqual(len(INDEX_DEFINITIONS), 7)
+        self.assertEqual(
+            [(item.market, item.provider_code, item.provider_name) for item in INDEX_DEFINITIONS],
+            [
+                ("cn", "SH.000001", "上证指数"),
+                ("cn", "SZ.399001", "深证成指"),
+                ("hk", "HK.800000", "恒生指数"),
+                ("hk", "HK.800700", "恒生科技指数"),
+                ("us", "US..SPX", "标普500指数"),
+                ("us", "US..IXIC", "纳斯达克综合指数"),
+                ("us", "US..DJI", "道琼斯指数"),
+            ],
+        )
+
+    def test_snapshot_frame_converts_realistic_public_fields_and_change(self):
+        definition = INDEX_DEFINITIONS[0]
+        items = convert_snapshot_frame(self.Frame([{
+            "code": definition.provider_code,
+            "name": definition.provider_name,
+            "last_price": 105.0,
+            "prev_close_price": 100.0,
+            "open_price": 101.0,
+            "high_price": 106.0,
+            "low_price": 99.0,
+            "update_time": "2026-09-04 15:00:00",
+        }]), (definition,))
+        self.assertEqual(items[0]["status"], "ok")
+        self.assertEqual(items[0]["price"], 105.0)
+        self.assertEqual(items[0]["previous_close"], 100.0)
+        self.assertEqual(items[0]["change"], 5.0)
+        self.assertEqual(items[0]["change_percent"], 5.0)
+        self.assertEqual(items[0]["updated_at"], "2026-09-04 15:00:00")
+
+    def test_invalid_previous_close_never_creates_a_fake_percentage(self):
+        definition = INDEX_DEFINITIONS[0]
+        for previous in (0, None, float("nan")):
+            with self.subTest(previous=previous):
+                item = convert_snapshot_frame(self.Frame([{
+                    "code": definition.provider_code,
+                    "name": definition.provider_name,
+                    "last_price": 105.0,
+                    "prev_close_price": previous,
+                }]), (definition,))[0]
+                self.assertEqual(item["price"], 105.0)
+                self.assertIsNone(item["change"])
+                self.assertIsNone(item["change_percent"])
+                self.assertEqual(item["status"], "partial")
+
+    def test_nan_price_is_unavailable_and_not_returned_as_a_number(self):
+        definition = INDEX_DEFINITIONS[0]
+        item = convert_snapshot_frame(self.Frame([{
+            "code": definition.provider_code,
+            "last_price": float("nan"),
+            "prev_close_price": 100.0,
+        }]), (definition,))[0]
+        self.assertIsNone(item["price"])
+        self.assertIsNone(item["change"])
+        self.assertIsNone(item["change_percent"])
+        self.assertEqual(item["status"], "unavailable")
+
+    def test_market_batches_are_isolated_and_a_missing_index_does_not_hide_others(self):
+        definitions_by_market = {
+            market: tuple(item for item in INDEX_DEFINITIONS if item.market == market)
+            for market in ("cn", "hk", "us")
+        }
+        responses = {}
+        for market, definitions in definitions_by_market.items():
+            rows = [{
+                "code": definition.provider_code,
+                "name": definition.provider_name,
+                "last_price": 100.0 + index,
+                "prev_close_price": 100.0,
+            } for index, definition in enumerate(definitions) if definition.key != "shenzhen"]
+            responses[tuple(item.provider_code for item in definitions)] = (RET_OK, self.Frame(rows))
+        context = self.Context(responses)
+        items = FutuOpenDIndexAdapter(lambda: context).fetch()
+        by_key = {item["code"]: item for item in items}
+        self.assertEqual(len(context.calls), 3)
+        self.assertEqual(by_key["SH.000001"]["status"], "ok")
+        self.assertEqual(by_key["SZ.399001"]["status"], "unavailable")
+        self.assertEqual(by_key["HK.800000"]["status"], "ok")
+        self.assertEqual(by_key["US..SPX"]["status"], "ok")
+
+    def test_opend_failure_returns_only_unavailable_rows_without_fallback_values(self):
+        items = FutuOpenDIndexAdapter(lambda: (_ for _ in ()).throw(RuntimeError("OpenD unavailable"))).fetch()
+        self.assertEqual(len(items), 7)
+        self.assertTrue(all(item["status"] == "unavailable" for item in items))
+        self.assertTrue(all(item["price"] is None for item in items))
+        self.assertTrue(all(item["change_percent"] is None for item in items))
+
+    def test_frontend_header_uses_only_index_snapshot_data_and_hides_crypto_card(self):
+        app_source = (Path(settings.BASE_DIR) / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+        self.assertIn("const visibleMarkets = computed(() => markets.filter(item => item.code !== 'crypto'))", app_source)
+        self.assertIn('v-for="item in visibleMarkets"', app_source)
+        self.assertIn("/api/market-index-snapshots/", app_source)
+        self.assertIn("displayIndexPrice(index.price)", app_source)
+        self.assertIn("index.status === 'loading'", app_source)
+        self.assertNotIn("v-for=\"item in markets\"", app_source)
+        self.assertNotIn("/api/kline/", app_source)
+        self.assertNotIn("/api/indicator-render/", app_source)
