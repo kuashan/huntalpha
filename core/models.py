@@ -1,8 +1,10 @@
+from django.conf import settings
 from django.db import models
 
 
 class CalibrationDataset(models.Model):
     """Private imported OHLCV source used to reproduce a desktop chart."""
+    id = models.BigAutoField(primary_key=True)
     symbol = models.CharField("证券代码", max_length=32, unique=True)
     name = models.CharField("证券名称", max_length=80)
     period = models.CharField("周期", max_length=16, default="日线")
@@ -21,6 +23,7 @@ class Indicator(models.Model):
         MAIN = "main", "主图"
         SUB = "sub", "副图"
 
+    id = models.BigAutoField(primary_key=True)
     name = models.CharField("指标名称", max_length=80)
     code = models.CharField("指标代码", max_length=32, unique=True)
     placement = models.CharField("显示位置", max_length=8, choices=Placement.choices, default=Placement.SUB)
@@ -71,3 +74,42 @@ class MarketSymbol(models.Model):
 
     def __str__(self):
         return f"{self.code} · {self.name}"
+
+
+class WatchlistEntry(models.Model):
+    """A durable account-to-security relationship, without copied quote data."""
+
+    id = models.AutoField(primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="watchlist_entries",
+        verbose_name="用户",
+    )
+    symbol = models.ForeignKey(
+        MarketSymbol,
+        on_delete=models.PROTECT,
+        related_name="watchlist_entries",
+        verbose_name="证券",
+    )
+    created_at = models.DateTimeField("创建时间", auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "symbol"],
+                name="core_watch_user_symbol_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["user", "created_at"],
+                name="core_watch_user_created_idx",
+            ),
+        ]
+        verbose_name = "账户自选"
+        verbose_name_plural = "账户自选"
+
+    def __str__(self):
+        return f"{self.user_id} · {self.symbol_id}"

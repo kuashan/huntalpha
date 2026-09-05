@@ -1,5 +1,6 @@
 import hashlib
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -14,15 +15,17 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.core.management import call_command, CommandError
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.db import IntegrityError, transaction
+from django.db.models.deletion import ProtectedError
+from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.contrib.auth import get_user_model
 from futu import Market, RET_OK
 
 from formula_editor.models import Formula
 from .market_indices import INDEX_DEFINITIONS, FutuOpenDIndexAdapter, convert_snapshot_frame
-from .models import MarketSymbol
+from .models import MarketSymbol, WatchlistEntry
 from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
-from .views import bar_rows
+from .views import _watchlist_create, bar_rows
 
 
 class LocalDatabaseBackupCommandTests(SimpleTestCase):
@@ -953,5 +956,190 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
     def test_branding_keeps_task_004_and_004_1_runtime_contracts(self):
         self.assertIn("visibleMarkets", self.app_source)
         self.assertIn("/api/market-index-snapshots/", self.app_source)
-        self.assertIn("const endpoint = search ? 'symbols' : 'market-leaders'", self.app_source)
-        self.assertIn("`${API_BASE}/api/${endpoint}/", self.app_source)
+        self.assertIn("const endpoint = search ? `symbols/${market.value.code}/` : 'watchlist/'", self.app_source)
+        self.assertIn("toggleWatchlist", self.app_source)
+        self.assertIn("@click.stop=\"toggleWatchlist(item)\"", self.app_source)
+        self.assertIn("`${API_BASE}/api/${endpoint}?${params}`", self.app_source)
+
+
+class WatchlistModelAndApiTests(TestCase):
+    def setUp(self):
+        self.client = Client(enforce_csrf_checks=True)
+        User = get_user_model()
+        self.user_a = User.objects.create_user(username="watch-a@example.com", email="watch-a@example.com", password="safe-password-123")
+        self.user_b = User.objects.create_user(username="watch-b@example.com", email="watch-b@example.com", password="safe-password-123")
+        self.cn_symbols = [self.make_symbol(f"SH.6005{index:02d}", "cn") for index in range(5)]
+        self.hk_symbols = [self.make_symbol(f"HK.000{index:02d}", "hk") for index in range(3)]
+        self.us_symbols = [self.make_symbol(f"US.TEST{index}", "us") for index in range(4)]
+        self.inactive = self.make_symbol("SH.609999", "cn", active=False)
+
+    @staticmethod
+    def make_symbol(code, market, active=True):
+        return MarketSymbol.objects.create(
+            code=code,
+            name=f"测试证券 {code}",
+            market=market,
+            exchange=market.upper(),
+            security_type="STOCK",
+            active=active,
+            provider="test-provider",
+            provider_symbol=code,
+        )
+
+    def csrf_headers(self):
+        response = self.client.get("/api/csrf/")
+        self.assertEqual(response.status_code, 200)
+        return {"HTTP_X_CSRFTOKEN": self.client.cookies["csrftoken"].value}
+
+    def post_watchlist(self, code, headers=None):
+        return self.client.post(
+            "/api/watchlist/",
+            data=json.dumps({"code": code}),
+            content_type="application/json",
+            **(headers or self.csrf_headers()),
+        )
+
+    def test_entry_binds_real_user_and_symbol_and_unique_constraint(self):
+        entry = WatchlistEntry.objects.create(user=self.user_a, symbol=self.cn_symbols[0])
+        self.assertEqual(entry.user, self.user_a)
+        self.assertEqual(entry.symbol, self.cn_symbols[0])
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                WatchlistEntry.objects.create(user=self.user_a, symbol=self.cn_symbols[0])
+        WatchlistEntry.objects.create(user=self.user_b, symbol=self.cn_symbols[0])
+        self.assertEqual(WatchlistEntry.objects.filter(symbol=self.cn_symbols[0]).count(), 2)
+
+    def test_user_delete_cascades_entries_but_keeps_symbol(self):
+        WatchlistEntry.objects.create(user=self.user_a, symbol=self.cn_symbols[0])
+        self.user_a.delete()
+        self.assertFalse(WatchlistEntry.objects.filter(symbol=self.cn_symbols[0]).exists())
+        self.assertTrue(MarketSymbol.objects.filter(pk=self.cn_symbols[0].pk).exists())
+
+    def test_watched_symbol_is_protected_from_physical_delete(self):
+        WatchlistEntry.objects.create(user=self.user_a, symbol=self.cn_symbols[0])
+        with self.assertRaises(ProtectedError):
+            with transaction.atomic():
+                self.cn_symbols[0].delete()
+
+    def test_get_isolated_and_total_is_global_across_markets(self):
+        WatchlistEntry.objects.bulk_create([
+            WatchlistEntry(user=self.user_a, symbol=self.cn_symbols[0]),
+            WatchlistEntry(user=self.user_a, symbol=self.hk_symbols[0]),
+            WatchlistEntry(user=self.user_a, symbol=self.us_symbols[0]),
+            WatchlistEntry(user=self.user_b, symbol=self.us_symbols[1]),
+        ])
+        self.client.force_login(self.user_a)
+        payload = self.client.get("/api/watchlist/?market=cn").json()
+        self.assertEqual(payload["total"], 3)
+        self.assertEqual(payload["limit"], 10)
+        self.assertEqual(payload["remaining"], 7)
+        self.assertEqual([item["code"] for item in payload["items"]], [self.cn_symbols[0].code])
+        self.assertNotIn("formula_source", payload["items"][0])
+        self.client.force_login(self.user_b)
+        other = self.client.get("/api/watchlist/?market=us").json()
+        self.assertEqual([item["code"] for item in other["items"]], [self.us_symbols[1].code])
+
+    def test_post_requires_csrf_and_creates_only_real_active_stock(self):
+        self.client.force_login(self.user_a)
+        response = self.client.post(
+            "/api/watchlist/",
+            data=json.dumps({"code": self.cn_symbols[0].code}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+        response = self.post_watchlist(self.cn_symbols[0].code)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["item"]["code"], self.cn_symbols[0].code)
+        self.assertEqual(WatchlistEntry.objects.filter(user=self.user_a).count(), 1)
+
+    def test_duplicate_post_is_idempotent(self):
+        self.client.force_login(self.user_a)
+        first = self.post_watchlist(self.cn_symbols[0].code)
+        second = self.post_watchlist(self.cn_symbols[0].code)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["status"], "already_exists")
+        self.assertEqual(second.json()["total"], 1)
+        self.assertEqual(WatchlistEntry.objects.filter(user=self.user_a).count(), 1)
+
+    def test_create_serializes_quota_check_on_locked_user_row(self):
+        source = inspect.getsource(_watchlist_create)
+        lock_position = source.index("locked_user = get_user_model().objects.select_for_update()")
+        duplicate_position = source.index('WatchlistEntry.objects.select_related("symbol")', lock_position)
+        quota_position = source.index("totals = _watchlist_totals_for_user(locked_user)", duplicate_position)
+        create_position = source.index("WatchlistEntry.objects.create(user=locked_user", quota_position)
+
+        self.assertLess(lock_position, duplicate_position)
+        self.assertLess(duplicate_position, quota_position)
+        self.assertLess(quota_position, create_position)
+        constraints = [
+            constraint for constraint in WatchlistEntry._meta.constraints
+            if constraint.name == "core_watch_user_symbol_uniq"
+        ]
+        self.assertEqual(len(constraints), 1)
+        self.assertEqual(tuple(constraints[0].fields), ("user", "symbol"))
+
+    def test_quota_is_backend_enforced_and_shared_across_markets(self):
+        entries = self.cn_symbols[:4] + self.hk_symbols + self.us_symbols[:3]
+        WatchlistEntry.objects.bulk_create([WatchlistEntry(user=self.user_a, symbol=symbol) for symbol in entries])
+        self.client.force_login(self.user_a)
+        response = self.post_watchlist(self.us_symbols[3].code)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "watchlist_limit_reached")
+        self.assertEqual(response.json()["total"], 10)
+        self.assertEqual(response.json()["limit"], 10)
+        self.assertEqual(WatchlistEntry.objects.filter(user=self.user_a).count(), 10)
+
+    def test_free_account_can_add_ten_entries_before_quota_is_reached(self):
+        entries = self.cn_symbols[:4] + self.hk_symbols + self.us_symbols[:3]
+        self.client.force_login(self.user_a)
+        responses = [self.post_watchlist(symbol.code) for symbol in entries]
+        self.assertTrue(all(response.status_code == 201 for response in responses))
+        self.assertEqual(responses[-1].json()["total"], 10)
+        self.assertEqual(responses[-1].json()["remaining"], 0)
+        self.assertEqual(WatchlistEntry.objects.filter(user=self.user_a).count(), 10)
+
+    def test_inactive_and_unknown_symbols_are_rejected(self):
+        self.client.force_login(self.user_a)
+        inactive = self.post_watchlist(self.inactive.code)
+        missing = self.post_watchlist("SH.000000")
+        self.assertEqual(inactive.status_code, 409)
+        self.assertEqual(inactive.json()["code"], "symbol_inactive")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["code"], "symbol_not_found")
+        self.assertEqual(WatchlistEntry.objects.count(), 0)
+
+    def test_visitor_cannot_persist_watchlist_and_crypto_preview_is_not_collectible(self):
+        self.client.post("/api/auth/guest/")
+        response = self.post_watchlist(self.cn_symbols[0].code)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "login_required")
+        crypto = self.client.get("/api/watchlist/?market=crypto").json()
+        self.assertEqual(crypto["status"], "login_required")
+        self.assertEqual(crypto["items"], [])
+        self.assertEqual(WatchlistEntry.objects.count(), 0)
+
+    def test_delete_isolated_to_current_user_and_updates_count(self):
+        WatchlistEntry.objects.create(user=self.user_b, symbol=self.cn_symbols[0])
+        self.client.force_login(self.user_a)
+        response = self.client.delete(
+            f"/api/watchlist/{self.cn_symbols[0].code}/",
+            **self.csrf_headers(),
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(WatchlistEntry.objects.filter(user=self.user_b, symbol=self.cn_symbols[0]).exists())
+        WatchlistEntry.objects.create(user=self.user_a, symbol=self.cn_symbols[0])
+        response = self.client.delete(
+            f"/api/watchlist/{self.cn_symbols[0].code}/",
+            **self.csrf_headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total"], 0)
+
+    def test_search_returns_watchlisted_annotation_without_private_fields(self):
+        WatchlistEntry.objects.create(user=self.user_a, symbol=self.cn_symbols[0])
+        self.client.force_login(self.user_a)
+        payload = self.client.get(f"/api/symbols/cn/?q={self.cn_symbols[0].code}&limit=10&page=1").json()
+        self.assertEqual(payload["items"][0]["watchlisted"], True)
+        self.assertNotIn("formula_source", payload["items"][0])
+        self.assertEqual(payload["watchlist_total"], 1)

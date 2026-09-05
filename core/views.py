@@ -11,16 +11,19 @@ from urllib.request import Request, urlopen
 from django.conf import settings
 from django.contrib.auth import get_user_model, login, logout
 from django.contrib.auth.password_validation import validate_password
+from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
 from django.core.exceptions import ValidationError
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_GET, require_POST
+from django.middleware.csrf import get_token
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from futu import AuType, KLType, OpenQuoteContext, RET_OK
 from formula_editor.models import Formula
-from .models import MarketSymbol
+from .models import MarketSymbol, WatchlistEntry
 from .market_indices import FutuOpenDIndexAdapter, grouped_snapshot_response, unavailable_index_items
 from .symbol_catalog import FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
+from .watchlist import watchlist_limit_for_user
 
 PERIODS = {"1分": KLType.K_1M, "5分": KLType.K_5M, "15分": KLType.K_15M, "30分": KLType.K_30M, "60分": KLType.K_60M, "2小时": KLType.K_120M, "4小时": KLType.K_240M, "日线": KLType.K_DAY, "周线": KLType.K_WEEK, "月线": KLType.K_MON}
 KLINE_PAGE_SIZE = 1000
@@ -31,8 +34,8 @@ KLINE_LOOKBACK_DAYS = {"1分": 14, "5分": 45, "15分": 90, "30分": 180, "60分
 def json(data, status=200):
     result = JsonResponse(data, status=status)
     result["Access-Control-Allow-Origin"] = "http://127.0.0.1:5173"
-    result["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    result["Access-Control-Allow-Headers"] = "Content-Type"
+    result["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+    result["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
     result["Access-Control-Allow-Credentials"] = "true"
     return result
 
@@ -196,6 +199,132 @@ def auth_logout(request):
 def auth_guest(request):
     request.session["quantscope_visitor"] = True
     return json({"authenticated": True, "visitor": True, "user": {"email": "", "name": "访客模式"}})
+
+
+@require_GET
+@ensure_csrf_cookie
+def csrf_token(request):
+    return json({"csrfToken": get_token(request)})
+
+
+def _watchlist_error(message, code, request, status):
+    return json({"error": message, "code": code, **_watchlist_totals(request)}, status)
+
+
+def _watchlist_get(request):
+    market = request.GET.get("market", "").strip().lower() or None
+    if market not in {None, "cn", "hk", "us", "crypto"}:
+        return json({"error": "不支持的市场"}, 400)
+    totals = _watchlist_totals(request)
+    if not request.user.is_authenticated:
+        return json({
+            "items": [],
+            "market": market,
+            "mode": "watchlist",
+            "status": "login_required",
+            "error": "登录或注册后使用自选功能",
+            **totals,
+        })
+    if market == "crypto":
+        return json({
+            "items": [],
+            "market": market,
+            "mode": "watchlist",
+            "status": "unavailable",
+            "error": "真实数据源尚未接入",
+            **totals,
+        })
+    entries = WatchlistEntry.objects.select_related("symbol").filter(user=request.user)
+    if market:
+        entries = entries.filter(symbol__market=market)
+    return json({
+        "items": [watchlist_item_data(entry) for entry in entries],
+        "market": market,
+        "mode": "watchlist",
+        "status": "ok",
+        **totals,
+    })
+
+
+def _watchlist_create(request):
+    if is_visitor(request):
+        return _watchlist_error("登录或注册后使用自选功能", "login_required", request, 403)
+    payload = auth_body(request)
+    code = str(payload.get("code", "")).strip().upper() if isinstance(payload, dict) else ""
+    if not code or len(code) > 32:
+        return _watchlist_error("证券代码无效", "invalid_symbol_code", request, 400)
+    symbol = MarketSymbol.objects.filter(code__iexact=code).first()
+    if symbol is None:
+        return _watchlist_error("未找到真实证券", "symbol_not_found", request, 404)
+    if not symbol.active:
+        return _watchlist_error("该证券当前不可用", "symbol_inactive", request, 409)
+    if symbol.security_type != "STOCK":
+        return _watchlist_error("仅支持普通股票", "symbol_unavailable", request, 409)
+    try:
+        with transaction.atomic():
+            locked_user = get_user_model().objects.select_for_update().get(pk=request.user.pk)
+            entry = WatchlistEntry.objects.select_related("symbol").filter(
+                user=locked_user, symbol=symbol
+            ).first()
+            if entry is not None:
+                return json({
+                    "status": "already_exists",
+                    "item": watchlist_item_data(entry),
+                    **_watchlist_totals_for_user(locked_user),
+                })
+            totals = _watchlist_totals_for_user(locked_user)
+            if totals["total"] >= totals["limit"]:
+                return json({
+                    "error": "自选已满",
+                    "code": "watchlist_limit_reached",
+                    **totals,
+                }, 409)
+            entry = WatchlistEntry.objects.create(user=locked_user, symbol=symbol)
+            return json({
+                "status": "created",
+                "item": watchlist_item_data(entry),
+                **_watchlist_totals_for_user(locked_user),
+            }, 201)
+    except IntegrityError:
+        # The unique constraint makes a concurrent duplicate idempotent even
+        # when two browser requests arrive before either response returns.
+        entry = WatchlistEntry.objects.select_related("symbol").filter(
+            user=request.user, symbol=symbol
+        ).first()
+        if entry is not None:
+            return json({
+                "status": "already_exists",
+                "item": watchlist_item_data(entry),
+                **_watchlist_totals(request),
+            })
+        return _watchlist_error("无法创建自选", "watchlist_write_conflict", request, 409)
+    except OperationalError:
+        return _watchlist_error("自选正在被其他请求更新，请稍后重试", "watchlist_busy", request, 503)
+
+
+@require_http_methods(["GET", "POST"])
+@api_terminal_required
+def watchlist(request):
+    return _watchlist_get(request) if request.method == "GET" else _watchlist_create(request)
+
+
+@require_http_methods(["DELETE"])
+@api_terminal_required
+def watchlist_delete(request, code):
+    if is_visitor(request):
+        return _watchlist_error("登录或注册后使用自选功能", "login_required", request, 403)
+    normalized = str(code).strip().upper()
+    entry = WatchlistEntry.objects.filter(
+        user=request.user, symbol__code__iexact=normalized
+    ).first()
+    if entry is None:
+        return _watchlist_error("该证券不在自选中", "not_watchlisted", request, 404)
+    entry.delete()
+    return json({
+        "status": "removed",
+        "symbol_code": normalized,
+        **_watchlist_totals(request),
+    })
 
 def context():
     try:
@@ -368,6 +497,50 @@ def symbol_data(item):
     }
 
 
+def _watchlist_totals_for_user(user):
+    if not user.is_authenticated:
+        return {"total": 0, "limit": 0, "remaining": 0}
+    limit = watchlist_limit_for_user(user)
+    total = WatchlistEntry.objects.filter(user=user).count()
+    return {"total": total, "limit": limit, "remaining": max(limit - total, 0)}
+
+
+def _watchlist_totals(request):
+    if not request.user.is_authenticated:
+        return {"total": 0, "limit": 0, "remaining": 0}
+    return _watchlist_totals_for_user(request.user)
+
+
+def _watchlisted_codes(request, items):
+    if not request.user.is_authenticated or not items:
+        return set()
+    codes = [item.code for item in items]
+    return set(
+        WatchlistEntry.objects.filter(
+            user=request.user, symbol__code__in=codes
+        ).values_list("symbol__code", flat=True)
+    )
+
+
+def _catalog_item_data(request, item, watchlisted_codes=None):
+    if watchlisted_codes is None:
+        watchlisted_codes = _watchlisted_codes(request, [item])
+    return {
+        **symbol_data(item),
+        "watchlisted": item.code in watchlisted_codes,
+    }
+
+
+def watchlist_item_data(entry):
+    item = entry.symbol
+    return {
+        "code": item.code,
+        "name": item.name,
+        "market": item.market,
+        "watchlisted": True,
+    }
+
+
 def _market_catalog_queryset(market):
     return MarketSymbol.objects.filter(market=market, active=True, security_type="STOCK")
 
@@ -436,8 +609,10 @@ def _parse_catalog_paging(request):
     return limit, page, None
 
 
-def _catalog_response(market, items, query="", page=1, limit=5, total=None, mode="leaders", error=None):
+def _catalog_response(request, market, items, query="", page=1, limit=5, total=None, mode="leaders", error=None):
     status = _catalog_status(market, leaders_available=bool(items) if mode == "leaders" else None)
+    watchlist_totals = _watchlist_totals(request)
+    watchlisted_codes = _watchlisted_codes(request, items)
     return json({
         **status,
         "query": query,
@@ -446,7 +621,10 @@ def _catalog_response(market, items, query="", page=1, limit=5, total=None, mode
         "total": len(items) if total is None else total,
         "mode": mode,
         "leader_metric": "market_cap" if mode == "leaders" else None,
-        "items": [symbol_data(item) for item in items],
+        "items": [_catalog_item_data(request, item, watchlisted_codes) for item in items],
+        "watchlist_total": watchlist_totals["total"],
+        "watchlist_limit": watchlist_totals["limit"],
+        "watchlist_remaining": watchlist_totals["remaining"],
         **({"error": error} if error else {}),
     })
 
@@ -455,20 +633,20 @@ def _catalog_response(market, items, query="", page=1, limit=5, total=None, mode
 @api_terminal_required
 def market_leaders(request, market):
     if market not in MARKET_DEFINITIONS:
-        return _catalog_response(market, [], mode="leaders", error="真实数据源未接入") if market == "crypto" else json({"error": "不支持的市场"}, 400)
+        return _catalog_response(request, market, [], mode="leaders", error="真实数据源未接入") if market == "crypto" else json({"error": "不支持的市场"}, 400)
     metric = request.GET.get("metric", "market_cap").strip() or "market_cap"
     leader_metrics = {"market_cap": "-market_cap"}
     if metric not in leader_metrics:
         return json({"error": "不支持的榜单指标"}, 400)
     items = list(_market_catalog_queryset(market).filter(**{f"{metric}__gt": 0}).order_by(leader_metrics[metric], "code")[:5])
-    return _catalog_response(market, items, limit=5, mode="leaders")
+    return _catalog_response(request, market, items, limit=5, mode="leaders")
 
 
 @require_GET
 @api_terminal_required
 def symbols(request, market):
     if market not in MARKET_DEFINITIONS:
-        return _catalog_response(market, [], mode="unavailable", error="真实数据源未接入") if market == "crypto" else json({"error": "不支持的市场"}, 400)
+        return _catalog_response(request, market, [], mode="unavailable", error="真实数据源未接入") if market == "crypto" else json({"error": "不支持的市场"}, 400)
     query = request.GET.get("q", "").strip()
     if len(query) > 80:
         return json({"error": "搜索内容过长"}, 400)
@@ -483,7 +661,7 @@ def symbols(request, market):
     total = queryset.count()
     start = (page - 1) * limit
     items = list(queryset[start:start + limit])
-    return _catalog_response(market, items, query=query, page=page, limit=limit, total=total, mode="search")
+    return _catalog_response(request, market, items, query=query, page=page, limit=limit, total=total, mode="search")
 
 
 @require_GET

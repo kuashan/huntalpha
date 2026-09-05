@@ -157,6 +157,18 @@ STATIC_URL = 'static/'
 DSA_API_BASE_URL = 'http://127.0.0.1:8000'
 AI_CREDITS_ENFORCED = False
 
+# Watchlist quotas are configuration, not schema.  Until a real entitlement
+# model exists, every authenticated account uses the Free quota.
+def _watchlist_limit(name, default):
+    try:
+        return max(int(os.environ.get(name, default)), 0)
+    except (TypeError, ValueError):
+        return default
+
+
+HUNTALPHA_WATCHLIST_FREE_LIMIT = _watchlist_limit('HUNTALPHA_WATCHLIST_FREE_LIMIT', 10)
+HUNTALPHA_WATCHLIST_PRO_LIMIT = _watchlist_limit('HUNTALPHA_WATCHLIST_PRO_LIMIT', 20)
+
 # Vue's local development origin is allowed to retain Django's session cookie.
 CSRF_TRUSTED_ORIGINS = ['http://127.0.0.1:5173']
 
