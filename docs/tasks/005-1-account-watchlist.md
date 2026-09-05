@@ -27,8 +27,8 @@ Status: IMPLEMENTED
 ## Completion Report
 
 - 分支：`codex/005-1-account-watchlist`
-- Commit：待提交
-- PR：待创建
+- 实现 Commit：`b7ad4e5`（后续 Completion Report 文档更新另有提交）
+- PR：[#17](https://github.com/kuashan/huntalpha/pull/17)，目标 `main`，未合并
 - 自动测试：`python manage.py test core`，64 项全部通过。
 - `python manage.py check`：通过，保留既有 MarketSymbol AutoField warning。
 - `npm run build`：通过。
@@ -38,3 +38,14 @@ Status: IMPLEMENTED
 - 正式数据库、备份、日志、session、密钥和 `.env` 未加入 Git。
 - 未实现或伪造 Pro entitlement；当前账户额度按 Free=10。
 - 浏览器已验证真实搜索、☆→黄色★、★→☆、额度计数和 Crypto unavailable 行为。
+
+### 验收明细
+
+- 模型：`WatchlistEntry(user, symbol, created_at)`；`user` 使用 Django 内置认证用户，`symbol` 关联 `MarketSymbol`，`(user, symbol)` 唯一，`(user, created_at)` 索引。
+- API：`GET/POST /api/watchlist/`、`DELETE /api/watchlist/<code>/`；写接口需要 Django CSRF token，账户身份始终来自 session `request.user`。
+- 额度：全市场共享，Free=10、预留 Pro=20；当前没有真实 Pro entitlement，所有账户按 Free=10。第 11 条由后端以 `watchlist_limit_reached`/HTTP 409 拒绝；重复 POST 幂等。
+- Visitor：可读取空状态但不能创建持久自选；Crypto BTC/ETH preview 不是 `MarketSymbol`，不可收藏、不可请求假 quote/K 线。
+- 左栏：无搜索词加载当前市场自选；有搜索词加载当前市场真实目录并带一次性 `watchlisted` 标记；保留 `market_leaders` 后端，不再作为左栏默认请求；移除市值列；☆/★ 点击阻止行选择事件。
+- 性能边界：自选/搜索仅请求可见证券的轻量 quote/change；未为整个列表加载 K 线、Formula 或 AI。
+- 迁移：正式数据库已在备份并确认 `integrity_check: ok` 后应用 `0007`、`0008`；未执行 flush/reset，Formula 仍为 4 条。
+- 浏览器：真实搜索 `600519` 返回真实证券与 OpenD 报价；添加后显示黄色 ★ 与 `1 / 10`，取消后恢复 ☆ 与 `0 / 10`；Crypto 显示 unavailable，无假价格。
