@@ -4,6 +4,7 @@ import MarketChart from './components/MarketChart.vue'
 import IndicatorManager from './components/IndicatorManager.vue'
 import AuthGate from './components/AuthGate.vue'
 import AiAnalysis from './components/AiAnalysis.vue'
+import HuntAlphaLogo from './components/HuntAlphaLogo.vue'
 import { commonIndicators, markets } from './data/marketData'
 import { languages, locale, setLocale, t } from './i18n'
 const API_BASE = 'http://127.0.0.1:8003'
@@ -146,11 +147,11 @@ onMounted(async () => { document.addEventListener('visibilitychange', handleVisi
 onBeforeUnmount(() => { window.clearTimeout(searchTimer); stopMarketIndexRefresh(); document.removeEventListener('visibilitychange', handleVisibilityChange) })
 </script>
 <template>
-  <div v-if="checkingSession" class="boot-screen">QuantScope…</div>
+  <div v-if="checkingSession" class="boot-screen">HuntAlpha…</div>
   <AuthGate v-else-if="!user" @authenticated="authenticated" />
   <AiAnalysis v-else-if="analysisCode" :code="analysisCode" :name="analysisName" :market="analysisMarket" @back="backToTerminal" />
   <main v-else class="terminal">
-    <header><div class="brand"><b>Q</b> QuantScope <small>{{ visitor ? t('visitor') : t('pro') }}</small></div><nav><a class="active">{{ t('market') }}</a><a>{{ t('watchlist') }}</a><a>{{ t('strategy') }}</a><a>{{ t('news') }}</a></nav><div class="feed">● {{ visitor ? t('visitorAi') : user.name }}</div><select class="terminal-language" :value="locale" @change="setLocale($event.target.value)"><option v-for="item in languages" :key="item.code" :value="item.code">{{ item.label }}</option></select><button class="logout" @click="signOut">{{ t('logout') }}</button></header>
+    <header><div class="brand"><HuntAlphaLogo class="brand-logo" /><span class="brand-name">HuntAlpha</span><small class="brand-hub">HUB</small></div><nav><a class="active">{{ t('market') }}</a><a>{{ t('watchlist') }}</a><a>{{ t('strategy') }}</a><a>{{ t('news') }}</a></nav><div class="feed"><span class="feed-dot">●</span><span>{{ visitor ? t('visitor') : user.name }}</span></div><select class="terminal-language" :value="locale" @change="setLocale($event.target.value)"><option v-for="item in languages" :key="item.code" :value="item.code">{{ item.label }}</option></select><button class="logout" @click="signOut">{{ t('logout') }}</button></header>
     <section class="markets" aria-label="真实大盘指数"><button v-for="item in visibleMarkets" :key="item.code" class="market-card" :class="{active: market.code === item.code}" @click="switchMarket(item)"><div class="market-card-title"><strong>{{ item.name }}</strong><small>futu-opend</small></div><div v-for="index in indexRowsForMarket(item.code)" :key="index.code || index.name" class="market-index"><span class="market-index-name">{{ index.name }}</span><span class="market-index-values"><b>{{ displayIndexPrice(index.price) }}</b><em :class="{down: index.change_percent < 0}">{{ displayIndexChange(index.change_percent) }}</em></span><small v-if="index.updated_at" class="market-index-updated">{{ index.updated_at }}</small><small v-else class="market-index-status">{{ index.status === 'loading' ? t('indexLoading') : t('indexUnavailable') }}</small></div></button></section>
     <div class="workspace"><aside><div class="aside-title">{{ t('marketList') }} <b>{{ market.name }}</b></div><label class="search">⌕ <input v-model="query" :placeholder="t('search')" /></label><div class="heads"><span>{{ t('nameCode') }}</span><span>{{ t('latest') }}</span><span>{{ t('change') }}</span></div><button v-for="item in list" :key="item.code" class="symbol" :class="{selected: selected?.code === item.code}" :title="symbolTitle(item)" :aria-label="symbolTitle(item)" @click="selected = item"><span class="symbol-name"><strong>{{ item.name }}</strong><small>{{ item.code }}</small><small v-if="item.market_cap != null" class="symbol-cap">{{ t('marketCap') }} {{ displayMarketCap(item.market_cap, item.market_cap_currency) }}</small></span><b>{{ displayPrice(itemQuote(item)?.price) }}</b><em :class="{down:itemQuote(item)?.change < 0}">{{ displayChange(itemQuote(item)?.change) }}</em></button><p v-if="catalogStatusText">{{ catalogStatusText }}</p></aside>
       <section class="content"><div class="security"><div><p>{{ market.name }} · {{ quoteStatusText }}</p><h1>{{ selected?.name || '—' }} <small>{{ selected?.code || '' }}</small><button v-if="selected && !selected.code.startsWith('CC.')" class="ai-button" @click="requestAiAccess">AI 分析</button></h1></div><div class="price"><strong>{{ displayPrice(quoteData?.price) }}</strong><span :class="{down:quoteData?.change < 0}">{{ displayChange(quoteData?.change) }}</span></div><dl><div><dt>{{ t('open') }}</dt><dd>{{ displayPrice(quoteData?.open) }}</dd></div><div><dt>{{ t('high') }}</dt><dd>{{ displayPrice(quoteData?.high) }}</dd></div><div><dt>{{ t('low') }}</dt><dd>{{ displayPrice(quoteData?.low) }}</dd></div></dl></div>
@@ -163,6 +164,7 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); stopMarketIndexRefresh
 
 <style scoped>
 .markets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.brand{gap:8px;min-width:0}.brand-logo{width:30px;height:30px}.brand-name{color:#f4f8fb;white-space:nowrap}.brand-hub{padding:2px 5px;border:1px solid #3b5369;border-radius:3px;color:#9eb0c0;font-size:10px;font-weight:500;letter-spacing:.08em;white-space:nowrap}.feed{display:flex;align-items:center;gap:6px;white-space:nowrap}.feed-dot{color:#f4bf50;font-size:10px}
 .market-card{display:block;min-width:0;border:0;border-right:1px solid #233143;color:#95a7ba;padding:11px 16px;text-align:left;background:#101a26}
 .market-card:last-child{border-right:0}.market-card:hover,.market-card.active{background:#162435}
 .market-card-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.market-card-title strong{color:#dce7f1;font-size:13px}.market-card-title small{color:#61788c;font:9px 'DM Mono',monospace}
@@ -173,5 +175,5 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); stopMarketIndexRefresh
 .toolbar{gap:8px}.common-tools{display:flex;justify-content:flex-end;flex-wrap:wrap}.common-tools button:last-child{margin-left:4px;border-left:1px solid #31465a;color:#b8cee0}
 .terminal-language{border:1px solid #344b5c;border-radius:4px;background:#101d29;color:#c4d4df;padding:5px;font-size:11px}
 .ai-button{margin-left:10px;border:1px solid #3ccca3;border-radius:4px;background:#10372f;color:#75e2c1;padding:5px 8px;font-size:11px;vertical-align:middle}
-@media(max-width:800px){.markets{grid-template-columns:1fr}.market-card{border-right:0;border-bottom:1px solid #233143;padding:10px 12px}.market-card:last-child{border-bottom:0}.market-card-title{margin-bottom:5px}.market-index{padding:3px 0}}
+@media(max-width:800px){.markets{grid-template-columns:1fr}.market-card{border-right:0;border-bottom:1px solid #233143;padding:10px 12px}.market-card:last-child{border-bottom:0}.market-card-title{margin-bottom:5px}.market-index{padding:3px 0}.brand-name{font-size:16px}.brand-hub{display:none}}
 </style>

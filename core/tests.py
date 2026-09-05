@@ -913,3 +913,37 @@ class MarketIndexSnapshotTests(SimpleTestCase):
         self.assertNotIn("v-for=\"item in markets\"", app_source)
         self.assertNotIn("/api/kline/", app_source)
         self.assertNotIn("/api/indicator-render/", app_source)
+
+
+class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
+    def setUp(self):
+        self.base_dir = Path(settings.BASE_DIR)
+        self.app_source = (self.base_dir / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+        self.auth_source = (self.base_dir / "frontend" / "src" / "components" / "AuthGate.vue").read_text(encoding="utf-8")
+
+    def test_visible_brand_uses_huntalpha_hub_and_real_account_state(self):
+        self.assertIn("HuntAlphaLogo", self.app_source)
+        self.assertIn("<span class=\"brand-name\">HuntAlpha</span>", self.app_source)
+        self.assertIn("<small class=\"brand-hub\">HUB</small>", self.app_source)
+        self.assertIn("visitor ? t('visitor') : user.name", self.app_source)
+        self.assertIn("HuntAlphaLogo", self.auth_source)
+        self.assertIn("<span>HuntAlpha</span><small>HUB</small>", self.auth_source)
+        self.assertNotIn("QuantScope", self.app_source)
+        self.assertNotIn("QuantScope", self.auth_source)
+        self.assertNotIn("visitor ? t('visitor') : t('pro')", self.app_source)
+        self.assertNotIn("visitor ? t('visitorAi') : user.name", self.app_source)
+
+    def test_logo_is_local_original_svg_without_external_dependency_or_letter_mark(self):
+        logo_path = self.base_dir / "frontend" / "public" / "huntalpha-wolf.svg"
+        self.assertTrue(logo_path.is_file())
+        logo_source = logo_path.read_text(encoding="utf-8")
+        self.assertIn("<svg", logo_source)
+        self.assertIn("#56D6AF", logo_source)
+        self.assertNotRegex(logo_source, r"(?:href|xlink:href)=[\"']https?://")
+        self.assertNotRegex(logo_source, r">\s*(?:A|H|HA)\s*<")
+
+    def test_branding_keeps_task_004_and_004_1_runtime_contracts(self):
+        self.assertIn("visibleMarkets", self.app_source)
+        self.assertIn("/api/market-index-snapshots/", self.app_source)
+        self.assertIn("const endpoint = search ? 'symbols' : 'market-leaders'", self.app_source)
+        self.assertIn("`${API_BASE}/api/${endpoint}/", self.app_source)
