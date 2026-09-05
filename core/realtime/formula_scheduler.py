@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from threading import RLock
+from collections import OrderedDict
+from threading import Condition, RLock
 
 
 @dataclass
@@ -48,3 +49,53 @@ class FormulaFlightCoordinator:
         with self._lock:
             current = self._states.get(key)
             return FlightState(**current.__dict__) if current else FlightState()
+
+
+class FormulaRunRegistry:
+    """Process-local duplicate suppression for one captured formula revision."""
+
+    def __init__(self, cache_size=128):
+        self.coordinator = FormulaFlightCoordinator()
+        self.cache_size = cache_size
+        self._cache = OrderedDict()
+        self._inflight = set()
+        self._condition = Condition(RLock())
+
+    def run(self, key, revision, runner):
+        key = tuple(key)
+        with self._condition:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return cached
+            while key in self._inflight:
+                self._condition.wait()
+                cached = self._cache.get(key)
+                if cached is not None:
+                    self._cache.move_to_end(key)
+                    return cached
+            self._inflight.add(key)
+            if not self.coordinator.begin(key, revision):
+                self._inflight.remove(key)
+                raise RuntimeError("formula flight coordination failed")
+        try:
+            result = runner()
+        except Exception:
+            with self._condition:
+                self._inflight.discard(key)
+                self.coordinator.finish(key, revision)
+                self._condition.notify_all()
+            raise
+        with self._condition:
+            self._cache[key] = result
+            self._cache.move_to_end(key)
+            while len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
+            self._inflight.discard(key)
+            self.coordinator.finish(key, revision)
+            self._condition.notify_all()
+        return result
+
+    def clear(self):
+        with self._condition:
+            self._cache.clear()

@@ -7,6 +7,7 @@ export class TongdaxinStickPrimitive {
     this.priceSeries = priceSeries
     this.groups = groups
     this.layer = layer
+    this.requestUpdate = undefined
     this.view = {
       zOrder: () => layer === 'background' ? 'bottom' : 'normal',
       renderer: () => ({ draw: target => this.draw(target) }),
@@ -15,7 +16,9 @@ export class TongdaxinStickPrimitive {
 
   paneViews() { return [this.view] }
 
-  updateAllViews() {}
+  attached({ requestUpdate }) { this.requestUpdate = requestUpdate }
+  detached() { this.requestUpdate = undefined }
+  updateAllViews() { this.requestUpdate?.() }
 
   update(groups) {
     this.groups = groups || []

@@ -30,6 +30,16 @@ class RealtimeState:
         }
 
 
+@dataclass(frozen=True)
+class RealtimeCalculationSnapshot:
+    key: tuple
+    revision: int
+    current_bar: NormalizedBar | None
+    source: str | None
+    status: str
+    mode: str
+
+
 class RealtimeStateStore:
     def __init__(self):
         self._states = {}
@@ -85,6 +95,24 @@ class RealtimeStateStore:
     def revision_for(self, key):
         with self._condition:
             return self._states.get(key, RealtimeState(key=key)).revision
+
+    def capture(self, key):
+        """Capture one immutable market state for a calculation run."""
+        with self._condition:
+            state = self._states.get(key)
+            if state is None:
+                return RealtimeCalculationSnapshot(
+                    key=key, revision=0, current_bar=None, source=None,
+                    status="unavailable", mode="streaming",
+                )
+            return RealtimeCalculationSnapshot(
+                key=key,
+                revision=state.revision,
+                current_bar=state.current_bar,
+                source=state.source,
+                status=state.status,
+                mode=state.mode,
+            )
 
     def reset(self):
         with self._condition:

@@ -8,6 +8,7 @@ import subprocess
 import sqlite3
 import tempfile
 import shutil
+import threading
 import time
 from decimal import Decimal
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ from formula_editor.models import Formula
 from .market_indices import INDEX_DEFINITIONS, FutuOpenDIndexAdapter, convert_snapshot_frame
 from .models import AccountProfile, MarketSymbol, WatchlistEntry
 from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
-from .views import _watchlist_create, bar_rows
+from .views import _watchlist_create, bar_rows, formula_run_registry
 from .watchlist import resolve_account_tier, resolve_watchlist_limit
 from .realtime import (
     FutuRealtimeProvider,
@@ -38,7 +39,7 @@ from .realtime import (
     merge_realtime_bar,
     provider_time_to_timestamp,
 )
-from .realtime.formula_scheduler import FormulaFlightCoordinator
+from .realtime.formula_scheduler import FormulaFlightCoordinator, FormulaRunRegistry
 from PIL import Image
 
 
@@ -1536,6 +1537,28 @@ class RealtimeCoreContractTests(TestCase):
         time.sleep(0.03)
         self.assertEqual(provider.unsubscribe_calls, [("SH.600519", "1分")])
 
+    def test_provider_identity_is_not_hardcoded_in_registry_key(self):
+        provider = FakeRealtimeProvider()
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
+        consumer = registry.subscribe("SH.600519", "1分")
+        self.assertEqual(consumer.key[0], "test-provider")
+        registry.unsubscribe(consumer)
+        time.sleep(0.03)
+
+    def test_failed_initial_subscribe_removes_entry_and_retry_subscribes_again(self):
+        provider = FakeRealtimeProvider(error=RuntimeError("first subscription failed"))
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=30)
+        with self.assertRaises(Exception):
+            registry.subscribe("SH.600519", "1分")
+        self.assertEqual(registry.stats()["active_keys"], 0)
+        self.assertEqual(registry.stats()["provider_subscription_count"], 0)
+        provider.error = None
+        consumer = registry.subscribe("SH.600519", "1分")
+        self.assertEqual(len(provider.subscribe_calls), 2)
+        self.assertEqual(registry.stats(consumer.key)["provider_subscription_count"], 1)
+        registry.unsubscribe(consumer)
+        registry.close()
+
     def test_second_consumer_receives_the_shared_provider_event(self):
         provider = FakeRealtimeProvider()
         registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
@@ -1642,6 +1665,41 @@ class RealtimeCoreContractTests(TestCase):
         self.assertEqual(second.current_bar.high, 12)
         self.assertEqual(second.current_bar.low, 8)
 
+    def test_live_same_timestamp_high_is_monotonic_and_low_is_monotonic(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, high=12, low=8, volume=100))
+        state, result = store.apply_bar(key, self.bar(100, high=10, low=9, volume=120, close=11))
+        self.assertTrue(result.accepted)
+        self.assertEqual(state.current_bar.high, 12)
+        self.assertEqual(state.current_bar.low, 8)
+        self.assertEqual(state.current_bar.volume, 120)
+
+    def test_live_same_timestamp_stale_cumulative_volume_is_rejected(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, volume=200, amount=300))
+        state, result = store.apply_bar(key, self.bar(100, volume=150, amount=250, close=12))
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.relation, "suspected_stale")
+        self.assertEqual(state.current_bar.volume, 200)
+
+    def test_authoritative_reconcile_can_correct_high_low_and_volume(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, high=120, low=80, volume=200))
+        corrected = self.bar(100, high=110, low=90, volume=180, event_kind="reconcile")
+        state, result = store.apply_bar(key, corrected)
+        self.assertEqual(result.relation, "reconciled")
+        self.assertEqual(state.current_bar.high, 110)
+        self.assertEqual(state.current_bar.low, 90)
+        self.assertEqual(state.current_bar.volume, 180)
+
+    def test_provider_time_key_is_not_used_as_event_sequence(self):
+        source = Path(settings.BASE_DIR / "core" / "realtime" / "futu_provider.py").read_text(encoding="utf-8")
+        self.assertIn("sequence=None", source)
+        self.assertNotIn("sequence=getattr(row, \"time_key\"", source)
+
     def test_new_timestamp_appends_and_closes_previous_bar(self):
         store = RealtimeStateStore()
         key = ("test-provider", "SH.600519", "1分")
@@ -1717,6 +1775,66 @@ class RealtimeCoreContractTests(TestCase):
         self.assertTrue(coordinator.is_stale(key, 100, 101))
         self.assertFalse(coordinator.is_stale(key, 100, 100))
 
+    def test_calculation_snapshot_remains_atomic_when_state_advances(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, close=10))
+        captured = store.capture(key)
+        store.apply_bar(key, self.bar(100, close=11))
+        self.assertEqual(captured.revision, 1)
+        self.assertEqual(captured.current_bar.close, 10)
+        self.assertEqual(store.capture(key).revision, 2)
+
+    def test_indicator_response_revision_matches_captured_calculation_snapshot(self):
+        user = get_user_model().objects.create_user(username="realtime-formula-user", password="Valid-password-123")
+        client = Client()
+        client.force_login(user)
+        provider = FakeRealtimeProvider()
+        store = RealtimeStateStore()
+        registry = RealtimeRegistry(provider=provider, state_store=store, grace_seconds=0)
+        key = registry.key_for("SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, close=10))
+        item = SimpleNamespace(code="TEST", version=3, name="Public fixture", placement="main", source="PUBLIC_FIXTURE")
+        public_bars = [{"time": 100, "open": 10, "high": 11, "low": 9, "close": 10, "volume": 100}]
+        completed = SimpleNamespace(stdout=json.dumps({"lines": [], "sticks": [], "markers": [], "fixedTexts": [], "engine": "tongdaxin"}))
+        with patch("core.views.get_realtime_registry", return_value=registry), \
+             patch("core.views.Formula.objects.get", return_value=item), \
+             patch("core.views.history_bars", return_value=(public_bars, None, None)), \
+             patch("core.views.subprocess.run", return_value=completed):
+            formula_run_registry.clear()
+            response = client.get("/api/indicator-render/TEST/SH.600519/?period=1%E5%88%86&count=100&revision=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["revision"], 1)
+        self.assertNotIn("PUBLIC_FIXTURE", response.content.decode("utf-8"))
+
+    def test_formula_run_registry_deduplicates_same_revision_subprocess(self):
+        registry = FormulaRunRegistry()
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+        results = []
+
+        def runner():
+            calls.append(True)
+            started.set()
+            release.wait(timeout=1)
+            return {"drawing": "shared"}
+
+        def invoke():
+            results.append(registry.run(("SH.600519", "1分", "FORMULA", 1, 7), 7, runner))
+
+        first = threading.Thread(target=invoke)
+        second = threading.Thread(target=invoke)
+        first.start()
+        self.assertTrue(started.wait(timeout=1))
+        second.start()
+        release.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(results, [{"drawing": "shared"}, {"drawing": "shared"}])
+        self.assertEqual(registry.coordinator.state(("SH.600519", "1分", "FORMULA", 1, 7)).active_revision, None)
+
     def test_realtime_stream_requires_terminal_session_for_anonymous(self):
         response = Client().get("/api/realtime/market-stream/SH.600519/?period=1分")
         self.assertEqual(response.status_code, 401)
@@ -1738,7 +1856,31 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("visibilitychange", source)
         self.assertIn("realtimeRevision", source)
         self.assertIn("formulaPendingRevision", source)
+        self.assertIn("createRealtimeUiBuffer", source)
+        self.assertIn("flushMs: 300", source)
+        self.assertIn("document.hidden", source)
+        self.assertIn("rebuildLayer", source)
+        self.assertNotIn("applyRealtimePayload", source)
         self.assertGreaterEqual(source.count("chart?.remove()"), 2)
+
+    def test_realtime_ui_buffer_contract_has_coalescing_and_pause(self):
+        source = (Path(settings.BASE_DIR) / "frontend" / "src" / "realtime" / "realtimeUiBuffer.mjs").read_text(encoding="utf-8")
+        self.assertIn("REALTIME_UI_FLUSH_MS = 300", source)
+        self.assertIn("latest = payload", source)
+        self.assertIn("isPaused", source)
+        self.assertIn("flushCount", source)
+
+    def test_dynamic_formula_primitives_request_redraw(self):
+        for filename in ("TongdaxinStickPrimitive.js", "TongdaxinTextPrimitive.js", "TongdaxinFixedTextPrimitive.js"):
+            source = (Path(settings.BASE_DIR) / "frontend" / "src" / "indicators" / filename).read_text(encoding="utf-8")
+            self.assertIn("attached({ requestUpdate })", source)
+            self.assertIn("this.requestUpdate?.()", source)
+
+    def test_formula_render_parses_revision_and_uses_capture_and_run_registry(self):
+        source = (Path(settings.BASE_DIR) / "core" / "views.py").read_text(encoding="utf-8")
+        self.assertIn('request.GET.get("revision", 0)', source)
+        self.assertIn("state_store.capture", source)
+        self.assertIn("formula_run_registry.run", source)
 
     def test_bar_rows_preserves_missing_fields_and_real_zero(self):
         class Frame:

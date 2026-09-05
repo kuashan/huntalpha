@@ -84,8 +84,9 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
                 turnover_rate=optional_numeric(getattr(row, "turnover_rate", None)),
                 is_closed=None,
                 provider_timestamp=received_at,
-                sequence=getattr(row, "time_key", None),
+                sequence=None,
                 mode="streaming",
+                event_kind="live",
             )
             with self._lock:
                 callbacks = list(self._callbacks.get((symbol, period), set()))
@@ -220,8 +221,9 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
             turnover_rate=optional_numeric(row.get("turnover_rate")),
             is_closed=None,
             provider_timestamp=int(time.time()),
-            sequence=row.get("time_key"),
+            sequence=None,
             mode="streaming",
+            event_kind="reconcile",
         )
 
     def close(self):

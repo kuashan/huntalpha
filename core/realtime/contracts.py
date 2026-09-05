@@ -85,6 +85,7 @@ class NormalizedBar:
     sequence: int | str | None = None
     revision: int = 0
     mode: str = "streaming"
+    event_kind: str = "live"
 
     def to_dict(self):
         return {
@@ -105,6 +106,7 @@ class NormalizedBar:
             "sequence": self.sequence,
             "revision": self.revision,
             "mode": self.mode,
+            "event_kind": self.event_kind,
         }
 
 
@@ -120,35 +122,43 @@ def _first(*values):
 
 
 def merge_realtime_bar(existing, incoming):
-    """Merge a provider-authoritative bar while rejecting stale events."""
+    """Merge live bars conservatively and reconcile snapshots authoritatively."""
     if existing is None:
         return MergeResult(incoming, True, "initial")
     if incoming.time < existing.time:
         return MergeResult(existing, False, "stale")
     if incoming.time == existing.time:
+        if incoming.event_kind in {"reconcile", "authoritative"}:
+            return MergeResult(incoming, incoming != existing, "reconciled" if incoming != existing else "duplicate")
         if existing.sequence is not None and incoming.sequence is not None:
             try:
                 if incoming.sequence < existing.sequence:
                     return MergeResult(existing, False, "stale")
             except TypeError:
                 pass
+        for field in ("volume", "amount"):
+            current_value = getattr(existing, field)
+            incoming_value = getattr(incoming, field)
+            if current_value is not None and incoming_value is not None and incoming_value < current_value:
+                return MergeResult(existing, False, "suspected_stale")
         high_values = [value for value in (existing.high, incoming.high) if value is not None]
         low_values = [value for value in (existing.low, incoming.low) if value is not None]
         merged = replace(
             existing,
             provider=incoming.provider or existing.provider,
             market=incoming.market or existing.market,
-            open=_first(incoming.open, existing.open),
+            open=_first(existing.open, incoming.open),
             high=max(high_values) if high_values else None,
             low=min(low_values) if low_values else None,
             close=_first(incoming.close, existing.close),
-            volume=_first(incoming.volume, existing.volume),
-            amount=_first(incoming.amount, existing.amount),
+            volume=max(value for value in (existing.volume, incoming.volume) if value is not None) if any(value is not None for value in (existing.volume, incoming.volume)) else None,
+            amount=max(value for value in (existing.amount, incoming.amount) if value is not None) if any(value is not None for value in (existing.amount, incoming.amount)) else None,
             turnover_rate=_first(incoming.turnover_rate, existing.turnover_rate),
             is_closed=bool(existing.is_closed or incoming.is_closed),
             provider_timestamp=_first(incoming.provider_timestamp, existing.provider_timestamp),
             sequence=_first(incoming.sequence, existing.sequence),
             mode=incoming.mode or existing.mode,
+            event_kind="live",
         )
         return MergeResult(merged, merged != existing, "updated" if merged != existing else "duplicate")
     closed = replace(existing, is_closed=True)

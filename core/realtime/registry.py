@@ -1,10 +1,8 @@
-import json
 import queue
 import threading
 from dataclasses import dataclass, field
 
 from .contracts import NormalizedBar
-from .futu_provider import FutuRealtimeProvider
 from .provider import RealtimeProviderError
 from .state import RealtimeStateStore
 
@@ -23,16 +21,19 @@ class RealtimeConsumer:
 
 
 class RealtimeRegistry:
-    def __init__(self, provider=None, state_store=None, grace_seconds=20):
-        self.provider = provider or FutuRealtimeProvider()
+    def __init__(self, provider, state_store=None, grace_seconds=20):
+        self.provider = provider
+        self.provider_name = str(provider.provider_name)
         self.state_store = state_store or RealtimeStateStore()
         self.grace_seconds = grace_seconds
         self._entries = {}
         self._lock = threading.RLock()
 
-    @staticmethod
-    def _key(symbol, period):
-        return ("futu-opend", str(symbol).upper(), period)
+    def _key(self, symbol, period):
+        return (self.provider_name, str(symbol).upper(), period)
+
+    def key_for(self, symbol, period):
+        return self._key(symbol, period)
 
     def _publish(self, key, payload):
         with self._lock:
@@ -52,7 +53,7 @@ class RealtimeRegistry:
             return
         status = event.get("status", "unavailable")
         state = self.state_store.set_status(
-            key, status, mode=event.get("mode", "streaming"), source="futu-opend", error=event.get("error"),
+            key, status, mode=event.get("mode", "streaming"), source=event.get("source") or self.provider_name, error=event.get("error"),
         )
         self._publish(key, {"type": "status", **state.to_dict()})
 
@@ -65,27 +66,51 @@ class RealtimeRegistry:
                 entry["timer"].cancel()
                 entry["timer"] = None
             if entry is None:
-                self._entries[key] = {"consumers": set(), "timer": None}
+                self._entries[key] = {"consumers": set(), "timer": None, "subscribed": False}
                 first = True
             else:
                 first = False
             self._entries[key]["consumers"].add(consumer)
-        try:
-            if first:
-                self.state_store.set_status(key, "connecting", source="futu-opend")
-                self.provider.subscribe(symbol, period, lambda event: self._provider_event(key, event))
-            bar = self.provider.latest_snapshot(symbol, period)
-            if bar is not None:
-                self._provider_event(key, bar)
-            state = self.state_store.set_status(key, "live", mode="streaming", source="futu-opend")
-            consumer.events.put({"type": "status", **state.to_dict()})
-            latest = self.state_store.get(key)
-            if latest and latest.current_bar:
-                consumer.events.put({"type": "snapshot", **latest.to_dict()})
-            return consumer
-        except Exception as exc:
-            self.unsubscribe(consumer)
-            raise RealtimeProviderError(str(exc)) from exc
+            if not first:
+                subscribed = bool(self._entries[key]["subscribed"])
+            else:
+                subscribed = False
+                self.state_store.set_status(key, "connecting", source=self.provider_name)
+                try:
+                    self.provider.subscribe(symbol, period, lambda event: self._provider_event(key, event))
+                except Exception as exc:
+                    failed = self._entries.pop(key, None)
+                    if failed and failed.get("timer"):
+                        failed["timer"].cancel()
+                    if failed:
+                        failed["consumers"].clear()
+                    consumer.close()
+                    try:
+                        self.provider.unsubscribe(symbol, period)
+                    except Exception:
+                        pass
+                    self.state_store.set_status(key, "unavailable", source=self.provider_name, error=str(exc))
+                    raise RealtimeProviderError(str(exc)) from exc
+                self._entries[key]["subscribed"] = True
+                subscribed = True
+
+        if first and subscribed:
+            try:
+                bar = self.provider.latest_snapshot(symbol, period)
+            except Exception as exc:
+                self.state_store.set_status(key, "reconnecting", source=self.provider_name, error=str(exc))
+            else:
+                if bar is not None:
+                    self._provider_event(key, bar)
+
+        state = self.state_store.get(key)
+        if state is None or state.status == "connecting":
+            state = self.state_store.set_status(key, "live", mode="streaming", source=self.provider_name)
+        consumer.events.put({"type": "status", **state.to_dict()})
+        latest = self.state_store.get(key)
+        if latest and latest.current_bar:
+            consumer.events.put({"type": "snapshot", **latest.to_dict()})
+        return consumer
 
     def unsubscribe(self, consumer):
         if consumer is None or consumer.closed:
@@ -111,28 +136,37 @@ class RealtimeRegistry:
                 return
             self._entries.pop(key, None)
         try:
-            self.provider.unsubscribe(key[1], key[2])
+            if entry.get("subscribed"):
+                self.provider.unsubscribe(key[1], key[2])
         finally:
-            self.state_store.set_status(key, "unavailable", source="futu-opend")
+            self.state_store.set_status(key, "unavailable", source=self.provider_name)
 
     def stats(self, key=None):
         with self._lock:
             if key is not None:
                 entry = self._entries.get(key)
-                return {"consumer_count": len(entry["consumers"]) if entry else 0, "provider_subscription_count": 1 if entry else 0}
+                return {
+                    "consumer_count": len(entry["consumers"]) if entry else 0,
+                    "provider_subscription_count": 1 if entry and entry.get("subscribed") else 0,
+                }
             return {
                 "active_keys": len(self._entries),
                 "consumer_count": sum(len(entry["consumers"]) for entry in self._entries.values()),
-                "provider_subscription_count": len(self._entries),
+                "provider_subscription_count": sum(1 for entry in self._entries.values() if entry.get("subscribed")),
             }
 
     def close(self):
         with self._lock:
-            entries = list(self._entries.values())
+            entries = list(self._entries.items())
             self._entries.clear()
-        for entry in entries:
+        for key, entry in entries:
             if entry.get("timer"):
                 entry["timer"].cancel()
+            if entry.get("subscribed"):
+                try:
+                    self.provider.unsubscribe(key[1], key[2])
+                except Exception:
+                    pass
         self.provider.close()
 
     def health_check(self):
@@ -144,9 +178,16 @@ _default_registry = None
 _default_lock = threading.Lock()
 
 
+def create_default_realtime_registry(**kwargs):
+    """Application composition point for the currently selected provider."""
+    from .futu_provider import FutuRealtimeProvider
+
+    return RealtimeRegistry(provider=FutuRealtimeProvider(), **kwargs)
+
+
 def get_realtime_registry():
     global _default_registry
     with _default_lock:
         if _default_registry is None:
-            _default_registry = RealtimeRegistry()
+            _default_registry = create_default_realtime_registry()
         return _default_registry

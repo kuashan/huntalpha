@@ -5,6 +5,7 @@ import { TongdaxinStickPrimitive } from '../indicators/TongdaxinStickPrimitive'
 import { TongdaxinTextPrimitive } from '../indicators/TongdaxinTextPrimitive'
 import { TongdaxinFixedTextPrimitive } from '../indicators/TongdaxinFixedTextPrimitive'
 import { commonDrawing } from '../indicators/commonIndicators'
+import { createRealtimeUiBuffer } from '../realtime/realtimeUiBuffer.mjs'
 
 const props = defineProps({
   symbol: Object,
@@ -48,6 +49,7 @@ let formulaTimer
 let formulaInFlight = false
 let formulaPendingRevision = 0
 let formulaRunToken = 0
+let realtimeUiBuffer
 
 const backgroundStick = item => item.layer === 'background'
 const savedSubPaneHeights = () => {
@@ -207,25 +209,80 @@ function installLayer(result, pane) {
   }
 }
 
+function attachStickPrimitive(groups, pane, anchor, layerName) {
+  if (!groups.length) return null
+  const primitive = new TongdaxinStickPrimitive(chart, anchor, groups, layerName)
+  chart.panes()[pane]?.attachPrimitive(primitive)
+  return primitive
+}
+
+function attachTextPrimitive(groups, pane, anchor) {
+  if (!groups.length) return null
+  const primitive = new TongdaxinTextPrimitive(chart, anchor, groups)
+  chart.panes()[pane]?.attachPrimitive(primitive)
+  return primitive
+}
+
+function attachFixedTextPrimitive(items, pane) {
+  if (!items?.length) return null
+  const primitive = new TongdaxinFixedTextPrimitive(items)
+  chart.panes()[pane]?.attachPrimitive(primitive)
+  return primitive
+}
+
+function detachPrimitive(pane, primitive) {
+  if (primitive) chart.panes()[pane]?.detachPrimitive(primitive)
+}
+
+function destroyLayer(layer) {
+  detachPrimitive(layer.pane, layer.sticks.background)
+  detachPrimitive(layer.pane, layer.sticks.foreground)
+  detachPrimitive(layer.pane, layer.markers)
+  detachPrimitive(layer.pane, layer.fixedTexts)
+  layer.lines.forEach(series => chart.removeSeries(series))
+  if (layer.anchor && layer.anchor !== candleSeries && !layer.lines.includes(layer.anchor)) {
+    chart.removeSeries(layer.anchor)
+  }
+}
+
+function rebuildLayer(result) {
+  const previous = layerRefs.get(result.item.code)
+  const pane = previous?.pane ?? (result.item.placement === 'main' ? 0 : 1)
+  if (previous) destroyLayer(previous)
+  const layer = installLayer(result, pane)
+  layerRefs.set(result.item.code, layer)
+  return layer
+}
+
 function updateLayer(result) {
   const layer = layerRefs.get(result.item.code)
   if (!layer || layer.lines.length !== result.drawing.lines.length) return false
   result.drawing.lines.forEach((item, index) => layer.lines[index].setData(item.data))
   const background = result.drawing.sticks.filter(backgroundStick)
   const foreground = result.drawing.sticks.filter(item => !backgroundStick(item))
-  layer.sticks.background?.update(background)
-  layer.sticks.foreground?.update(foreground)
-  layer.markers?.update(result.drawing.markers)
-  layer.fixedTexts?.update(result.drawing.fixedTexts)
+  if (layer.sticks.background) layer.sticks.background.update(background)
+  else if (background.length) layer.sticks.background = attachStickPrimitive(background, layer.pane, layer.anchor, 'background')
+  if (layer.sticks.foreground) layer.sticks.foreground.update(foreground)
+  else if (foreground.length) layer.sticks.foreground = attachStickPrimitive(foreground, layer.pane, layer.anchor, 'normal')
+  if (layer.markers) layer.markers.update(result.drawing.markers)
+  else if (result.drawing.markers.length) layer.markers = attachTextPrimitive(result.drawing.markers, layer.pane, layer.anchor)
+  if (layer.fixedTexts) layer.fixedTexts.update(result.drawing.fixedTexts)
+  else if (result.drawing.fixedTexts.length) layer.fixedTexts = attachFixedTextPrimitive(result.drawing.fixedTexts, layer.pane)
   if (layer.anchor && layer.anchor !== candleSeries && !layer.lines.length) layer.anchor.setData(formulaAnchorData(result.drawing))
   return true
+}
+
+function applyLayerResult(result) {
+  const rendered = renderedItems.find(entry => entry.item.code === result.item.code)
+  if (!rendered) return
+  if (!updateLayer(result)) rebuildLayer(result)
+  rendered.drawing = result.drawing
 }
 
 function refreshBuiltInLayers() {
   props.installedIndicators.filter(item => item.common).forEach(item => {
     const result = { item, drawing: commonDrawing(item.code, loadedBars) }
-    const rendered = renderedItems.find(entry => entry.item.code === item.code)
-    if (rendered && updateLayer(result)) rendered.drawing = result.drawing
+    applyLayerResult(result)
   })
   setCandleMode(renderedItems)
 }
@@ -253,10 +310,7 @@ async function runFormulaRefresh() {
     const results = (await Promise.all(items.map(item => requestFormulaDrawing(item, bars, requestRevision)))).filter(Boolean)
     const latestResponseRevision = results.reduce((latest, result) => Math.max(latest, result.revision), requestRevision)
     if (runToken !== formulaRunToken || generation !== drawVersion || latestResponseRevision < realtimeRevision) return
-    results.forEach(result => {
-      const rendered = renderedItems.find(entry => entry.item.code === result.item.code)
-      if (rendered && updateLayer(result)) rendered.drawing = result.drawing
-    })
+    results.forEach(applyLayerResult)
     setCandleMode(renderedItems)
   } finally {
     if (runToken !== formulaRunToken) return
@@ -270,7 +324,7 @@ async function runFormulaRefresh() {
   }
 }
 
-function applyRealtimePayload(payload) {
+function processRealtimePayload(payload) {
   if (!payload || !props.symbol || payload.symbol !== props.symbol.code.toUpperCase() || payload.period !== props.period) return
   const revision = Number(payload.revision || 0)
   if (revision && revision < realtimeRevision) return
@@ -288,6 +342,18 @@ function applyRealtimePayload(payload) {
   queueFormulaRefresh(realtimeRevision)
 }
 
+function queueRealtimePayload(payload) {
+  if (!payload || !props.symbol || payload.symbol !== props.symbol.code.toUpperCase() || payload.period !== props.period) return
+  const revision = Number(payload.revision || 0)
+  if (revision && revision < realtimeRevision) return
+  if (payload.status && !payload.bar) {
+    realtimeStatus.value = payload.status
+    return
+  }
+  if (realtimeUiBuffer) realtimeUiBuffer.push(payload)
+  else processRealtimePayload(payload)
+}
+
 function connectRealtime() {
   if (!props.symbol || !props.period || typeof EventSource === 'undefined') {
     realtimeStatus.value = 'unavailable'
@@ -300,7 +366,7 @@ function connectRealtime() {
   eventSource = source
   const handle = event => {
     if (generation !== streamGeneration) return
-    try { applyRealtimePayload(JSON.parse(event.data)) } catch { realtimeStatus.value = 'unavailable' }
+    try { queueRealtimePayload(JSON.parse(event.data)) } catch { realtimeStatus.value = 'unavailable' }
   }
   source.addEventListener('snapshot', handle)
   source.addEventListener('bar', handle)
@@ -316,6 +382,7 @@ function disconnectRealtime() {
   streamGeneration += 1
   eventSource?.close()
   eventSource = undefined
+  realtimeUiBuffer?.clear()
   if (formulaTimer) window.clearTimeout(formulaTimer)
   formulaTimer = undefined
   formulaPendingRevision = 0
@@ -323,9 +390,12 @@ function disconnectRealtime() {
   formulaInFlight = false
 }
 
-function reconcileOnVisible() {
-  if (!document.hidden && props.symbol && chart) {
+function handleVisibilityChange() {
+  if (document.hidden) {
     disconnectRealtime()
+    return
+  }
+  if (props.symbol && chart) {
     connectRealtime()
   }
 }
@@ -451,7 +521,12 @@ function scheduleDraw(options) {
 
 onMounted(async () => {
   await nextTick()
-  visibilityHandler = reconcileOnVisible
+  realtimeUiBuffer = createRealtimeUiBuffer({
+    flushMs: 300,
+    onFlush: processRealtimePayload,
+    isPaused: () => document.hidden,
+  })
+  visibilityHandler = handleVisibilityChange
   document.addEventListener('visibilitychange', visibilityHandler)
   scheduleDraw()
   resize = new ResizeObserver(() => chart?.applyOptions({ width: el.value.clientWidth }))

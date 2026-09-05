@@ -30,4 +30,17 @@ for (const code of codes) {
   assert.deepEqual(comparable(realtimeDrawing), comparable(fullDrawing), `${code} realtime/full mismatch`)
 }
 
-console.log('common indicator realtime/full consistency: 6/6 passed')
+for (const code of codes) {
+  const history = bars.slice(0, -1)
+  const updates = [
+    { ...bars.at(-1), close: 110, high: 112, low: 108, volume: 1_100 },
+    { ...bars.at(-1), close: 111, high: 113, low: 107, volume: 1_150 },
+    { ...bars.at(-1), close: 109.5, high: 114, low: 106, volume: 1_200 },
+  ]
+  let realtimeDrawing = commonDrawing(code, [...history, updates[0]])
+  for (const update of updates.slice(1)) realtimeDrawing = commonDrawing(code, [...history, update])
+  const fullDrawing = commonDrawing(code, [...history, updates.at(-1)])
+  assert.deepEqual(comparable(realtimeDrawing), comparable(fullDrawing), `${code} same-bar update mismatch`)
+}
+
+console.log('common indicator realtime/full consistency: append 6/6, same-bar update 6/6 passed')

@@ -36,6 +36,7 @@ from .realtime import (
     provider_time_to_timestamp,
     timestamp_to_market_datetime,
 )
+from .realtime.formula_scheduler import FormulaRunRegistry
 from .realtime.provider import REALTIME_PERIOD_SUBTYPES
 from .symbol_catalog import FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 from .watchlist import account_tier_payload, watchlist_limit_for_user
@@ -45,6 +46,7 @@ KLINE_PAGE_SIZE = 1000
 # Calendar windows chosen to contain at least one page of trading bars for
 # every supported period without making a single OpenD request unbounded.
 KLINE_LOOKBACK_DAYS = {"1分": 14, "5分": 45, "15分": 90, "30分": 180, "60分": 365, "2小时": 730, "4小时": 1460, "日线": 1825, "周线": 7300, "月线": 14600}
+formula_run_registry = FormulaRunRegistry()
 
 def json(data, status=200):
     result = JsonResponse(data, status=status)
@@ -540,20 +542,22 @@ def request_page(client, code, period, count, before=None):
     if error:
         return None, False, error
     if before is None:
-        rows = merge_realtime_rows(rows, code, period)
+        registry = get_realtime_registry()
+        rows = merge_realtime_rows(rows, code, period, registry.state_store.capture(registry.key_for(code, period)))
     rows = rows[-count:]
     # A non-empty page can have older provider history.  The client will make
     # at most one extra request to determine the true beginning of history.
     return rows, bool(rows), None
 
 
-def merge_realtime_rows(rows, code, period):
+def merge_realtime_rows(rows, code, period, calculation_snapshot=None):
     """Overlay the shared authoritative current bar on a historical response."""
-    key = ("futu-opend", str(code).upper(), period)
-    state = get_realtime_registry().state_store.get(key)
-    if state is None or state.current_bar is None:
+    if calculation_snapshot is None:
+        registry = get_realtime_registry()
+        calculation_snapshot = registry.state_store.capture(registry.key_for(code, period))
+    if calculation_snapshot.current_bar is None:
         return rows
-    current = state.current_bar.to_dict()
+    current = calculation_snapshot.current_bar.to_dict()
     bar = {field: current.get(field) for field in (
         "time", "open", "high", "low", "close", "volume", "amount", "turnover_rate"
     )}
@@ -651,7 +655,7 @@ def realtime_market_stream(request, code):
         consumer = registry.subscribe(code.upper(), period)
     except RealtimeProviderError as exc:
         return json({
-            "error": str(exc), "code": "realtime_unavailable", "source": "futu-opend", "mode": "unavailable",
+            "error": str(exc), "code": "realtime_unavailable", "source": registry.provider_name, "mode": "unavailable",
         }, 503)
 
     def events():
@@ -688,7 +692,7 @@ def live_float_shares(client, code):
         return None
 
 
-def history_bars(code, period):
+def history_bars(code, period, calculation_snapshot=None):
     """Load the complete bounded OpenD window used for one formula run."""
     client = context()
     try:
@@ -696,7 +700,7 @@ def history_bars(code, period):
             return None, None, "自定义公式暂不支持分时；请选择 K 线周期"
         bars, error = request_history_rows(client, code, period)
         if not error:
-            bars = merge_realtime_rows(bars, code, period)
+            bars = merge_realtime_rows(bars, code, period, calculation_snapshot)
         return bars, live_float_shares(client, code) if not error else None, error
     finally:
         client.close()
@@ -921,31 +925,50 @@ def indicator_render(request, code, symbol):
             return json({"error": "未找到已启用的指标"}, 404)
     period = request.GET.get("period", "日线")
     count = min(max(int(request.GET.get("count", 500)), 100), 1000)
+    try:
+        requested_revision = max(0, int(request.GET.get("revision", 0)))
+    except (TypeError, ValueError):
+        return json({"error": "revision 必须是整数", "code": "invalid_revision"}, 400)
     # Future functions such as BACKSET and formulas using BARSCOUNT(C)=1
     # need the beginning of the same real OpenD history shown to the chart.
     # Calculate the complete bounded window, then return its visible tail.
-    realtime_key = ("futu-opend", symbol.upper(), period)
-    calculation_revision = get_realtime_registry().state_store.revision_for(realtime_key)
-    calculation_bars, float_shares, error = history_bars(symbol, period)
+    registry = get_realtime_registry()
+    calculation_snapshot = registry.state_store.capture(registry.key_for(symbol, period))
+    if requested_revision > calculation_snapshot.revision:
+        return json({
+            "error": "实时版本已更新，请重试",
+            "code": "revision_not_available",
+            "revision": calculation_snapshot.revision,
+        }, 409)
+    calculation_bars, float_shares, error = history_bars(symbol, period, calculation_snapshot)
     if error:
         return json({"error": error}, 400 if period == "分时" else 502)
     visible_start = max(0, len(calculation_bars) - count)
     bars = calculation_bars[visible_start:]
     try:
-        if builtin_chanlun:
-            completed = subprocess.run(
-                [str(settings.BASE_DIR / ".chanlun-venv" / "Scripts" / "python.exe"), str(settings.BASE_DIR / "core" / "chan_runner.py")],
-                input=json_module.dumps({"bars": calculation_bars, "period": period}, ensure_ascii=False),
-                text=True, encoding="utf-8", capture_output=True, timeout=12, check=True,
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-            )
-        else:
-            completed = subprocess.run(
-                ["node", str(settings.BASE_DIR / "core" / "formula_runner.mjs")],
-                input=json_module.dumps({"source": item.source, "bars": calculation_bars, "period": period, "symbol": symbol.upper(), "name": item.name, "chip": {"floatShares": float_shares}}, ensure_ascii=False),
-                text=True, encoding="utf-8", capture_output=True, timeout=8, check=True,
-            )
-        formula = json_module.loads(completed.stdout)
+        formula_id = "builtin-chanlun" if builtin_chanlun else item.code
+        formula_version = 1 if builtin_chanlun else item.version
+        formula_key = (
+            registry.provider_name, symbol.upper(), period, formula_id, formula_version, calculation_snapshot.revision,
+        )
+
+        def run_formula():
+            if builtin_chanlun:
+                completed = subprocess.run(
+                    [str(settings.BASE_DIR / ".chanlun-venv" / "Scripts" / "python.exe"), str(settings.BASE_DIR / "core" / "chan_runner.py")],
+                    input=json_module.dumps({"bars": calculation_bars, "period": period}, ensure_ascii=False),
+                    text=True, encoding="utf-8", capture_output=True, timeout=12, check=True,
+                    env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                )
+            else:
+                completed = subprocess.run(
+                    ["node", str(settings.BASE_DIR / "core" / "formula_runner.mjs")],
+                    input=json_module.dumps({"source": item.source, "bars": calculation_bars, "period": period, "symbol": symbol.upper(), "name": item.name, "chip": {"floatShares": float_shares}}, ensure_ascii=False),
+                    text=True, encoding="utf-8", capture_output=True, timeout=8, check=True,
+                )
+            return json_module.loads(completed.stdout)
+
+        formula = formula_run_registry.run(formula_key, calculation_snapshot.revision, run_formula)
     except subprocess.CalledProcessError as exc:
         # Formula source is private. Only a function name is safe and useful
         # to return to the browser; parser excerpts and source fragments stay
@@ -1022,4 +1045,4 @@ def indicator_render(request, code, symbol):
             if isinstance(row, dict)
         ],
     }
-    return json({"code": "CHANLUN" if builtin_chanlun else item.code, "name": "缠论结构" if builtin_chanlun else item.name, "placement": "main" if builtin_chanlun else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "revision": calculation_revision, "engine": formula.get("engine", "tongdaxin"), "source": "futu-opend", "adjustment": "前复权"})
+    return json({"code": "CHANLUN" if builtin_chanlun else item.code, "name": "缠论结构" if builtin_chanlun else item.name, "placement": "main" if builtin_chanlun else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "revision": calculation_snapshot.revision, "engine": formula.get("engine", "tongdaxin"), "source": registry.provider_name, "adjustment": "前复权"})
