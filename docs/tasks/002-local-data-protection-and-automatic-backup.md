@@ -1,6 +1,6 @@
 # Task 002 — 本地数据保护与自动备份
 
-Status: READY_FOR_CODEX
+Status: ACCEPTED
 
 ## 背景
 
@@ -80,49 +80,48 @@ HuntAlpha 当前本地开发仍使用 SQLite `db.sqlite3`。该数据库包含�
 
 ## 验收标准
 
-- [ ] `db.sqlite3` 仍未被 Git 跟踪，现有本地数据没有进入 GitHub。
-- [ ] 一条命令可以在仓库外生成一致性 SQLite 备份。
-- [ ] 每份有效备份都有可核验的 SHA-256 和 SQLite 完整性检查结果。
-- [ ] 备份命令不会输出任何数据库业务内容或私有公式源码。
-- [ ] 目标目录位于仓库内部时命令会拒绝执行。
-- [ ] 默认不会覆盖已有备份。
-- [ ] 历史清理只作用于本命令创建的自动备份，不会删除未知/手工恢复文件。
-- [ ] Windows 定时备份入口可配置、可安装、可移除，并复用同一 Django 备份命令。
-- [ ] `AGENTS.md` 明确要求数据库高风险操作前先建立恢复点。
-- [ ] 自动测试完全使用临时数据库/临时目录，不接触真实用户数据库。
-- [ ] 备份失败时返回失败状态，且不会把不完整文件伪装成有效备份。
+- [x] `db.sqlite3` 仍未被 Git 跟踪，现有本地数据没有进入 GitHub。
+- [x] 一条命令可以在仓库外生成一致性 SQLite 备份。
+- [x] 每份有效备份都有可核验的 SHA-256 和 SQLite 完整性检查结果。
+- [x] 备份命令不会输出任何数据库业务内容或私有公式源码。
+- [x] 目标目录位于仓库内部时命令会拒绝执行。
+- [x] 默认不会覆盖已有备份。
+- [x] 历史清理只作用于本命令创建的自动备份，不会删除未知/手工恢复文件。
+- [x] Windows 定时备份入口可配置、可安装、可移除，并复用同一 Django 备份命令。
+- [x] `AGENTS.md` 明确要求数据库高风险操作前先建立恢复点。
+- [x] 自动测试完全使用临时数据库/临时目录，不接触真实用户数据库。
+- [x] 备份失败时返回失败状态，且不会把不完整文件伪装成有效备份。
 
 ## 必须运行的检查
 
-- [ ] `git diff --check`
-- [ ] `python manage.py check`
-- [ ] 相关 Django/management command 自动测试
-- [ ] 使用临时 SQLite 数据库完成一次成功备份、SHA-256 与 `PRAGMA integrity_check` 验证
-- [ ] 验证仓库内部目标路径会被拒绝
-- [ ] 验证保留策略不会删除未知文件
-- [ ] 验证 `git status` 中没有数据库、备份或敏感运行产物
+- [x] `git diff --check`
+- [x] `python manage.py check`
+- [x] 相关 Django/management command 自动测试
+- [x] 使用临时 SQLite 数据库完成一次成功备份、SHA-256 与 `PRAGMA integrity_check` 验证
+- [x] 验证仓库内部目标路径会被拒绝
+- [x] 验证保留策略不会删除未知文件
+- [x] 验证 `git status` 中没有数据库、备份或敏感运行产物
 
 ## Codex Completion Report
 
-完成后填写：
-
-- Branch:
-- Commit:
-- Push:
-- Summary:
-- Files changed:
-- Checks run:
-- Backup command example:
-- Default / configured backup directory behavior:
-- Retention behavior:
-- Windows scheduled-task behavior:
-- Design choices:
-- Unresolved issues/risks:
-- PR:
+- Branch: `codex/002-local-data-protection-and-backup`
+- Commit: `f714071`（实现提交）、`d8d9020`（状态与 Completion Report）、本次 PR 信息更新提交见分支最新历史
+- Push: 已成功推送到 `origin/codex/002-local-data-protection-and-backup`
+- Summary: 新增安全的 SQLite 一致性备份命令、SHA-256/integrity_check 校验、仓库内路径拒绝、不可覆盖发布和自动备份保留策略；新增 Windows 计划任务入口、操作说明和临时数据库测试。
+- Files changed: `AGENTS.md`、`core/management/commands/backup_local_db.py`、`core/tests.py`、`docs/operations/local-database-backup.md`、本任务文档、`scripts/manage_local_db_backup_task.ps1`
+- Checks run: `git diff --check` 通过；`python manage.py check` 通过（仅有既存的两个 `DEFAULT_AUTO_FIELD` 警告）；`python manage.py test core` 23/23 通过；PowerShell 脚本语法检查通过。
+- Backup command example: `python manage.py backup_local_db`；可用 `--keep 30` 或 `HUNTALPHA_LOCAL_BACKUP_KEEP` 配置保留数量。
+- Default / configured backup directory behavior: 默认使用仓库父目录下的 `huntalpha-db-backups`；可用 `HUNTALPHA_LOCAL_BACKUP_DIR` 指定仓库外目录；仓库内路径一律拒绝。
+- Retention behavior: 默认保留 30 份，只处理严格匹配 `huntalpha-local-db-YYYYMMDD-HHMMSS-ffffff.sqlite3` 的自动备份，不删除未知文件、手工恢复目录或其他文件。
+- Windows scheduled-task behavior: `scripts/manage_local_db_backup_task.ps1 -Action Install -Time 03:00` 创建/更新固定名称的当前用户每日任务；`-Action Remove` 可重复移除；任务动作只调用 `python manage.py backup_local_db`。
+- Design choices: 源库以只读 SQLite URI 打开，使用 `Connection.backup()` 生成一致性副本；临时文件先完成完整性和哈希校验，再通过同目录非覆盖原子发布；失败时清理临时文件且不输出数据库内容。
+- Real local backup verification: `C:\Users\Administrator\Documents\ChatGPT\huntalpha-db-backups\huntalpha-local-db-20260905-031549-149897.sqlite3`，180224 bytes，SHA-256 `251C994F9A8D2716340158694F6657031EC9D95190C5349B09398F7A13E22A37`，`integrity_check: ok`；只读 ORM 确认 Formula 仍为 4 条。
+- Unresolved issues/risks: 本地备份未加密，备份目录必须按敏感本地数据保护；计划任务运行账户需能访问已配置的备份目录；Django 仍有两个既存的主键类型警告。
+- PR: [#4](https://github.com/kuashan/huntalpha/pull/4)，不在本任务中自动合并
 
 ## Review
 
 由 ChatGPT/用户验收后填写：
 
-- Result:
-- Notes:
+- Result: ACCEPTED
+- Notes: ChatGPT 已直接检查 PR #4 的实际改动。备份命令使用 SQLite 一致性备份、完整性检查和 SHA-256，拒绝仓库内目标目录且不覆盖既有备份；保留策略只清理严格匹配的自动备份；自动测试使用临时数据库；GitHub PR 中未出现数据库、备份或私有公式源码。真实本地备份验证成功，Formula 仍为 4 条。Windows 计划任务当前采用当前用户交互式登录上下文，因此只有在该用户已登录时才会按计划运行；这是已知的非阻塞限制，后续若需要“注销后仍运行/错过时间后补跑”可另开小任务增强。
