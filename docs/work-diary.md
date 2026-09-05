@@ -205,6 +205,46 @@ PR：#17
 - 最终回归：`python manage.py test core` 65 项通过，`python manage.py check`、`python manage.py makemigrations --check`、`npm run build`、`git diff --check` 均通过。
 - Formula 仍为 4 条；Formula source 未读取、修改或输出。
 
+### Task 005.1.1 — Account Tier Identity Crest
+
+状态：`IMPLEMENTED / MERGED`
+
+PR：#19
+
+合并主线：`f4c0e8ddd0f7883a4f9ead2ddb4f78de5d0b27c5`
+
+最终实现：
+- 新增可复用的账户等级身份徽章，以皇冠 + 中央头像区 + 等级带作为账户身份视觉。
+- FREE 使用蓝色体系，PRO 预留金色体系；当前没有真实 Pro entitlement，因此 authenticated 用户只显示真实 FREE，Visitor 不显示正式等级徽章。
+- 头像区当时使用用户名首字符 fallback，并为后续真实 `avatar_url` 保留接口。
+- Watchlist entitlement 继续使用真实 Free=10；Pro=20 仅作未来真实 entitlement 配置预留。
+- 无数据库迁移、无正式数据库内容修改。
+- 最终验证包含 `python manage.py check`、`python manage.py test core`、`python manage.py makemigrations --check`、`npm run build`、`git diff --check`，共 67 项 core 测试通过。
+
+### Task 005.1.2 — Account Menu + Personal Center
+
+状态：`IMPLEMENTED / MERGED`
+
+PR：#22
+
+合并主线：`7a0aced882031583bc11aae5043d73bfaedf1449`
+
+最终实现：
+- authenticated Header 移除常驻用户名与独立退出按钮；账户皇冠徽章成为账户主入口，支持 hover 预览、click 固定/切换、Escape 与外部点击关闭。
+- Header 右侧账户控制组整体靠右，顺序固定为账户皇冠 → 语言选择；Visitor 保留访客身份/退出与语言入口，窄屏仍保留语言控件。
+- 新增 `/api/account/summary/`、独立 `/account` 个人中心及 Overview / Profile / Membership & AI Beans / Security / Preferences 五个真实 section。
+- 新增 `AccountProfile` 一对一账户资料/偏好模型，支持显示名称、头像、涨跌配色、默认市场和默认 K 线周期；读取摘要不会无故创建 profile，实际写入时才建立。
+- 头像上传/删除要求 authenticated + CSRF，真实解码 JPEG/PNG/WebP，限制文件/像素尺寸，统一裁切为 512×512 WebP 并去除 EXIF；使用 Django storage abstraction，默认用户媒体目录位于仓库外。
+- 市场涨跌配色支持 `cn`（涨红跌绿，默认）和 `international`（涨绿跌红），真实作用于 Market Overview、Watchlist、当前报价和 K 线蜡烛；Formula/指标作者自定义颜色不被改写。
+- 默认市场与默认周期绑定账户并在新的 terminal session 初次进入时应用；用户本次会话中的手动选择不会被持续覆盖。
+- AccountPopover 的 Watchlist 数量使用 App 实时状态，避免摘要缓存过期；账户摘要首次请求失败后可在下次打开时重试，成功后才缓存。
+- 密码修改使用当前密码、Django password validators、确认密码、CSRF 与 `update_session_auth_hash`，不使用 `csrf_exempt`。
+- AI 豆语义固定为未来充值后永久账户余额；当前 `status=not_enabled`、`balance=null`、`permanent=true`，无 daily/monthly/reset 字段。会员状态继续来自真实后端；没有真实 Pro entitlement 时只显示 FREE。
+- 新增 migration `0009_accountprofile.py`；正式本地数据库迁移前后均执行仓库外备份并通过 `integrity_check: ok`，未进行破坏性数据库操作。
+- Python 运行依赖清单明确为 Django、futu-api、django-simpleui、Pillow 四个已验证 direct dependencies。
+- 最终回归：`python manage.py test core` 78/78 通过；`python manage.py check`、`python manage.py makemigrations --check`、`npm run build`、`git diff --check` 均通过。
+- Formula 数量仍为 4；Formula source 未读取、修改或输出。
+
 ---
 
 维护要求：本文件以追加完成历史为主；不要因为 worklog 清理而删除已经完成的重要决策轨迹。
