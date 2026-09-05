@@ -287,7 +287,7 @@ Completion Report 必须包含：
 - Branch: `codex/004-1-real-market-index-header`
 - Implementation commit: `324dda0b0d1fa39e4a1fa2a056322dc50dc6d9ca`; PR: `#12`.
 - Implementation: added the provider-neutral `core/market_indices.py` adapter and `GET /api/market-index-snapshots/`; the frontend now renders three real-data market cards and hides crypto from the main page.
-- Verified SDK: `futu-api 10.10.7008`.
+- Verified SDK/OpenD: `futu-api 10.10.7008`; OpenD `server_ver=1010` as returned by `get_global_state`.
 - Verified OpenD mappings and provider names:
   - `SH.000001` — 上证指数 — snapshot succeeded.
   - `SZ.399001` — 深证成指 — snapshot succeeded.
