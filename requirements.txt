@@ -1,1 +1,4 @@
-Pillow>=11.0
+Django==5.2.17
+futu-api==10.10.7008
+django-simpleui==2026.1.13
+Pillow==12.3.0

@@ -1250,7 +1250,15 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertIn(':watchlist-remaining="watchlistRemaining"', self.app_source)
         self.assertIn('marketColorTokens', self.app_source)
         self.assertIn(':market-color-tokens="marketColorTokens"', self.app_source)
-        self.assertLess(self.app_source.index('<AccountPopover v-else'), self.app_source.index('<select class="terminal-language"'))
+        header_source = self.app_source.split('<header>', 1)[1].split('</header>', 1)[0]
+        controls_source = header_source.split('<div class="header-account-controls">', 1)[1].split('</div></header>', 1)[0]
+        self.assertIn('<div class="header-account-controls">', header_source)
+        self.assertIn('<div v-if="visitor" class="visitor-account">', controls_source)
+        self.assertIn('<AccountPopover v-else', controls_source)
+        self.assertIn('<select class="terminal-language"', controls_source)
+        self.assertLess(controls_source.index('<AccountPopover v-else'), controls_source.index('<select class="terminal-language"'))
+        self.assertIn('.header-account-controls{', self.app_source)
+        self.assertIn('margin-left:auto', self.app_source.split('.header-account-controls{', 1)[1].split('}', 1)[0])
         self.assertIn('/api/account/profile/', self.center_source)
         self.assertIn('/api/account/avatar/', self.center_source)
         self.assertIn('/api/account/preferences/', self.center_source)
@@ -1260,6 +1268,13 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertNotIn('setLocale', self.center_source)
         self.assertNotIn('languages', self.center_source)
         self.assertIn('applyOptions', (self.base_dir / 'frontend' / 'src' / 'components' / 'MarketChart.vue').read_text(encoding='utf-8'))
+
+    def test_header_right_controls_and_worklog_keep_account_security_out_of_realtime_task(self):
+        worklog_source = (self.base_dir / 'docs' / 'product-worklog.md').read_text(encoding='utf-8')
+        self.assertIn('时区与交易时段 → Task 005.1.3', worklog_source)
+        self.assertIn('登录设备/会话与 2FA → future Account Security task', worklog_source)
+        self.assertIn('Task 005.1.3 仅负责 realtime provider abstraction', worklog_source)
+        self.assertNotIn('登录设备/会话与 2FA → Task 005.1.3', worklog_source)
 
 
 class WatchlistModelAndApiTests(TestCase):
