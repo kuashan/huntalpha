@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import CalibrationDataset, MarketSymbol
+from .models import CalibrationDataset, MarketSymbol, WatchlistEntry
 
 
 @admin.register(CalibrationDataset)
@@ -16,3 +16,11 @@ class MarketSymbolAdmin(admin.ModelAdmin):
     list_filter = ("market", "active", "security_type", "provider")
     search_fields = ("code", "name", "provider_symbol")
     readonly_fields = ("catalog_updated_at", "market_cap_updated_at")
+
+
+@admin.register(WatchlistEntry)
+class WatchlistEntryAdmin(admin.ModelAdmin):
+    list_display = ("user", "symbol", "created_at")
+    list_filter = ("symbol__market",)
+    search_fields = ("user__username", "user__email", "symbol__code", "symbol__name")
+    readonly_fields = ("created_at",)
