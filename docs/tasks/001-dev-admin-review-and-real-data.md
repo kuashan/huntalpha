@@ -1,6 +1,6 @@
 # Task 001 — 开发阶段管理员审查入口与真实行情清理
 
-Status: READY_FOR_CODEX
+Status: IMPLEMENTED
 
 ## 背景
 
@@ -110,19 +110,17 @@ HuntAlpha 仍处于开发阶段。当前前端每次打开都会进入完整登�
 
 ## Codex Completion Report
 
-完成后填写：
-
-- Branch:
-- Commit:
-- Push:
-- Summary:
-- Files changed:
-- Checks run:
-- Real-data verification:
-- Admin-review verification:
-- Design choices:
-- Unresolved issues/risks:
-- PR:
+- Branch: `codex/001-dev-admin-review-and-real-data`
+- Commit: `564685f`（实现提交；本报告为后续文档提交）
+- Push: 已成功 Push 到 `origin/codex/001-dev-admin-review-and-real-data`
+- Summary: 增加开发阶段管理员审查模式；服务端强制 staff/superuser 权限；前端报价、OHLC 和 K 线只使用富途 OpenD 真实数据；OpenD 不可用时显示明确错误并保持空数据。
+- Files changed: `.env.example`、`quant_site/settings.py`、`core/views.py`、`core/tests.py`、`frontend/src/App.vue`、`frontend/src/components/AuthGate.vue`、`frontend/src/components/MarketChart.vue`、`frontend/src/data/marketData.js`、`frontend/src/i18n.js`。
+- Checks run: `git diff --check` 通过；`python manage.py check` 通过（仅有既有 AutoField warning）；`python manage.py test core`：24 项通过；`npm run build` 通过；仓库没有前端自动测试脚本。
+- Real-data verification: 使用当前富途 OpenD 和 `SH.600519` 验证快照与日线 K 线；快照返回价 1330.0、开 1295.88、高 1338.86、低 1295.6，最新交易日 K 线收盘 1330.0。浏览器终端的数值和图表均来自 Django `/api/quote/`、`/api/kline/`。
+- Admin-review verification: 开启 `HUNTALPHA_ADMIN_REVIEW_MODE=1` 后，登录页只显示管理员审查登录，注册/访客入口隐藏；服务端拒绝普通用户、访客和直接 API 绕过；staff 登录可保持 Django Session 并进入终端。用于验证的临时本地 staff 账户已删除。
+- Design choices: 开关默认关闭且仅在 `DEBUG=True` 时生效；权限在后端 login/session/terminal API 三层执行；`marketData.js` 仅保留代码/名称导航清单；删除 `makeBars()` 和静态行情摘要；OpenD 连接先做 1 秒 TCP 预检并返回 503，不生成任何行情回退。
+- Unresolved issues/risks: `python manage.py check` 仍报告 `core` 模型未显式设置 `DEFAULT_AUTO_FIELD` 的既有 warning；顶部市场指数摘要当前显示“暂未接入真实市场指数”，待后续接入 OpenD 真实指数源；当前 checkout 的本地数据库原为空，实际使用管理员审查模式前需由项目所有者在本地创建/保留自己的 staff/superuser 账户，凭据不会进入仓库。
+- PR: [#2 — feat: add admin review gate and real market data](https://github.com/kuashan/huntalpha/pull/2)
 
 ## Review
 
