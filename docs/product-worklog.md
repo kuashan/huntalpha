@@ -15,24 +15,7 @@
 
 ## 当前进行中
 
-### Task 005.1 — 账户自选列表 + 搜索星标收藏
-
-状态：`IN_PROGRESS / WORKFLOW_GIVEN_TO_CODEX`
-
-最新产品决定：
-- 左侧“行情列表”改成“自选列表”。
-- 搜索框保留；无搜索词时显示当前市场自选，有搜索词时搜索当前市场完整真实证券目录。
-- 搜索/自选结果最右侧使用 `☆ / ★`；收藏成功为黄色 `★`，点击星标不触发行选择。
-- 免费用户全账户最多 **10** 个自选；Pro 最多 **20** 个。
-- 额度是 CN + HK + US + 未来 Crypto 的账户全局总数，不是每个市场分别 10/20。
-- 后端按真实账户 ID 强制额度；不能用 localStorage/设备 ID 代替账户持久化。
-- Visitor 可以搜索/研究，但不能建立持久自选。
-- 当前 Crypto 只有 BTC/ETH preview，没有真实 MarketSymbol/provider，因此暂不能收藏 BTC/ETH。
-- 左侧不再默认显示“市值 Top 5”；`market_leaders`、market_cap 和排名后端能力继续保留供未来 Scanner/排行榜使用。
-- 自选列表默认只加载轻量 identity/quote/change；K 线、复杂指标、Formula、AI 仅在用户打开具体证券后按需加载。
-- 旧 Issue #9 中 Free=5 的规则已被本次最新决定覆盖；当前有效规则是 Free=10 / Pro=20。
-
-预期正式任务：`docs/tasks/005-1-account-watchlist.md`
+当前没有已启动但尚未完成的正式 Task。
 
 ---
 
