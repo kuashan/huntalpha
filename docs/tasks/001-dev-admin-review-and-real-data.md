@@ -113,14 +113,14 @@ HuntAlpha 是准备正式上线、长期维护的真实产品。前端原有的�
 
 - Branch: `codex/001-dev-admin-review-and-real-data`
 - Commits: `e5c45ee`（本次恢复标准认证流程并移除管理员审查模式）；`564685f`（原 PR 的真实行情实现，现仍保留）。本 Completion Report 位于随后提交的 Task 001 文档更新中。
-- Push: `e5c45ee` 已成功 Push 到 `origin/codex/001-dev-admin-review-and-real-data`；本次文档更新将在提交后 Push。
+- Push: `e5c45ee` 和本次文档更新均已成功 Push 到 `origin/codex/001-dev-admin-review-and-real-data`。
 - Summary: 按 PR #2 最新产品决定撤销管理员专用审查模式，恢复完整登录/注册/访客流程；保留富途 OpenD 真实报价、涨跌幅、OHLC、K 线和 OpenD 不可用时的显式错误，不允许假数据回退。
 - Files changed: 本次最终提交涉及 `.env.example`、`quant_site/settings.py`、`core/views.py`、`core/tests.py`、`frontend/src/App.vue`、`frontend/src/components/AuthGate.vue`、`frontend/src/i18n.js`、`docs/tasks/001-dev-admin-review-and-real-data.md`；真实行情改造涉及的 `frontend/src/components/MarketChart.vue` 和 `frontend/src/data/marketData.js` 保持在 PR 中。
 - Checks run: `git diff --check` 通过；`python manage.py check` 通过，只有既有的两个 `core` 模型 `DEFAULT_AUTO_FIELD` warning；`python manage.py test core` 通过，20 项测试全部通过；`npm run build` 通过；`frontend/package.json` 没有前端自动测试脚本。代码静态核验确认运行时配置、后端和前端不再引用管理员审查模式或其文案。
-- Real-data verification: 原 PR 已使用当前富途 OpenD 和 `SH.600519` 验证快照与日线 K 线：快照价 1330.0、开 1295.88、高 1338.86、低 1295.6，最新交易日 K 线收盘 1330.0，浏览器终端数值和图表来自 `/api/quote/`、`/api/kline/`。本次修改未触碰真实行情链路；按本次要求重试 `get_snapshot.py SH.600519 --json` 时，`127.0.0.1:11111` 当前未监听并返回 timeout，因此没有把重试失败伪称为新的实时数据验证。
+- Real-data verification: 当前富途 OpenD 已在 `127.0.0.1:11111` 监听；通过本分支 Django API 的访客 Session 端到端验证 `SH.600519` 成功。`/api/quote/` 返回真实快照价 1330.0、真实涨跌幅 `+2.396%`、开 1295.88、最高 1338.86、最低 1295.6、`source: futu-opend`；`/api/kline/` 返回真实日线 K 线，最近一根的 OHLC 为 1295.88 / 1338.86 / 1295.6 / 1330.0。富途原生脚本也返回同一快照和 K 线结果。
 - Authentication verification: `AuthenticationApiTests` 保留并通过正常注册、访客、未登录终端拦截和访客 AI 限制测试；真实行情 API 测试已改为普通登录用户上下文并通过。`AuthGate.vue` 恢复登录/注册切换、`?register=1` 和访客按钮。
 - Design choices: `marketData.js` 仅保留代码/名称导航清单；删除 `makeBars()` 和静态行情摘要；OpenD 连接先做 1 秒 TCP 预检并返回 503，不生成任何行情回退；认证入口不再由管理员审查模式改变。
-- Unresolved issues/risks: 当前富途 OpenD 端口 `127.0.0.1:11111` 在本次重试时未监听，若要复现实时人工验证需重新启动/确认 OpenD；顶部市场指数摘要当前显示“暂未接入真实市场指数”，待后续接入 OpenD 真实指数源；`python manage.py check` 的两个 `DEFAULT_AUTO_FIELD` warning 为既有问题；生产环境安全配置仍需独立任务处理。
+- Unresolved issues/risks: 若 OpenD 后续停止，页面会按当前实现显示行情不可用且不回退假数据；顶部市场指数摘要当前显示“暂未接入真实市场指数”，待后续接入 OpenD 真实指数源；`python manage.py check` 的两个 `DEFAULT_AUTO_FIELD` warning 为既有问题；生产环境安全配置仍需独立任务处理。
 - PR: [#2 — feat: add admin review gate and real market data](https://github.com/kuashan/huntalpha/pull/2)
 
 ## Review
