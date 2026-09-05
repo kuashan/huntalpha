@@ -405,7 +405,7 @@ def indicator_render(request, code, symbol):
         message = unsupported.group(0) if unsupported else "公式语法或参数不受支持，请在后台检查公式"
         return json({"error": f"指标计算失败：{message}"}, 422)
     except subprocess.TimeoutExpired:
-        return json({"error": "指标计算超时，请检查公式是否包含过大的递归或回看范围"}, 422)
+        return json({"error": "指标计算耗时过长，请稍后重试或降低同时运行的指标数量"}, 422)
     except json_module.JSONDecodeError:
         return json({"error": "指标计算服务返回了无效结果"}, 422)
     def points(values):

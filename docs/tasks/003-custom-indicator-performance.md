@@ -1,6 +1,6 @@
 # Task 003 — 自定义指标计算性能修复
 
-Status: READY_FOR_CODEX
+Status: IMPLEMENTED
 
 ## 背景
 
@@ -144,25 +144,29 @@ Django 的子进程 timeout 应继续存在，用来阻止真实死循环或异�
 
 完成后报告：
 
-- Branch:
-- Commit:
-- Push:
-- Root cause confirmed:
-- Implementation summary:
-- Files changed:
-- Non-chip lazy calculation verification:
-- Chip calculation correctness verification:
-- 1200-bar performance verification:
+- Branch: `codex/003-custom-indicator-performance`
+- Commit: `11782c7`
+- Push: success (`codex/003-custom-indicator-performance`)
+- Root cause confirmed: yes. Non-chip formulas paid for unconditional chip distribution, and the old implementation copied and sorted the chip map once for each of 101 quantiles on every bar.
+- Implementation summary: added a comment/string-aware call dependency pre-check; non-chip formulas pass directly to the compiler without invoking chip distribution; chip data is sorted once per bar and one cumulative traversal fills COST 0..100 while WINNER reuses the same normalized sorted data; retained the 8-second subprocess timeout and changed its message to a neutral long-running calculation message.
+- Files changed: `core/chip_distribution.mjs`, `core/formula_dependencies.mjs`, `core/formula_runner.mjs`, `core/formula_runner_core.mjs`, `core/tests.py`, `core/formula_runner.test.mjs`, `core/views.py`, and this task document.
+- Non-chip lazy calculation verification: passed. An injected calculator was not called for a synthetic non-chip formula; comments, strings, ordinary identifiers, and similarly named functions were not detected as dependencies.
+- Chip calculation correctness verification: passed. Synthetic COST/WINNER/LWINNER calls enabled calculation, and the optimized deterministic fixture matched the pre-optimization result within floating-point tolerance.
+- 1200-bar performance verification: the same synthetic non-chip runner benchmark decreased from 8220 ms before the change to 102 ms after the change. The structural chip regression processed 1200 bars with exactly 1200 sorts, never 101 sorts per bar.
 - Private Formula verification（仅名称/成功失败/耗时/K线数量，不含 source）:
-- Formula count before/after:
-- Formula source changed: yes/no
-- `python manage.py check`:
-- `python manage.py test core`:
-- Node/frontend tests:
-- `npm run build`:
-- `git diff --check`:
-- Unresolved risks:
-- PR:
+  - 火焰山 — success, 1211 bars, 560.2 ms, `tdx-server-v2`
+  - 一气三清 — success, 1211 bars, 473.2 ms, `tdx-server-v2`
+  - 神龙通道 — success, 1211 bars, 548.0 ms, `tdx-server-v2`
+  - 缠论顺势而为 — success, 1211 bars, 770.7 ms, `tdx-server-v2`
+- Formula count before/after: 4 / 4
+- Formula source changed: no
+- `python manage.py check`: passed; existing `models.W042` warnings remain for two models.
+- `python manage.py test core`: passed, 27 tests.
+- Node/frontend tests: `node --test core/formula_runner.test.mjs` passed, 5 tests.
+- `npm run build`: passed.
+- `git diff --check`: passed.
+- Unresolved risks: the chip model remains an auditable triangular-turnover approximation rather than a proprietary terminal's exact COST model; OpenD remains a required runtime dependency and the 8-second safety timeout remains in force.
+- PR: [#6](https://github.com/kuashan/huntalpha/pull/6), open against `main`; not merged.
 
 ## Review
 
