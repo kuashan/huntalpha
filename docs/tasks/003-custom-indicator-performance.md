@@ -145,8 +145,8 @@ Django 的子进程 timeout 应继续存在，用来阻止真实死循环或异�
 完成后报告：
 
 - Branch: `codex/003-custom-indicator-performance`
-- Commit: implementation commit recorded in Git history
-- Push: completed after local verification
+- Commit: `11782c7`
+- Push: success (`codex/003-custom-indicator-performance`)
 - Root cause confirmed: yes. Non-chip formulas paid for unconditional chip distribution, and the old implementation copied and sorted the chip map once for each of 101 quantiles on every bar.
 - Implementation summary: added a comment/string-aware call dependency pre-check; non-chip formulas pass directly to the compiler without invoking chip distribution; chip data is sorted once per bar and one cumulative traversal fills COST 0..100 while WINNER reuses the same normalized sorted data; retained the 8-second subprocess timeout and changed its message to a neutral long-running calculation message.
 - Files changed: `core/chip_distribution.mjs`, `core/formula_dependencies.mjs`, `core/formula_runner.mjs`, `core/formula_runner_core.mjs`, `core/tests.py`, `core/formula_runner.test.mjs`, `core/views.py`, and this task document.
@@ -166,7 +166,7 @@ Django 的子进程 timeout 应继续存在，用来阻止真实死循环或异�
 - `npm run build`: passed.
 - `git diff --check`: passed.
 - Unresolved risks: the chip model remains an auditable triangular-turnover approximation rather than a proprietary terminal's exact COST model; OpenD remains a required runtime dependency and the 8-second safety timeout remains in force.
-- PR: to be created against `main`; not merged.
+- PR: [#6](https://github.com/kuashan/huntalpha/pull/6), open against `main`; not merged.
 
 ## Review
 
