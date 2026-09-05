@@ -271,8 +271,8 @@ Codex 在编码前必须先实测当前 Futu/OpenD SDK：
 完成后填写：
 
 - Branch: `codex/004-dynamic-symbol-catalog`
-- Commit: implementation commit recorded in Git history
-- PR: to be created against `main`; not merged
+- Commit: `fe80c1e`
+- PR: [#8](https://github.com/kuashan/huntalpha/pull/8), open against `main`; not merged
 - Provider capability investigation: Futu SDK `10.10.7008` with the local OpenD. `get_stock_basicinfo(..., stock_type="STOCK")` returned the complete ordinary-stock catalogs; CN required combining `SH` and `SZ`. `ETF`, `BOND`, and `WARRANT` are separate provider security-type queries and are excluded. `get_stock_filter` with `MARKET_VAL` and descending sort returned the real market-cap candidates, with a 200-row maximum. `get_market_snapshot` accepted 400 codes and rejected 401, but is not needed on every page or for the daily leader cache.
 - A 股 catalog count: 5347
 - 港股 catalog count: 3777
