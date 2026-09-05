@@ -154,6 +154,8 @@ async function draw(options = {}) {
       if (payload.bars?.length) {
         loadedBars = orderedUniqueBars(payload.bars)
         hasMoreHistory = Boolean(payload.has_more)
+      } else {
+        historyStatus.value = '行情不可用：富途 OpenD 未返回真实 K 线'
       }
     } catch (error) {
       historyStatus.value = `行情加载失败：${error.message}`

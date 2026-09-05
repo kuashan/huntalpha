@@ -9,10 +9,13 @@ import tempfile
 from types import SimpleNamespace
 from datetime import datetime, timezone as datetime_timezone
 from unittest import mock
+from unittest.mock import patch
 
 from django.conf import settings
 from django.core.management import call_command, CommandError
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.contrib.auth import get_user_model
+from futu import RET_OK
 
 from .views import bar_rows
 
@@ -170,6 +173,101 @@ class AuthenticationApiTests(TestCase):
         self.client.post('/api/auth/guest/')
         response = self.client.post('/api/ai-analysis/', data=json.dumps({'code': 'SH.600519'}), content_type='application/json')
         self.assertEqual(response.status_code, 403)
+
+
+class RealMarketDataApiTests(TestCase):
+    def make_user(self):
+        return get_user_model().objects.create_user(
+            username='member@example.com',
+            email='member@example.com',
+            password='A-safe-password-42',
+        )
+
+    def test_quote_returns_only_the_real_opend_snapshot(self):
+        self.client.force_login(self.make_user())
+
+        class Frame:
+            empty = False
+            iloc = None
+
+            def __init__(self, row):
+                self.iloc = self
+                self.row = row
+
+            def __getitem__(self, index):
+                if index != 0:
+                    raise IndexError(index)
+                return self.row
+
+        class Client:
+            def __init__(self):
+                self.frame = Frame({
+                    'code': 'SH.600519', 'name': '贵州茅台', 'last_price': 1500.25,
+                    'prev_close_price': 1490.0, 'open_price': 1495.0,
+                    'high_price': 1505.0, 'low_price': 1488.0,
+                    'update_time': '2026-09-05 10:00:00',
+                })
+
+            def get_market_snapshot(self, codes):
+                self.codes = codes
+                return RET_OK, self.frame
+
+            def close(self):
+                pass
+
+        client = Client()
+        with patch('core.views.context', return_value=client):
+            response = self.client.get('/api/quote/SH.600519/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            'code': 'SH.600519', 'name': '贵州茅台', 'price': 1500.25,
+            'change': 0.688, 'open': 1495.0, 'high': 1505.0, 'low': 1488.0,
+            'updated_at': '2026-09-05 10:00:00', 'source': 'futu-opend',
+        })
+        self.assertEqual(client.codes, ['SH.600519'])
+
+    def test_quote_reports_missing_real_data_instead_of_zero(self):
+        self.client.force_login(self.make_user())
+
+        class Frame:
+            empty = False
+
+            def __init__(self):
+                self.iloc = self
+
+            def __getitem__(self, index):
+                return {
+                    'code': 'CC.BTCUSD', 'name': 'Bitcoin / USD', 'last_price': None,
+                    'prev_close_price': None, 'open_price': None, 'high_price': None,
+                    'low_price': None, 'update_time': '',
+                }
+
+        class Client:
+            def get_market_snapshot(self, codes):
+                return RET_OK, Frame()
+
+            def close(self):
+                pass
+
+        with patch('core.views.context', return_value=Client()):
+            response = self.client.get('/api/quote/CC.BTCUSD/')
+        self.assertEqual(response.status_code, 502)
+        self.assertIn('有效最新价', response.json()['error'])
+
+    def test_kline_error_does_not_return_generated_bars(self):
+        self.client.force_login(self.make_user())
+
+        class Client:
+            def request_history_kline(self, *args, **kwargs):
+                return 1, 'OpenD unavailable', None
+
+            def close(self):
+                pass
+
+        with patch('core.views.context', return_value=Client()):
+            response = self.client.get('/api/kline/SH.600519/?period=日线')
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn('bars', response.json())
 
 
 class TongdaxinFormulaEngineTests(SimpleTestCase):

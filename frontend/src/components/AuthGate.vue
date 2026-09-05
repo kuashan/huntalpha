@@ -3,7 +3,8 @@ import { computed, ref } from 'vue'
 import { languages, locale, setLocale, t } from '../i18n'
 
 const emit = defineEmits(['authenticated'])
-const mode = ref(new URLSearchParams(window.location.search).get('register') === '1' ? 'register' : 'login')
+const registerRequested = new URLSearchParams(window.location.search).get('register') === '1'
+const mode = ref(registerRequested ? 'register' : 'login')
 const email = ref('')
 const password = ref('')
 const name = ref('')
@@ -14,7 +15,7 @@ const streams = Array.from({ length: 27 }, (_, index) => ({
   left: `${(index * 3.9 + (index % 4) * 1.4) % 100}%`,
   delay: `${-(index * 0.37)}s`,
   duration: `${7 + (index % 6)}s`,
-  code: ['SH.600519 1493.62 +0.83%', 'HK.00700 438.80 +1.41%', 'US.NVDA 178.24 +1.83%', 'CC.BTCUSD 104821.60', 'MACD  DIF  DEA', 'BOLL  MID  UPPER', 'KDJ  K  D  J', 'SZ.300750 188.46 -1.24%'][index % 8],
+  code: ['SH.600519', 'HK.00700', 'US.NVDA', 'CC.BTCUSD', 'MACD  DIF  DEA', 'BOLL  MID  UPPER', 'KDJ  K  D  J', 'SZ.300750'][index % 8],
 }))
 const submitLabel = computed(() => pending.value ? '…' : mode.value === 'login' ? t('enter') : t('create'))
 function switchMode(next) { mode.value = next; error.value = '' }
