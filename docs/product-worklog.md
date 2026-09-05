@@ -179,6 +179,28 @@
 - 明确延期：时区与交易时段 → Task 005.1.3；登录设备/会话与 2FA → future Account Security task；工作区统计/同步 → Task 005.2；通知 → 后续通知任务；账单/发票 → 真实付费体系后；主题切换 → 存在第二套真实主题后再评估。
 - Task 005.1.3 仅负责 realtime provider abstraction、市场时间戳与时区/交易时段边界、当前 live bar、指标联动和重连；不包含 2FA、登录设备、账户会话或邮箱安全。
 
+### Task 005.1.3 — Real-time Market Data & Indicator Pipeline Foundation
+
+状态：`PLANNED`
+
+核心原则：
+> Provider 负责提供真实市场数据；Indicator / Formula 保持原有算法；实时行情更新当前正在形成的 bar；当前 bar 变化驱动技术指标重新计算。
+
+正式范围：
+- Provider-neutral realtime architecture，先以 Futu 作为真实 provider 验证，并为未来 Coinbase 接入同一管线保留边界。
+- current live bar、closed bar 语义、provider timestamp、market timezone / session boundaries。
+- realtime quote / Kline linkage、built-in indicator 与 Custom Formula realtime update。
+- throttle / coalescing、Formula single-flight、stale response protection、reconnect / reconciliation、shared subscription registry、in-place chart update。
+- 全程不使用 fake fallback。
+
+明确不包含：2FA、登录设备、account session management、邮箱安全、支付和 Notification；这些属于未来各自任务。
+
+### Task 005.1.4 — Coinbase Crypto Market Data
+
+状态：`PLANNED`
+
+规划关系：先由 Task 005.1.3 建立 realtime pipeline，再实现 Coinbase adapter，接入统一管线并提供 BTC / ETH 真实行情、实时 K 线与指标联动。本任务当前不实现 Coinbase。
+
 ---
 
 ## 长期架构原则

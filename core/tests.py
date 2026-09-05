@@ -1244,6 +1244,16 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertNotIn("next_reset_at", combined)
         self.assertNotIn("每月重置", combined)
 
+    def test_account_summary_retry_only_caches_success(self):
+        success_index = self.popover_source.index('summary.value = payload')
+        loaded_index = self.popover_source.index('summaryLoaded.value = true')
+        finally_index = self.popover_source.index('.finally(() => { loading.value = false })')
+        self.assertLess(success_index, loaded_index)
+        self.assertLess(loaded_index, finally_index)
+        self.assertIn('summaryLoaded.value = false', self.popover_source)
+        self.assertNotIn('finally(() => { loading.value = false; summaryLoaded.value = true })', self.popover_source)
+        self.assertNotIn('setInterval', self.popover_source)
+
     def test_account_center_profile_preferences_and_live_terminal_state_contract(self):
         self.assertIn(':watchlist-total="watchlistTotal"', self.app_source)
         self.assertIn(':watchlist-limit="watchlistLimit"', self.app_source)

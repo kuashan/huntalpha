@@ -52,9 +52,11 @@ function loadSummary() {
       const payload = await reply.json()
       if (!reply.ok) throw new Error(payload.error || '账户摘要暂不可用')
       summary.value = payload
+      summaryError.value = ''
+      summaryLoaded.value = true
     })
-    .catch(error => { summaryError.value = error.message || '账户摘要暂不可用' })
-    .finally(() => { loading.value = false; summaryLoaded.value = true })
+    .catch(error => { summaryError.value = error.message || '账户摘要暂不可用'; summaryLoaded.value = false })
+    .finally(() => { loading.value = false })
 }
 
 function showPreview() {
