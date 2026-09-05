@@ -180,6 +180,31 @@
 5. 方向被新决定覆盖时，以最新决定为准；例如 Watchlist Free 配额已经从旧的 5 更新为 10。
 6. 不在这些文档中记录密钥、token、Formula source、用户私密数据或数据库内容。
 
+### Task 005.1 — 账户自选列表 + 搜索星标收藏
+
+状态：`IMPLEMENTED / MERGED`
+
+PR：#17
+
+合并主线：`6ff474feeb1c54c9ede00bf1343bd9130e16b176`
+
+最终实现：
+- 左侧默认从市值 Top5 改为账户自选列表；搜索框继续查询当前市场完整真实证券目录。
+- 搜索和自选列表加入 `☆ / ★` 星标；收藏成功为黄色 `★`，星标点击不触发行选择。
+- 新增 `WatchlistEntry(user, symbol, created_at)`，`(user, symbol)` 唯一；自选绑定真实账户并可跨登录持久化。
+- Free Watchlist 额度为全账户 10 个；Pro 配置预留 20 个；CN/HK/US 与未来 Crypto 共用同一总额度。
+- 当前项目尚无真实 Pro entitlement，因此真实账户统一按 Free=10 执行，不用 staff/superuser/用户名伪造 Pro。
+- 后端强制额度；同用户新增时在事务中使用 `select_for_update()` 锁定用户行，再做重复检查、额度统计、额度判断和创建，避免未来并发数据库下突破额度。
+- 重复收藏幂等；第 11 个 Free 收藏由后端 HTTP 409 拒绝。
+- 写接口使用 Django CSRF；Visitor 不能持久收藏。
+- 当前 Crypto 只有 BTC/ETH preview，没有真实 MarketSymbol/provider，因此不能收藏，也不会请求假 quote/K线。
+- `market_leaders` 和 market_cap 后端能力继续保留，只是不再作为左栏默认入口。
+- 自选列表只加载轻量 identity/quote/change，不批量加载 K线、Formula 或 AI。
+- 数据库新增 migration `0007_watchlistentry.py` 与用于同步既有主键状态的 `0008_alter_calibrationdataset_id_alter_indicator_id_and_more.py`。
+- 迁移前正式备份与迁移后验证备份均完成并通过 `integrity_check: ok`；未执行 flush/reset。
+- 最终回归：`python manage.py test core` 65 项通过，`python manage.py check`、`python manage.py makemigrations --check`、`npm run build`、`git diff --check` 均通过。
+- Formula 仍为 4 条；Formula source 未读取、修改或输出。
+
 ---
 
 维护要求：本文件以追加完成历史为主；不要因为 worklog 清理而删除已经完成的重要决策轨迹。
