@@ -1,6 +1,6 @@
 # Task 001 — 标准认证流程与真实行情清理
 
-Status: IMPLEMENTED
+Status: ACCEPTED
 
 ## 产品决定
 
@@ -123,11 +123,9 @@ HuntAlpha 是准备正式上线、长期维护的真实产品。前端原有的�
 - Authentication verification: `AuthenticationApiTests` 覆盖正常注册、访客、未登录终端拦截和访客 AI 限制；`AuthGate.vue` 保留登录/注册切换、`?register=1` 和访客按钮。
 - Design choices: Decision 0003 明确标记 `SUPERSEDED`，Decision 0004 保持 `ACCEPTED`；`marketData.js` 仅保留代码/名称导航清单；删除 `makeBars()` 和静态行情摘要；OpenD 失败时返回错误或不可用状态，不生成行情回退。
 - Unresolved issues/risks: 若 OpenD 停止，页面会显示行情不可用且不回退假数据；顶部市场指数摘要当前显示“暂未接入真实市场指数”，待后续接入 OpenD 真实指数源；`python manage.py check` 的两个 `DEFAULT_AUTO_FIELD` warning 为既有问题；生产环境安全配置仍需独立任务处理。
-- PR: [#2 — feat: add admin review gate and real market data](https://github.com/kuashan/huntalpha/pull/2)
+- PR: [#2 — feat: use real OpenD market data with standard auth flow](https://github.com/kuashan/huntalpha/pull/2)
 
 ## Review
 
-由 ChatGPT/用户验收后填写：
-
-- Result:
-- Notes:
+- Result: ACCEPTED
+- Notes: ChatGPT 最终复审通过。PR #2 已将最新 `main`（包含 Task 002 本地数据库备份保护）安全合入，最终同步 merge commit 为 `aa263faf98c5231265910929d646b338788abac3`；冲突仅发生在 `core/tests.py` import 区域，保留了 Task 001 与 Task 002 两套测试依赖。最终报告显示 `backup_local_db` 成功且 `integrity_check: ok`，`python manage.py check` 通过（仅既有两个 warning），`python manage.py test core` 26/26 通过，`npm run build` 通过，本地 Formula 仍为 4 条且数据库未被 Git 跟踪。GitHub 复审确认分支相对 `main` behind 0、PR 可合并；实际 diff 保留登录/注册/访客标准流程，删除静态价格、静态市场摘要与 `makeBars()` 生成行情，报价/OHLC/K 线继续来自 Futu OpenD，数据不可用时不回退假数据。无阻塞性问题；生产安全配置、真实市场指数接入和行情刷新/流式更新属于后续独立任务。
