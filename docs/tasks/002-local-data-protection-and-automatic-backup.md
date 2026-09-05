@@ -1,6 +1,6 @@
 # Task 002 — 本地数据保护与自动备份
 
-Status: IN_PROGRESS
+Status: IMPLEMENTED
 
 ## 背景
 
@@ -104,21 +104,20 @@ HuntAlpha 当前本地开发仍使用 SQLite `db.sqlite3`。该数据库包含�
 
 ## Codex Completion Report
 
-完成后填写：
-
-- Branch:
-- Commit:
-- Push:
-- Summary:
-- Files changed:
-- Checks run:
-- Backup command example:
-- Default / configured backup directory behavior:
-- Retention behavior:
-- Windows scheduled-task behavior:
-- Design choices:
-- Unresolved issues/risks:
-- PR:
+- Branch: `codex/002-local-data-protection-and-backup`
+- Commit: `f714071`（实现提交；最终状态/报告提交见本分支后续历史）
+- Push: 待完成
+- Summary: 新增安全的 SQLite 一致性备份命令、SHA-256/integrity_check 校验、仓库内路径拒绝、不可覆盖发布和自动备份保留策略；新增 Windows 计划任务入口、操作说明和临时数据库测试。
+- Files changed: `AGENTS.md`、`core/management/commands/backup_local_db.py`、`core/tests.py`、`docs/operations/local-database-backup.md`、本任务文档、`scripts/manage_local_db_backup_task.ps1`
+- Checks run: `git diff --check` 通过；`python manage.py check` 通过（仅有既存的两个 `DEFAULT_AUTO_FIELD` 警告）；`python manage.py test core` 23/23 通过；PowerShell 脚本语法检查通过。
+- Backup command example: `python manage.py backup_local_db`；可用 `--keep 30` 或 `HUNTALPHA_LOCAL_BACKUP_KEEP` 配置保留数量。
+- Default / configured backup directory behavior: 默认使用仓库父目录下的 `huntalpha-db-backups`；可用 `HUNTALPHA_LOCAL_BACKUP_DIR` 指定仓库外目录；仓库内路径一律拒绝。
+- Retention behavior: 默认保留 30 份，只处理严格匹配 `huntalpha-local-db-YYYYMMDD-HHMMSS-ffffff.sqlite3` 的自动备份，不删除未知文件、手工恢复目录或其他文件。
+- Windows scheduled-task behavior: `scripts/manage_local_db_backup_task.ps1 -Action Install -Time 03:00` 创建/更新固定名称的当前用户每日任务；`-Action Remove` 可重复移除；任务动作只调用 `python manage.py backup_local_db`。
+- Design choices: 源库以只读 SQLite URI 打开，使用 `Connection.backup()` 生成一致性副本；临时文件先完成完整性和哈希校验，再通过同目录非覆盖原子发布；失败时清理临时文件且不输出数据库内容。
+- Real local backup verification: `C:\Users\Administrator\Documents\ChatGPT\huntalpha-db-backups\huntalpha-local-db-20260905-031549-149897.sqlite3`，180224 bytes，SHA-256 `251C994F9A8D2716340158694F6657031EC9D95190C5349B09398F7A13E22A37`，`integrity_check: ok`；只读 ORM 确认 Formula 仍为 4 条。
+- Unresolved issues/risks: 本地备份未加密，备份目录必须按敏感本地数据保护；计划任务运行账户需能访问已配置的备份目录；Django 仍有两个既存的主键类型警告。
+- PR: 待 Push 后创建
 
 ## Review
 
