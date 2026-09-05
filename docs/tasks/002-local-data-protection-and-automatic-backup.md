@@ -1,6 +1,6 @@
 # Task 002 — 本地数据保护与自动备份
 
-Status: READY_FOR_CODEX
+Status: IN_PROGRESS
 
 ## 背景
 
