@@ -1,5 +1,12 @@
 from django.contrib import admin
-from .models import CalibrationDataset, MarketSymbol, WatchlistEntry
+from .models import AccountProfile, CalibrationDataset, MarketSymbol, WatchlistEntry
+
+
+@admin.register(AccountProfile)
+class AccountProfileAdmin(admin.ModelAdmin):
+    list_display = ("user", "price_color_mode", "default_market", "default_period", "updated_at")
+    search_fields = ("user__username", "user__email", "user__first_name")
+    readonly_fields = ("updated_at",)
 
 
 @admin.register(CalibrationDataset)

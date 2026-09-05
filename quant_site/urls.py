@@ -15,6 +15,8 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
+from django.conf import settings
+from django.conf.urls.static import static
 from django.urls import path
 from core import views
 
@@ -26,6 +28,11 @@ urlpatterns = [
     path('api/auth/logout/', views.auth_logout),
     path('api/auth/guest/', views.auth_guest),
     path('api/csrf/', views.csrf_token),
+    path('api/account/summary/', views.account_summary),
+    path('api/account/change-password/', views.change_password),
+    path('api/account/profile/', views.account_profile),
+    path('api/account/preferences/', views.account_preferences),
+    path('api/account/avatar/', views.account_avatar),
     path('api/watchlist/', views.watchlist),
     path('api/watchlist/<str:code>/', views.watchlist_delete),
     path('api/ai-analysis/', views.ai_analysis),
@@ -39,3 +46,6 @@ urlpatterns = [
     path('api/indicators/', views.indicators),
     path('api/indicator-render/<str:code>/<str:symbol>/', views.indicator_render),
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from django.conf import settings
-from django.contrib.auth import get_user_model, login, logout
+from django.contrib.auth import get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
@@ -20,7 +20,11 @@ from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from futu import AuType, KLType, OpenQuoteContext, RET_OK
 from formula_editor.models import Formula
-from .models import MarketSymbol, WatchlistEntry
+from .models import AccountProfile, MarketSymbol, WatchlistEntry
+from .account import (
+    AvatarValidationError, account_avatar_url, account_display_name, account_preferences as account_preferences_data,
+    delete_avatar, save_avatar,
+)
 from .market_indices import FutuOpenDIndexAdapter, grouped_snapshot_response, unavailable_index_items
 from .symbol_catalog import FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 from .watchlist import account_tier_payload, watchlist_limit_for_user
@@ -34,16 +38,19 @@ KLINE_LOOKBACK_DAYS = {"1分": 14, "5分": 45, "15分": 90, "30分": 180, "60分
 def json(data, status=200):
     result = JsonResponse(data, status=status)
     result["Access-Control-Allow-Origin"] = "http://127.0.0.1:5173"
-    result["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+    result["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
     result["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
     result["Access-Control-Allow-Credentials"] = "true"
     return result
 
 
-def user_payload(user):
+def user_payload(user, request=None):
+    profile = AccountProfile.objects.filter(user=user).first()
     return {
         "email": user.email,
-        "name": user.get_full_name() or user.first_name or user.email.split("@", 1)[0],
+        "name": account_display_name(user),
+        "avatar_url": account_avatar_url(request, profile),
+        "preferences": account_preferences_data(user, profile),
         **account_tier_payload(user),
     }
 
@@ -79,6 +86,15 @@ def api_member_required(view):
     def wrapped(request, *args, **kwargs):
         if not request.user.is_authenticated:
             return json({"error": "AI 分析仅向已登录账户开放"}, 403)
+        return view(request, *args, **kwargs)
+    return wrapped
+
+
+def api_account_required(view):
+    """Require a real authenticated account for account-center APIs."""
+    def wrapped(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return json({"error": "请先登录后访问账户中心", "code": "login_required"}, 403)
         return view(request, *args, **kwargs)
     return wrapped
 
@@ -133,10 +149,123 @@ def ai_analysis_status(request, task_id):
 @require_GET
 def auth_session(request):
     if request.user.is_authenticated:
-        return json({"authenticated": True, "visitor": False, **account_tier_payload(request.user), "user": user_payload(request.user)})
+        return json({"authenticated": True, "visitor": False, **account_tier_payload(request.user), "user": user_payload(request.user, request)})
     if is_visitor(request):
         return json({"authenticated": True, "visitor": True, **account_tier_payload(None), "user": visitor_payload()})
     return json({"authenticated": False, **account_tier_payload(None)}, 401)
+
+
+@require_GET
+@api_account_required
+def account_summary(request):
+    tier = account_tier_payload(request.user)
+    total = WatchlistEntry.objects.filter(user=request.user).count()
+    limit = watchlist_limit_for_user(request.user)
+    profile = AccountProfile.objects.filter(user=request.user).first()
+    return json({
+        "user": {
+            "name": account_display_name(request.user),
+            "email": request.user.email,
+            "avatar_url": account_avatar_url(request, profile),
+        },
+        "membership": {
+            "tier": tier["tier"],
+            "tier_label": tier["tier_label"],
+            "expires_at": None,
+        },
+        "ai_beans": {
+            "status": "not_enabled",
+            "balance": None,
+            "permanent": True,
+        },
+        "watchlist": {
+            "total": total,
+            "limit": limit,
+            "remaining": max(limit - total, 0),
+        },
+        "preferences": account_preferences_data(request.user, profile),
+    })
+
+
+@require_http_methods(["PATCH"])
+@api_account_required
+def account_profile(request):
+    payload = auth_body(request)
+    if not isinstance(payload, dict) or set(payload) != {"display_name"}:
+        return json({"error": "仅支持修改显示名称", "code": "invalid_profile_fields"}, 400)
+    display_name_value = payload.get("display_name")
+    if not isinstance(display_name_value, str):
+        return json({"error": "显示名称无效", "code": "display_name_invalid"}, 400)
+    display_name = display_name_value.strip()
+    if not display_name:
+        return json({"error": "显示名称不能为空", "code": "display_name_invalid"}, 400)
+    if len(display_name) > 50:
+        return json({"error": "显示名称不能超过 50 个字符", "code": "display_name_invalid"}, 400)
+    request.user.first_name = display_name
+    request.user.save(update_fields=["first_name"])
+    return json({"status": "ok", "user": user_payload(request.user, request)})
+
+
+@require_http_methods(["PATCH"])
+@api_account_required
+def account_preferences(request):
+    payload = auth_body(request)
+    allowed = {"price_color_mode", "default_market", "default_period"}
+    if not isinstance(payload, dict) or not set(payload).issubset(allowed):
+        return json({"error": "存在不支持的偏好字段", "code": "invalid_preference_fields"}, 400)
+    choices = {
+        "price_color_mode": {choice.value for choice in AccountProfile.PriceColorMode},
+        "default_market": {choice.value for choice in AccountProfile.DefaultMarket},
+        "default_period": {choice[0] for choice in AccountProfile.PERIOD_CHOICES},
+    }
+    for field, value in payload.items():
+        if not isinstance(value, str) or value not in choices[field]:
+            return json({"error": f"{field} 的值无效", "code": "invalid_preference_value", "field": field}, 400)
+    with transaction.atomic():
+        profile, _ = AccountProfile.objects.select_for_update().get_or_create(user=request.user)
+        for field, value in payload.items():
+            setattr(profile, field, value)
+        profile.save(update_fields=[*payload.keys(), "updated_at"])
+    preferences = account_preferences_data(request.user, profile)
+    return json({"status": "ok", "preferences": preferences, "user": user_payload(request.user, request)})
+
+
+@require_http_methods(["POST", "DELETE"])
+@api_account_required
+def account_avatar(request):
+    if request.method == "DELETE":
+        profile = delete_avatar(request.user)
+        return json({"status": "ok", "avatar_url": account_avatar_url(request, profile)})
+    try:
+        profile = save_avatar(request.user, request.FILES.get("avatar"))
+    except AvatarValidationError as exc:
+        return json({"error": str(exc), "code": "avatar_invalid"}, 400)
+    return json({"status": "ok", "avatar_url": account_avatar_url(request, profile)})
+
+
+@require_POST
+@api_account_required
+def change_password(request):
+    payload = auth_body(request)
+    if not isinstance(payload, dict):
+        return json({"error": "请求格式无效", "code": "invalid_request"}, 400)
+    current_password = str(payload.get("current_password", ""))
+    new_password = str(payload.get("new_password", ""))
+    confirm_password = str(payload.get("confirm_password", ""))
+    if not request.user.check_password(current_password):
+        return json({"error": "当前密码不正确", "code": "current_password_invalid"}, 400)
+    if new_password != confirm_password:
+        return json({"error": "两次输入的新密码不一致", "code": "password_mismatch"}, 400)
+    if not new_password:
+        return json({"error": "请输入新密码", "code": "password_invalid"}, 400)
+    try:
+        validate_password(new_password, request.user)
+    except ValidationError as exc:
+        return json({"error": " ".join(exc.messages), "code": "password_invalid"}, 400)
+    request.user.set_password(new_password)
+    request.user.save(update_fields=["password"])
+    update_session_auth_hash(request, request.user)
+    return json({"status": "ok", "message": "密码已更新"})
 
 
 def auth_body(request):
@@ -171,7 +300,7 @@ def auth_register(request):
     candidate.save()
     request.session.pop("quantscope_visitor", None)
     login(request, candidate)
-    return json({"authenticated": True, **account_tier_payload(candidate), "user": user_payload(candidate)}, 201)
+    return json({"authenticated": True, **account_tier_payload(candidate), "user": user_payload(candidate, request)}, 201)
 
 
 @csrf_exempt
@@ -188,7 +317,7 @@ def auth_login(request):
         return json({"error": "邮箱或密码不正确"}, 401)
     request.session.pop("quantscope_visitor", None)
     login(request, user)
-    return json({"authenticated": True, **account_tier_payload(user), "user": user_payload(user)})
+    return json({"authenticated": True, **account_tier_payload(user), "user": user_payload(user, request)})
 
 
 @csrf_exempt

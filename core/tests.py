@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sqlite3
 import tempfile
+import shutil
 from decimal import Decimal
 from types import SimpleNamespace
 from datetime import datetime, timezone as datetime_timezone
@@ -15,6 +16,7 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.core.management import call_command, CommandError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
 from django.db.models.deletion import ProtectedError
 from django.test import Client, SimpleTestCase, TestCase, override_settings
@@ -23,10 +25,11 @@ from futu import Market, RET_OK
 
 from formula_editor.models import Formula
 from .market_indices import INDEX_DEFINITIONS, FutuOpenDIndexAdapter, convert_snapshot_frame
-from .models import MarketSymbol, WatchlistEntry
+from .models import AccountProfile, MarketSymbol, WatchlistEntry
 from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
 from .views import _watchlist_create, bar_rows
 from .watchlist import resolve_account_tier, resolve_watchlist_limit
+from PIL import Image
 
 
 class LocalDatabaseBackupCommandTests(SimpleTestCase):
@@ -218,6 +221,202 @@ class AuthenticationApiTests(TestCase):
         self.client.post('/api/auth/guest/')
         response = self.client.post('/api/ai-analysis/', data=json.dumps({'code': 'SH.600519'}), content_type='application/json')
         self.assertEqual(response.status_code, 403)
+
+
+class AccountCenterApiTests(TestCase):
+    def setUp(self):
+        self.client = Client(enforce_csrf_checks=True)
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='account@example.com',
+            email='account@example.com',
+            first_name='研究员',
+            password='Original-password-42',
+        )
+        self.symbol = MarketSymbol.objects.create(
+            code='SH.600519', name='测试证券', market='cn', exchange='CN_SH',
+            security_type='STOCK', active=True, provider='test-provider',
+            provider_symbol='SH.600519',
+        )
+
+    def csrf_headers(self):
+        response = self.client.get('/api/csrf/')
+        self.assertEqual(response.status_code, 200)
+        return {'HTTP_X_CSRFTOKEN': self.client.cookies['csrftoken'].value}
+
+    def test_summary_rejects_anonymous_and_visitor(self):
+        anonymous = self.client.get('/api/account/summary/')
+        self.assertEqual(anonymous.status_code, 403)
+        self.client.post('/api/auth/guest/')
+        visitor = self.client.get('/api/account/summary/')
+        self.assertEqual(visitor.status_code, 403)
+        self.assertEqual(visitor.json()['code'], 'login_required')
+
+    def test_summary_returns_real_account_state_without_periodic_ai_fields(self):
+        self.client.force_login(self.user)
+        WatchlistEntry.objects.create(user=self.user, symbol=self.symbol)
+        response = self.client.get('/api/account/summary/')
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['user'], {'name': '研究员', 'email': 'account@example.com', 'avatar_url': None})
+        self.assertEqual(payload['membership'], {'tier': 'free', 'tier_label': 'FREE', 'expires_at': None})
+        self.assertEqual(payload['ai_beans'], {'status': 'not_enabled', 'balance': None, 'permanent': True})
+        self.assertEqual(payload['watchlist'], {'total': 1, 'limit': 10, 'remaining': 9})
+        self.assertNotIn('reset_at', payload)
+        self.assertNotIn('next_reset_at', payload)
+        self.assertNotIn('reset_at', payload['ai_beans'])
+        self.assertNotIn('next_reset_at', payload['ai_beans'])
+
+    def test_change_password_is_csrf_protected_and_preserves_session(self):
+        self.client.force_login(self.user)
+        body = json.dumps({
+            'current_password': 'Original-password-42',
+            'new_password': 'New-secure-password-43',
+            'confirm_password': 'New-secure-password-43',
+        })
+        without_csrf = self.client.post('/api/account/change-password/', data=body, content_type='application/json')
+        self.assertEqual(without_csrf.status_code, 403)
+
+        headers = self.csrf_headers()
+        wrong_current = self.client.post(
+            '/api/account/change-password/',
+            data=json.dumps({**json.loads(body), 'current_password': 'wrong'}),
+            content_type='application/json', **headers,
+        )
+        self.assertEqual(wrong_current.status_code, 400)
+        self.assertEqual(wrong_current.json()['code'], 'current_password_invalid')
+
+        mismatch = self.client.post(
+            '/api/account/change-password/',
+            data=json.dumps({**json.loads(body), 'confirm_password': 'different'}),
+            content_type='application/json', **headers,
+        )
+        self.assertEqual(mismatch.status_code, 400)
+        self.assertEqual(mismatch.json()['code'], 'password_mismatch')
+
+        weak = self.client.post(
+            '/api/account/change-password/',
+            data=json.dumps({**json.loads(body), 'new_password': '123', 'confirm_password': '123'}),
+            content_type='application/json', **headers,
+        )
+        self.assertEqual(weak.status_code, 400)
+        self.assertEqual(weak.json()['code'], 'password_invalid')
+
+        success = self.client.post('/api/account/change-password/', data=body, content_type='application/json', **headers)
+        self.assertEqual(success.status_code, 200)
+        self.assertEqual(success.json()['status'], 'ok')
+        refreshed = get_user_model().objects.get(pk=self.user.pk)
+        self.assertTrue(refreshed.check_password('New-secure-password-43'))
+        self.assertEqual(self.client.get('/api/auth/session/').status_code, 200)
+
+
+class AccountProfileApiTests(TestCase):
+    def setUp(self):
+        self.client = Client(enforce_csrf_checks=True)
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='profile@example.com', email='profile@example.com', first_name='研究员', password='Original-password-42'
+        )
+        self.media_temp = tempfile.TemporaryDirectory()
+        self.media_root = Path(self.media_temp.name)
+        self.media_override = override_settings(MEDIA_ROOT=self.media_root)
+        self.media_override.enable()
+        self.addCleanup(self.media_override.disable)
+        self.addCleanup(self.media_temp.cleanup)
+
+    def csrf_headers(self):
+        self.client.get('/api/csrf/')
+        return {'HTTP_X_CSRFTOKEN': self.client.cookies['csrftoken'].value}
+
+    def patch_json(self, path, payload, headers=None):
+        return self.client.patch(path, data=json.dumps(payload), content_type='application/json', **(headers or {}))
+
+    def image_upload(self, image_format='PNG', name=None, size=(64, 64)):
+        output = io.BytesIO()
+        Image.new('RGB', size, (43, 113, 158)).save(output, format=image_format)
+        extension = image_format.lower()
+        return SimpleUploadedFile(name or f'avatar.{extension}', output.getvalue(), content_type=f'image/{extension}')
+
+    def test_summary_defaults_do_not_create_profile_and_auth_payload_has_preferences(self):
+        self.client.force_login(self.user)
+        response = self.client.get('/api/account/summary/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['preferences'], {'price_color_mode': 'cn', 'default_market': 'cn', 'default_period': '日线'})
+        self.assertIsNone(response.json()['user']['avatar_url'])
+        self.assertFalse(AccountProfile.objects.filter(user=self.user).exists())
+        session = self.client.get('/api/auth/session/').json()
+        self.assertEqual(session['user']['preferences'], response.json()['preferences'])
+
+    def test_profile_is_authenticated_csrf_protected_and_only_updates_display_name(self):
+        anonymous = self.patch_json('/api/account/profile/', {'display_name': '新名称'})
+        self.assertEqual(anonymous.status_code, 403)
+        self.client.post('/api/auth/guest/')
+        visitor = self.patch_json('/api/account/profile/', {'display_name': '新名称'}, self.csrf_headers())
+        self.assertEqual(visitor.status_code, 403)
+        self.client.force_login(self.user)
+        without_csrf = self.patch_json('/api/account/profile/', {'display_name': '新名称'})
+        self.assertEqual(without_csrf.status_code, 403)
+        headers = self.csrf_headers()
+        updated = self.patch_json('/api/account/profile/', {'display_name': '  新名称  '}, headers)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()['user']['name'], '新名称')
+        self.assertEqual(get_user_model().objects.get(pk=self.user.pk).first_name, '新名称')
+        forbidden = self.patch_json('/api/account/profile/', {'display_name': '另一个', 'tier': 'pro'}, headers)
+        self.assertEqual(forbidden.status_code, 400)
+        non_string = self.patch_json('/api/account/profile/', {'display_name': ['不是字符串']}, headers)
+        self.assertEqual(non_string.status_code, 400)
+        self.assertEqual(self.client.get('/api/auth/session/').json()['user']['tier'], 'free')
+
+    def test_preferences_validate_persist_and_keep_account_tier_separate(self):
+        self.client.force_login(self.user)
+        self.assertEqual(self.patch_json('/api/account/preferences/', {'default_market': 'us'}).status_code, 403)
+        headers = self.csrf_headers()
+        invalid = self.patch_json('/api/account/preferences/', {'default_market': 'crypto'}, headers)
+        self.assertEqual(invalid.status_code, 400)
+        non_string = self.patch_json('/api/account/preferences/', {'default_market': ['us']}, headers)
+        self.assertEqual(non_string.status_code, 400)
+        valid = self.patch_json('/api/account/preferences/', {
+            'price_color_mode': 'international', 'default_market': 'hk', 'default_period': '30分',
+        }, headers)
+        self.assertEqual(valid.status_code, 200)
+        expected = {'price_color_mode': 'international', 'default_market': 'hk', 'default_period': '30分'}
+        self.assertEqual(valid.json()['preferences'], expected)
+        self.assertEqual(self.client.get('/api/account/summary/').json()['preferences'], expected)
+        self.assertEqual(self.client.get('/api/auth/session/').json()['user']['preferences'], expected)
+        self.assertEqual(valid.json()['user']['tier'], 'free')
+
+    def test_avatar_requires_auth_csrf_validates_and_replaces_then_deletes(self):
+        upload = self.image_upload()
+        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': upload}).status_code, 403)
+        self.client.force_login(self.user)
+        no_csrf = self.client.post('/api/account/avatar/', {'avatar': self.image_upload()})
+        self.assertEqual(no_csrf.status_code, 403)
+        headers = self.csrf_headers()
+        svg = SimpleUploadedFile('avatar.svg', b'<svg xmlns="http://www.w3.org/2000/svg"></svg>', content_type='image/svg+xml')
+        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': svg}, **headers).status_code, 400)
+        oversized = SimpleUploadedFile('avatar.png', b'x' * (5 * 1024 * 1024 + 1), content_type='image/png')
+        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': oversized}, **headers).status_code, 400)
+        too_wide = self.image_upload(size=(4097, 1))
+        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': too_wide}, **headers).status_code, 400)
+
+        for image_format in ('JPEG', 'PNG', 'WEBP'):
+            response = self.client.post('/api/account/avatar/', {'avatar': self.image_upload(image_format)}, **headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertIsNotNone(response.json()['avatar_url'])
+        profile = AccountProfile.objects.get(user=self.user)
+        old_name = profile.avatar.name
+        old_path = self.media_root / old_name
+        self.assertTrue(old_path.is_file())
+        replacement = self.client.post('/api/account/avatar/', {'avatar': self.image_upload('PNG', 'replacement.png')}, **headers)
+        self.assertEqual(replacement.status_code, 200)
+        new_name = AccountProfile.objects.get(user=self.user).avatar.name
+        self.assertNotEqual(old_name, new_name)
+        self.assertFalse(old_path.exists())
+        self.assertTrue((self.media_root / new_name).is_file())
+        deleted = self.client.delete('/api/account/avatar/', **headers)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertIsNone(deleted.json()['avatar_url'])
+        self.assertFalse((self.media_root / new_name).exists())
 
 
 class SymbolCatalogSyncTests(TestCase):
@@ -969,12 +1168,16 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.app_source = (self.base_dir / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
         self.auth_source = (self.base_dir / "frontend" / "src" / "components" / "AuthGate.vue").read_text(encoding="utf-8")
         self.tier_badge_source = (self.base_dir / "frontend" / "src" / "components" / "AccountTierBadge.vue").read_text(encoding="utf-8")
+        self.popover_source = (self.base_dir / "frontend" / "src" / "components" / "AccountPopover.vue").read_text(encoding="utf-8")
+        self.center_source = (self.base_dir / "frontend" / "src" / "components" / "PersonalCenter.vue").read_text(encoding="utf-8")
 
     def test_visible_brand_uses_huntalpha_hub_and_real_account_state(self):
         self.assertIn("HuntAlphaLogo", self.app_source)
         self.assertIn("<span class=\"brand-name\">HuntAlpha</span>", self.app_source)
         self.assertIn("<small class=\"brand-hub\">HUB</small>", self.app_source)
-        self.assertIn("visitor ? t('visitor') : user.name", self.app_source)
+        self.assertIn("<AccountPopover v-else :user=\"user\"", self.app_source)
+        self.assertIn("<div v-if=\"visitor\" class=\"visitor-account\">", self.app_source)
+        self.assertNotIn("visitor ? t('visitor') : user.name", self.app_source)
         self.assertIn("HuntAlphaLogo", self.auth_source)
         self.assertIn("<span>HuntAlpha</span><small>HUB</small>", self.auth_source)
         self.assertNotIn("QuantScope", self.app_source)
@@ -1000,13 +1203,15 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertIn("`${API_BASE}/api/${endpoint}?${params}`", self.app_source)
 
     def test_account_tier_badge_is_embedded_and_supports_free_and_pro(self):
-        self.assertIn("AccountTierBadge", self.app_source)
-        self.assertIn(":tier=\"user.tier\"", self.app_source)
-        self.assertIn(":tier-label=\"user.tier_label\"", self.app_source)
-        self.assertIn(":watchlist-limit=\"user.watchlist_limit\"", self.app_source)
-        self.assertIn(":user-name=\"user.name\"", self.app_source)
-        self.assertIn(":avatar-url=\"user.avatar_url\"", self.app_source)
-        self.assertIn("<AccountTierBadge v-if=\"!visitor\"", self.app_source)
+        self.assertIn("AccountPopover", self.app_source)
+        self.assertIn("<AccountTierBadge", self.popover_source)
+        self.assertIn(":tier=\"user.tier\"", self.popover_source)
+        self.assertIn(":tier-label=\"user.tier_label\"", self.popover_source)
+        self.assertIn(":watchlist-limit=\"user.watchlist_limit\"", self.popover_source)
+        self.assertIn(":user-name=\"user.name\"", self.popover_source)
+        self.assertIn(":avatar-url=\"user.avatar_url\"", self.popover_source)
+        self.assertIn("account-trigger", self.popover_source)
+        self.assertIn('aria-haspopup="dialog"', self.popover_source)
         self.assertIn('viewBox="0 0 54 48"', self.tier_badge_source)
         self.assertIn('class="crown"', self.tier_badge_source)
         self.assertIn('class="avatar-circle"', self.tier_badge_source)
@@ -1023,6 +1228,63 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertNotIn("avatar-bg", self.tier_badge_source)
         self.assertNotRegex(self.tier_badge_source, r"https?://")
         self.assertNotRegex(self.tier_badge_source, r"[\U0001F300-\U0001FAFF]")
+
+    def test_account_menu_and_personal_center_contract(self):
+        combined = self.app_source + self.popover_source + self.center_source
+        self.assertIn("/api/account/summary/", combined)
+        self.assertIn("/api/account/change-password/", self.center_source)
+        self.assertIn("window.addEventListener('popstate', handleRouteChange)", self.app_source)
+        self.assertIn("window.history.pushState", self.app_source)
+        self.assertIn("/account", self.app_source)
+        self.assertIn("个人中心", self.popover_source)
+        self.assertIn("退出登录", self.popover_source)
+        self.assertIn("prefers-reduced-motion:reduce", combined)
+        self.assertEqual(self.center_source.count("{ key:"), 5)
+        self.assertNotIn("reset_at", combined)
+        self.assertNotIn("next_reset_at", combined)
+        self.assertNotIn("每月重置", combined)
+
+    def test_account_summary_retry_only_caches_success(self):
+        success_index = self.popover_source.index('summary.value = payload')
+        loaded_index = self.popover_source.index('summaryLoaded.value = true')
+        finally_index = self.popover_source.index('.finally(() => { loading.value = false })')
+        self.assertLess(success_index, loaded_index)
+        self.assertLess(loaded_index, finally_index)
+        self.assertIn('summaryLoaded.value = false', self.popover_source)
+        self.assertNotIn('finally(() => { loading.value = false; summaryLoaded.value = true })', self.popover_source)
+        self.assertNotIn('setInterval', self.popover_source)
+
+    def test_account_center_profile_preferences_and_live_terminal_state_contract(self):
+        self.assertIn(':watchlist-total="watchlistTotal"', self.app_source)
+        self.assertIn(':watchlist-limit="watchlistLimit"', self.app_source)
+        self.assertIn(':watchlist-remaining="watchlistRemaining"', self.app_source)
+        self.assertIn('marketColorTokens', self.app_source)
+        self.assertIn(':market-color-tokens="marketColorTokens"', self.app_source)
+        header_source = self.app_source.split('<header>', 1)[1].split('</header>', 1)[0]
+        controls_source = header_source.split('<div class="header-account-controls">', 1)[1].split('</div></header>', 1)[0]
+        self.assertIn('<div class="header-account-controls">', header_source)
+        self.assertIn('<div v-if="visitor" class="visitor-account">', controls_source)
+        self.assertIn('<AccountPopover v-else', controls_source)
+        self.assertIn('<select class="terminal-language"', controls_source)
+        self.assertLess(controls_source.index('<AccountPopover v-else'), controls_source.index('<select class="terminal-language"'))
+        self.assertIn('.header-account-controls{', self.app_source)
+        self.assertIn('margin-left:auto', self.app_source.split('.header-account-controls{', 1)[1].split('}', 1)[0])
+        self.assertIn('/api/account/profile/', self.center_source)
+        self.assertIn('/api/account/avatar/', self.center_source)
+        self.assertIn('/api/account/preferences/', self.center_source)
+        self.assertIn('price_color_mode', self.center_source)
+        self.assertIn('default_market', self.center_source)
+        self.assertIn('default_period', self.center_source)
+        self.assertNotIn('setLocale', self.center_source)
+        self.assertNotIn('languages', self.center_source)
+        self.assertIn('applyOptions', (self.base_dir / 'frontend' / 'src' / 'components' / 'MarketChart.vue').read_text(encoding='utf-8'))
+
+    def test_header_right_controls_and_worklog_keep_account_security_out_of_realtime_task(self):
+        worklog_source = (self.base_dir / 'docs' / 'product-worklog.md').read_text(encoding='utf-8')
+        self.assertIn('时区与交易时段 → Task 005.1.3', worklog_source)
+        self.assertIn('登录设备/会话与 2FA → future Account Security task', worklog_source)
+        self.assertIn('Task 005.1.3 仅负责 realtime provider abstraction', worklog_source)
+        self.assertNotIn('登录设备/会话与 2FA → Task 005.1.3', worklog_source)
 
 
 class WatchlistModelAndApiTests(TestCase):
