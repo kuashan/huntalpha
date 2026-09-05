@@ -33,19 +33,10 @@ def json(data, status=200):
     return result
 
 
-def admin_review_mode_enabled():
-    return bool(getattr(settings, "DEV_ADMIN_REVIEW_MODE", False))
-
-
-def review_allowed(user):
-    return bool(user.is_staff or user.is_superuser)
-
-
 def user_payload(user):
     return {
         "email": user.email,
         "name": user.get_full_name() or user.first_name or user.email.split("@", 1)[0],
-        "review_allowed": review_allowed(user),
     }
 
 
@@ -64,15 +55,10 @@ def is_visitor(request):
 
 
 def api_terminal_required(view):
-    """Require a normal member, or a staff reviewer when review mode is on."""
+    """Members and the limited visitor mode may access the terminal APIs."""
     def wrapped(request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            if admin_review_mode_enabled() and is_visitor(request):
-                return json({"error": "当前为管理员审查模式，仅允许 Django staff/superuser 进入", "authenticated": False, "admin_review_mode": True}, 403)
-            if not is_visitor(request):
-                return json({"error": "请先登录后访问量化终端", "authenticated": False}, 401)
-        if admin_review_mode_enabled() and not review_allowed(request.user):
-            return json({"error": "当前为管理员审查模式，仅允许 Django staff/superuser 进入", "authenticated": False, "admin_review_mode": True}, 403)
+        if not request.user.is_authenticated and not is_visitor(request):
+            return json({"error": "请先登录后访问量化终端", "authenticated": False}, 401)
         return view(request, *args, **kwargs)
     return wrapped
 
@@ -134,16 +120,11 @@ def ai_analysis_status(request, task_id):
 
 @require_GET
 def auth_session(request):
-    review_mode = admin_review_mode_enabled()
     if request.user.is_authenticated:
-        if review_mode and not review_allowed(request.user):
-            return json({"error": "当前为管理员审查模式，仅允许 Django staff/superuser 进入", "authenticated": False, "admin_review_mode": True}, 403)
-        return json({"authenticated": True, "visitor": False, "admin_review_mode": review_mode, "user": user_payload(request.user)})
+        return json({"authenticated": True, "visitor": False, "user": user_payload(request.user)})
     if is_visitor(request):
-        if review_mode:
-            return json({"error": "当前为管理员审查模式，仅允许 Django staff/superuser 进入", "authenticated": False, "admin_review_mode": True}, 403)
         return json({"authenticated": True, "visitor": True, "user": {"email": "", "name": "访客模式"}})
-    return json({"authenticated": False, "admin_review_mode": review_mode}, 401)
+    return json({"authenticated": False}, 401)
 
 
 def auth_body(request):
@@ -156,8 +137,6 @@ def auth_body(request):
 @csrf_exempt
 @require_POST
 def auth_register(request):
-    if admin_review_mode_enabled():
-        return json({"error": "当前为管理员审查模式，注册入口已关闭", "admin_review_mode": True}, 403)
     payload = auth_body(request)
     if not isinstance(payload, dict):
         return json({"error": "请求格式无效"}, 400)
@@ -195,11 +174,9 @@ def auth_login(request):
     user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
     if not user or not user.is_active or not user.check_password(password):
         return json({"error": "邮箱或密码不正确"}, 401)
-    if admin_review_mode_enabled() and not review_allowed(user):
-        return json({"error": "当前为管理员审查模式，仅允许 Django staff/superuser 登录", "admin_review_mode": True}, 403)
     request.session.pop("quantscope_visitor", None)
     login(request, user)
-    return json({"authenticated": True, "admin_review_mode": admin_review_mode_enabled(), "user": user_payload(user)})
+    return json({"authenticated": True, "user": user_payload(user)})
 
 
 @csrf_exempt
@@ -213,8 +190,6 @@ def auth_logout(request):
 @csrf_exempt
 @require_POST
 def auth_guest(request):
-    if admin_review_mode_enabled():
-        return json({"error": "当前为管理员审查模式，访客入口已关闭", "admin_review_mode": True}, 403)
     request.session["quantscope_visitor"] = True
     return json({"authenticated": True, "visitor": True, "user": {"email": "", "name": "访客模式"}})
 

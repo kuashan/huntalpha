@@ -7,7 +7,7 @@ import AiAnalysis from './components/AiAnalysis.vue'
 import { commonIndicators, markets, symbolsFor } from './data/marketData'
 import { languages, locale, setLocale, t } from './i18n'
 const market = ref('沪深 A 股'); const query = ref(''); const selected = ref(symbolsFor(market.value)[0]); const period = ref('日线'); const mainInstalled = ref([]); const subInstalled = ref([]); const manager = ref(null)
-const user = ref(null); const visitor = ref(false); const adminReviewMode = ref(false); const checkingSession = ref(true); const quotes = ref({})
+const user = ref(null); const visitor = ref(false); const checkingSession = ref(true); const quotes = ref({})
 let quoteRequestVersion = 0
 const analysisCode = new URLSearchParams(window.location.search).get('analysis')
 const analysisName = new URLSearchParams(window.location.search).get('name') || analysisCode
@@ -54,14 +54,14 @@ watch([market, user], ([, currentUser]) => {
   if (currentUser) refreshQuotes(symbolsFor(market.value))
   else { quoteRequestVersion += 1; quotes.value = {} }
 })
-onMounted(async () => { try { const reply = await fetch('http://127.0.0.1:8003/api/auth/session/', { credentials: 'include' }); const data = await reply.json(); adminReviewMode.value = Boolean(data.admin_review_mode); if (reply.ok && data.authenticated) { user.value = data.user; visitor.value = Boolean(data.visitor) } } catch {} finally { checkingSession.value = false } })
+onMounted(async () => { try { const reply = await fetch('http://127.0.0.1:8003/api/auth/session/', { credentials: 'include' }); const data = await reply.json(); if (reply.ok && data.authenticated) { user.value = data.user; visitor.value = Boolean(data.visitor) } } catch {} finally { checkingSession.value = false } })
 </script>
 <template>
   <div v-if="checkingSession" class="boot-screen">QuantScope…</div>
-  <AuthGate v-else-if="!user" :admin-review-mode="adminReviewMode" @authenticated="authenticated" />
+  <AuthGate v-else-if="!user" @authenticated="authenticated" />
   <AiAnalysis v-else-if="analysisCode" :code="analysisCode" :name="analysisName" :market="analysisMarket" @back="backToTerminal" />
   <main v-else class="terminal">
-    <header><div class="brand"><b>Q</b> QuantScope <small>{{ adminReviewMode ? t('adminReviewMode') : visitor ? t('visitor') : t('pro') }}</small></div><nav><a class="active">{{ t('market') }}</a><a>{{ t('watchlist') }}</a><a>{{ t('strategy') }}</a><a>{{ t('news') }}</a></nav><div class="feed">● {{ visitor ? t('visitorAi') : user.name }}</div><select class="terminal-language" :value="locale" @change="setLocale($event.target.value)"><option v-for="item in languages" :key="item.code" :value="item.code">{{ item.label }}</option></select><button class="logout" @click="signOut">{{ t('logout') }}</button></header>
+    <header><div class="brand"><b>Q</b> QuantScope <small>{{ visitor ? t('visitor') : t('pro') }}</small></div><nav><a class="active">{{ t('market') }}</a><a>{{ t('watchlist') }}</a><a>{{ t('strategy') }}</a><a>{{ t('news') }}</a></nav><div class="feed">● {{ visitor ? t('visitorAi') : user.name }}</div><select class="terminal-language" :value="locale" @change="setLocale($event.target.value)"><option v-for="item in languages" :key="item.code" :value="item.code">{{ item.label }}</option></select><button class="logout" @click="signOut">{{ t('logout') }}</button></header>
     <section class="markets"><button v-for="item in markets" :key="item" :class="{active: market === item}" @click="switchMarket(item)"><strong>{{ item }}</strong><span>—</span><em class="unavailable">{{ t('marketUnavailable') }}</em></button></section>
     <div class="workspace"><aside><div class="aside-title">{{ t('marketList') }} <b>{{ market }}</b></div><label class="search">⌕ <input v-model="query" :placeholder="t('search')" /></label><div class="heads"><span>{{ t('nameCode') }}</span><span>{{ t('latest') }}</span><span>{{ t('change') }}</span></div><button v-for="item in list" :key="item.code" class="symbol" :class="{selected: selected.code === item.code}" :title="itemQuoteError(item)" @click="selected = item"><span><strong>{{ item.name }}</strong><small>{{ item.code }}</small></span><b>{{ displayPrice(itemQuote(item)?.price) }}</b><em :class="{down:itemQuote(item)?.change < 0}">{{ displayChange(itemQuote(item)?.change) }}</em></button><p v-if="!list.length">{{ t('noSymbol') }}</p></aside>
       <section class="content"><div class="security"><div><p>{{ market }} · {{ quoteStatusText }}</p><h1>{{ selected.name }} <small>{{ selected.code }}</small><button v-if="!selected.code.startsWith('CC.')" class="ai-button" @click="requestAiAccess">AI 分析</button></h1></div><div class="price"><strong>{{ displayPrice(quoteData?.price) }}</strong><span :class="{down:quoteData?.change < 0}">{{ displayChange(quoteData?.change) }}</span></div><dl><div><dt>{{ t('open') }}</dt><dd>{{ displayPrice(quoteData?.open) }}</dd></div><div><dt>{{ t('high') }}</dt><dd>{{ displayPrice(quoteData?.high) }}</dd></div><div><dt>{{ t('low') }}</dt><dd>{{ displayPrice(quoteData?.low) }}</dd></div></dl></div>
