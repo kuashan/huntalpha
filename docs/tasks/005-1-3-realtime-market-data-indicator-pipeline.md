@@ -1,0 +1,291 @@
+# Task 005.1.3 — Real-time Market Data & Indicator Pipeline Foundation
+
+Status: `IN_PROGRESS`
+
+## Goal
+
+建立 HuntAlpha 的统一实时行情基础设施，使真实行情能够持续驱动当前 K 线、内置指标和自定义 Formula 更新，而不是只刷新页面上的最新价格。
+
+核心原则：
+
+> Provider 负责提供真实市场数据；Indicator / Formula 保持原有算法；实时行情更新当前正在形成的 bar；当前 bar 变化驱动技术指标重新计算。
+
+本任务先以 Futu OpenD 作为真实 provider 验证，但实时架构必须 provider-neutral，为后续 Coinbase 和商业行情 Vendor 接入保留统一边界。
+
+## Current baseline
+
+- 当前历史 K 线统一来自真实 Futu OpenD，失败时显示 unavailable，不生成假 candles。
+- `MarketChart.vue` 当前按 `symbol / period / installedIndicators` 触发完整 draw：请求约 1000 根 K 线、计算指标、创建 chart/series；尚无持续 realtime stream。
+- 内置指标通过前端 `commonDrawing(code, bars)` 计算。
+- 自定义 Formula 继续通过后端 `/api/indicator-render/...` 计算；Formula source 不返回浏览器。
+- 左拖历史分页必须继续保留。
+- 当前账户行情颜色偏好和 Formula 自定义绘图颜色已经分离，实时化不得破坏这一点。
+
+## Architecture target
+
+```text
+Exchange / Data Vendor
+        ↓
+Realtime Provider Adapter
+        ↓
+Normalized Market Event / Bar Snapshot
+        ↓
+Shared Realtime State + Subscription Registry
+        ↓
+Current Live Bar / Closed Bar
+        ↓
+Indicator Scheduler
+        ↓
+Built-in Indicators + Custom Formula
+        ↓
+Lightweight Charts in-place update
+```
+
+### Provider-neutral contract
+
+Provider 层只负责真实数据，不允许出现 `FutuMACD / CoinbaseMACD / USMACD` 一类 provider-specific 指标实现。
+
+统一事件/Bar 至少考虑：
+
+- provider / source
+- market
+- symbol
+- period
+- time
+- open / high / low / close
+- volume
+- amount（缺失必须为 `null`，不能伪造成 0）
+- turnover_rate（缺失必须为 `null`，不能伪造成 0）
+- is_closed（provider 可提供时使用）
+- provider_timestamp / sequence（可获得时保留）
+- revision
+
+指标只根据自己需要的字段计算。Provider 缺少必要字段时必须明确 `unsupported / unavailable`，禁止静态默认值或伪造替代。
+
+## Live bar semantics
+
+实时行情不是只更新最新价。
+
+当前未完成 bar 必须随真实行情更新：
+
+- Open
+- High
+- Low
+- Close
+- Volume
+- Amount / Turnover rate（仅 provider 真正提供时）
+
+当前 bar 对应的指标值允许盘中变化。周期结束后 bar 进入 closed 状态；普通后续 quote 事件不能随意修改已收盘历史。若 provider 后续返回权威修正，应走 reconciliation/correction 语义，不与普通 live update 混淆。
+
+不能用本地电脑时间简单猜所有市场的 bar 边界。优先使用 provider timestamp；若未来需要从 trades 聚合，则必须根据明确 market timezone / session 定义。
+
+## Shared subscriptions
+
+不能让每个浏览器对同一 `provider + symbol + period` 各自建立一份 OpenD subscription。
+
+本任务建立 process-local：
+
+- Provider abstraction
+- Subscription Registry
+- reference counting
+- grace-period unsubscribe
+- Realtime State / Bar Cache
+- revision
+
+当前本地阶段不部署 Redis。必须通过接口隔离，文档明确未来多进程/多服务器需要共享 Pub/Sub（例如 Redis 或专用 market gateway）。
+
+## Browser transport
+
+行情主要为 server → browser 单向推送。
+
+优先使用 SSE / EventSource 等轻量可靠方案；如审查证明当前 Django runtime 下 SSE 明显不合适，可采用其他轻量 transport，但不得为了本任务无必要引入完整 Channels + Redis + Celery 基础设施。
+
+Stream 权限必须复用现有 terminal 访问语义：真实登录账户和现有合法 Visitor 可访问；真正匿名不能意外新增公开实时行情出口。
+
+## Historical + realtime merge
+
+初次加载继续使用现有真实 `/api/kline/` 历史页。
+
+合并规则：
+
+- realtime `time == loadedBars[-1].time` → 更新当前最后一根
+- realtime `time > loadedBars[-1].time` → append 新 bar，上一根进入 closed
+- realtime 明显更旧 → 不得覆盖最新 state
+- 同 timestamp 乱序事件不得让 High 降低或 Low 升高；provider 返回权威完整 snapshot 时可按 timestamp/sequence 做 replacement
+
+初始化必须处理 race：历史请求完成后开启/恢复 realtime 时要获取最新 snapshot/revision 并 reconcile，不能假设历史请求结束时就是实时起点。
+
+## Chart lifecycle
+
+实时行情事件不能执行：
+
+`chart.remove() → createChart()`
+
+市场实时更新必须优先使用 Lightweight Charts 原位 update（如 `CandlestickSeries.update()`）。
+
+完整重建仍可用于：
+
+- symbol change
+- period change
+- 指标 pane 结构变化
+- 需要重建 layout 的结构性操作
+
+允许把当前巨型 `draw()` 适度拆分为初始化、历史加载、实时更新、指标刷新和 destroy 生命周期，但不得借机重写整个图表系统。
+
+历史向左分页、visible range preservation、副图高度保存都必须继续工作。
+
+## Indicator correctness
+
+本任务禁止改变现有指标算法语义，包括但不限于：
+
+- MA / EMA
+- MACD
+- RSI
+- KDJ
+- BOLL
+- VOL
+- REF / HHV / LLV / CROSS
+- COST / WINNER / LWINNER
+- 自定义 Formula 的现有函数语义
+
+验收原则：对同一组最终 closed bars，实时路径最终结果必须与重新完整加载 bars 后的 full recalculation 一致（仅允许合理浮点误差）。
+
+### Built-in indicators
+
+MA、BOLL、VOL、MACD、KDJ、RSI 必须随 current bar 更新。
+
+正确性优先于过早做复杂增量算法。可以先做受控 tail/full-light recomputation + series 原位更新；若实现真正 incremental，必须有一致性测试证明结果等价。
+
+### Custom Formula
+
+Formula source 继续只在后端保存，不读取、不打印、不返回浏览器。
+
+实时 Formula 调度必须具备：
+
+- throttle / coalescing
+- single-flight
+- latest revision wins
+- stale response discard
+- symbol/period generation protection
+
+若 revision 100 正在计算，期间来了 101/102/103/104，不得形成 4 个排队任务；只保留 latest pending revision，100 完成后直接追最新状态。
+
+## Refresh cadence
+
+Provider event 可以高频接收，但事件频率不能直接等于 UI/API 请求频率。
+
+第一版目标区间（以 benchmark 为准，不是永久写死规则）：
+
+- 前端 bar/UI：约 200–500ms 合并更新
+- 轻量 built-in indicators：与 UI 同级或等价受控节流
+- Custom Formula：约 750–1000ms 级别，必须 single-flight + coalescing
+
+不得产生 Formula backlog。
+
+## Reconnect / reconciliation
+
+Provider 断线时状态必须从 `live` 变为 `reconnecting / unavailable`，不能继续伪装 live。
+
+恢复流程：
+
+1. 重新连接 provider
+2. 获取最新权威 K 线 / snapshot
+3. reconcile 当前或最近 bars
+4. 更新 realtime revision/state
+5. 重新计算最新指标状态
+6. 恢复 `live`
+
+浏览器 transport 重连后也必须获取 latest snapshot/revision；不能断线几十秒后直接从新事件继续导致中间状态缺失。
+
+页面隐藏时降低/暂停高频图表和 Formula 刷新；恢复 visible 后先 reconcile 最新真实状态再继续。
+
+## Futu first adapter
+
+先检查当前安装的 Futu SDK/OpenD 实际 push/subscription 能力和权限。
+
+优先使用真实 push。若某市场/周期当前权限不支持 push，可使用后端共享、低频、受控的真实 polling fallback，并显式标记 `mode=polling`；不得让每个浏览器自己高频 polling OpenD。
+
+如果 push 和真实 polling 都不可用，则显示 unavailable，禁止 synthetic tick/test provider 进入运行时。
+
+## Crypto boundary
+
+本任务不接 Coinbase，不创建 fake BTC/ETH MarketSymbol，不实现 Coinbase WebSocket。
+
+下一任务 `Task 005.1.4 — Coinbase Crypto Market Data` 只需实现 Coinbase adapter 并接入本任务建立的统一 realtime pipeline，不应再次重写 MarketChart realtime architecture。
+
+## Persistence / infrastructure
+
+本任务实时行情状态不写 SQLite：
+
+- 每个 tick/quote/revision 不写数据库
+- 不新增实时行情 DB migration
+- 当前 process-local realtime bus/cache 仅用于开发阶段
+
+预计本任务无 migration。若实现过程中发现必须 migration，先停止并说明原因；对正式 DB 的任何迁移仍必须先执行 `python manage.py backup_local_db` 并确认 path/SHA/integrity check。
+
+## Tests and acceptance
+
+至少覆盖：
+
+- 同 symbol/period 多 consumer 只建立一个 provider subscription
+- reference count / grace unsubscribe
+- 同 timestamp current bar update
+- 新 timestamp append + previous close
+- out-of-order protection
+- revision 单调增加
+- missing amount/turnover_rate 保持 null
+- provider unavailable 不产生 fake fallback
+- reconnect reconciliation
+- authenticated/Visitor/anonymous 权限边界
+- Formula scheduler single-flight/coalescing/stale discard
+- test provider 只存在 tests
+- MA/BOLL/VOL/MACD/KDJ/RSI realtime final result 与 full recalculation 一致
+- Formula 通过既有公开接口/fixture 验证最终结果一致，不读取 Formula source
+- realtime bar 更新路径不因每个事件调用 `chart.remove()`
+- hidden tab 与 symbol/period 切换不发生旧请求污染
+
+人工验证至少包括：
+
+- 一个 Futu 当前真实可用证券
+- 初始真实 K 线 → live 状态
+- current bar OHLC/volume 更新
+- MA/MACD/RSI 与自定义 Formula 更新
+- 左拖历史继续可用
+- 两个 Tab 同 symbol/period 复用一份 provider subscription
+- 关闭一个 Tab subscription 仍存在；最后 consumer 离开后 grace unsubscribe
+- OpenD 断开显示 reconnecting/unavailable，恢复后 reconcile
+- 2–5 分钟 soak：无内存持续上涨、无 Formula queue 累积、无重复 subscription/timer/EventSource leak
+
+## Validation
+
+开发完成至少运行：
+
+```text
+python manage.py check
+python manage.py test core
+python manage.py makemigrations --check
+npm run build
+git diff --check
+```
+
+并确认：
+
+- Formula 数量仍为 4
+- Formula source 未读取、未修改、未输出
+- DB/backup/media/log/secrets 不进入 Git
+- worktree clean
+
+## Out of scope
+
+- Coinbase 接入（Task 005.1.4）
+- 2FA / 登录设备 / account session security
+- 支付 / Billing
+- Notification
+- User Workspace persistence（Task 005.2）
+- Drawing Tools（Task 005.3）
+- Chip Profile UI（Task 005.4）
+- Redis/生产级多节点 realtime bus 部署
+
+## Completion rule
+
+实现分支完成后创建 PR 到 `main`，由 ChatGPT 复查真实 diff、权限、性能、reconnect、指标一致性与 no-fake 行为。未经用户确认不得 merge。

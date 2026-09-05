@@ -15,7 +15,22 @@
 
 ## 当前进行中
 
-当前没有已启动但尚未完成的正式 Task。
+### Task 005.1.3 — Real-time Market Data & Indicator Pipeline Foundation
+
+状态：`IN_PROGRESS`
+
+核心原则：
+> Provider 负责提供真实市场数据；Indicator / Formula 保持原有算法；实时行情更新当前正在形成的 bar；当前 bar 变化驱动技术指标重新计算。
+
+正式范围：
+- Provider-neutral realtime architecture，先以 Futu 作为真实 provider 验证，并为未来 Coinbase 接入同一管线保留边界。
+- current live bar、closed bar 语义、provider timestamp、market timezone / session boundaries。
+- realtime quote / Kline linkage、built-in indicator 与 Custom Formula realtime update。
+- throttle / coalescing、Formula single-flight、stale response protection、reconnect / reconciliation、shared subscription registry、in-place chart update。
+- 当前本地阶段使用 process-local realtime bus/cache；不因本任务提前部署 Redis。
+- 全程不使用 fake fallback；缺失字段必须 unavailable/null，不得用 0 或静态值冒充。
+
+明确不包含：2FA、登录设备、account session management、邮箱安全、支付和 Notification；这些属于未来各自任务。
 
 ---
 
@@ -157,22 +172,6 @@
 - 其他付费权益
 
 要求：所有权益必须由真实后端 entitlement 决定；没有真实 entitlement 时不能伪造 PRO 状态。
-
-### Task 005.1.3 — Real-time Market Data & Indicator Pipeline Foundation
-
-状态：`PLANNED`
-
-核心原则：
-> Provider 负责提供真实市场数据；Indicator / Formula 保持原有算法；实时行情更新当前正在形成的 bar；当前 bar 变化驱动技术指标重新计算。
-
-正式范围：
-- Provider-neutral realtime architecture，先以 Futu 作为真实 provider 验证，并为未来 Coinbase 接入同一管线保留边界。
-- current live bar、closed bar 语义、provider timestamp、market timezone / session boundaries。
-- realtime quote / Kline linkage、built-in indicator 与 Custom Formula realtime update。
-- throttle / coalescing、Formula single-flight、stale response protection、reconnect / reconciliation、shared subscription registry、in-place chart update。
-- 全程不使用 fake fallback。
-
-明确不包含：2FA、登录设备、account session management、邮箱安全、支付和 Notification；这些属于未来各自任务。
 
 ### Task 005.1.4 — Coinbase Crypto Market Data
 
