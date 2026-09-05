@@ -26,6 +26,8 @@ urlpatterns = [
     path('api/auth/logout/', views.auth_logout),
     path('api/auth/guest/', views.auth_guest),
     path('api/csrf/', views.csrf_token),
+    path('api/account/summary/', views.account_summary),
+    path('api/account/change-password/', views.change_password),
     path('api/watchlist/', views.watchlist),
     path('api/watchlist/<str:code>/', views.watchlist_delete),
     path('api/ai-analysis/', views.ai_analysis),

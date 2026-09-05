@@ -1,6 +1,6 @@
 # Task 005.1.2 — Account Menu & Personal Center Foundation
 
-Status: PLANNED
+Status: IMPLEMENTED
 
 ## 核心方向
 
@@ -49,3 +49,22 @@ Status: PLANNED
 
 - 依赖 Task 005.1.1 账户等级徽章先合并到 `main`。
 - 与 Task 005.2 用户工作区持久化协同，但个人中心第一版不应阻塞等待所有研究资产功能完成。
+
+## Implementation / Completion Report
+
+- AccountTierBadge 继续作为已登录账户的唯一 Header 入口；登录账户不再常驻显示用户名或独立退出按钮，visitor 保留访客身份与退出入口。
+- 新增 AccountPopover：支持短延迟 hover、click 固定打开、键盘 focus、Escape 和外部点击关闭；入口使用真正的 button，并保留账户身份、会员、AI 豆、自选、快捷入口和底部退出顺序。
+- 新增 `GET /api/account/summary/`，仅允许 authenticated user，返回真实用户摘要、统一 tier resolver 的 membership、真实全局 Watchlist 用量，以及 `status=not_enabled`、`balance=null`、`permanent=true` 的 AI 豆结构；没有周期重置字段。
+- AI 豆被定义为未来充值后永久有效的账户资产；当前未建立余额或充值模型，不制造余额数字，不提供充值按钮。
+- 新增 `POST /api/account/change-password/`，使用 Django 密码校验、CSRF 保护和 `update_session_auth_hash()`；密码修改只在测试数据库中验证。
+- 新增 PersonalCenter：通过轻量 History API 提供 `/account` 与 section query，开放概览、个人资料、会员与 AI 豆、账户安全、偏好设置；未实现的研究工作区、通知、账单等不展示假统计。
+- 当前没有真实 Pro entitlement，authenticated 账户返回并显示 FREE；visitor 不显示正式等级徽章；没有头像上传系统，头像位置使用用户名首字母并预留 `avatar_url`。
+- 无数据库 migration；本任务没有对正式数据库执行写入操作。
+
+### Verification
+
+- `python manage.py check`：通过（仅保留既有 `DEFAULT_AUTO_FIELD` warning）。
+- `python manage.py test core`：71 tests passed。
+- `python manage.py makemigrations --check`：No changes detected。
+- `npm run build`：通过。
+- `git diff --check`：通过。

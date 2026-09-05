@@ -220,6 +220,93 @@ class AuthenticationApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class AccountCenterApiTests(TestCase):
+    def setUp(self):
+        self.client = Client(enforce_csrf_checks=True)
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='account@example.com',
+            email='account@example.com',
+            first_name='研究员',
+            password='Original-password-42',
+        )
+        self.symbol = MarketSymbol.objects.create(
+            code='SH.600519', name='测试证券', market='cn', exchange='CN_SH',
+            security_type='STOCK', active=True, provider='test-provider',
+            provider_symbol='SH.600519',
+        )
+
+    def csrf_headers(self):
+        response = self.client.get('/api/csrf/')
+        self.assertEqual(response.status_code, 200)
+        return {'HTTP_X_CSRFTOKEN': self.client.cookies['csrftoken'].value}
+
+    def test_summary_rejects_anonymous_and_visitor(self):
+        anonymous = self.client.get('/api/account/summary/')
+        self.assertEqual(anonymous.status_code, 403)
+        self.client.post('/api/auth/guest/')
+        visitor = self.client.get('/api/account/summary/')
+        self.assertEqual(visitor.status_code, 403)
+        self.assertEqual(visitor.json()['code'], 'login_required')
+
+    def test_summary_returns_real_account_state_without_periodic_ai_fields(self):
+        self.client.force_login(self.user)
+        WatchlistEntry.objects.create(user=self.user, symbol=self.symbol)
+        response = self.client.get('/api/account/summary/')
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['user'], {'name': '研究员', 'email': 'account@example.com', 'avatar_url': None})
+        self.assertEqual(payload['membership'], {'tier': 'free', 'tier_label': 'FREE', 'expires_at': None})
+        self.assertEqual(payload['ai_beans'], {'status': 'not_enabled', 'balance': None, 'permanent': True})
+        self.assertEqual(payload['watchlist'], {'total': 1, 'limit': 10, 'remaining': 9})
+        self.assertNotIn('reset_at', payload)
+        self.assertNotIn('next_reset_at', payload)
+        self.assertNotIn('reset_at', payload['ai_beans'])
+        self.assertNotIn('next_reset_at', payload['ai_beans'])
+
+    def test_change_password_is_csrf_protected_and_preserves_session(self):
+        self.client.force_login(self.user)
+        body = json.dumps({
+            'current_password': 'Original-password-42',
+            'new_password': 'New-secure-password-43',
+            'confirm_password': 'New-secure-password-43',
+        })
+        without_csrf = self.client.post('/api/account/change-password/', data=body, content_type='application/json')
+        self.assertEqual(without_csrf.status_code, 403)
+
+        headers = self.csrf_headers()
+        wrong_current = self.client.post(
+            '/api/account/change-password/',
+            data=json.dumps({**json.loads(body), 'current_password': 'wrong'}),
+            content_type='application/json', **headers,
+        )
+        self.assertEqual(wrong_current.status_code, 400)
+        self.assertEqual(wrong_current.json()['code'], 'current_password_invalid')
+
+        mismatch = self.client.post(
+            '/api/account/change-password/',
+            data=json.dumps({**json.loads(body), 'confirm_password': 'different'}),
+            content_type='application/json', **headers,
+        )
+        self.assertEqual(mismatch.status_code, 400)
+        self.assertEqual(mismatch.json()['code'], 'password_mismatch')
+
+        weak = self.client.post(
+            '/api/account/change-password/',
+            data=json.dumps({**json.loads(body), 'new_password': '123', 'confirm_password': '123'}),
+            content_type='application/json', **headers,
+        )
+        self.assertEqual(weak.status_code, 400)
+        self.assertEqual(weak.json()['code'], 'password_invalid')
+
+        success = self.client.post('/api/account/change-password/', data=body, content_type='application/json', **headers)
+        self.assertEqual(success.status_code, 200)
+        self.assertEqual(success.json()['status'], 'ok')
+        refreshed = get_user_model().objects.get(pk=self.user.pk)
+        self.assertTrue(refreshed.check_password('New-secure-password-43'))
+        self.assertEqual(self.client.get('/api/auth/session/').status_code, 200)
+
+
 class SymbolCatalogSyncTests(TestCase):
     def symbol(self, code, name, market='cn', active=True, exchange='CN_SH'):
         return ProviderSymbol(code, name, market, exchange, 'STOCK', active)
@@ -969,12 +1056,16 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.app_source = (self.base_dir / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
         self.auth_source = (self.base_dir / "frontend" / "src" / "components" / "AuthGate.vue").read_text(encoding="utf-8")
         self.tier_badge_source = (self.base_dir / "frontend" / "src" / "components" / "AccountTierBadge.vue").read_text(encoding="utf-8")
+        self.popover_source = (self.base_dir / "frontend" / "src" / "components" / "AccountPopover.vue").read_text(encoding="utf-8")
+        self.center_source = (self.base_dir / "frontend" / "src" / "components" / "PersonalCenter.vue").read_text(encoding="utf-8")
 
     def test_visible_brand_uses_huntalpha_hub_and_real_account_state(self):
         self.assertIn("HuntAlphaLogo", self.app_source)
         self.assertIn("<span class=\"brand-name\">HuntAlpha</span>", self.app_source)
         self.assertIn("<small class=\"brand-hub\">HUB</small>", self.app_source)
-        self.assertIn("visitor ? t('visitor') : user.name", self.app_source)
+        self.assertIn("<AccountPopover v-else :user=\"user\"", self.app_source)
+        self.assertIn("<div v-if=\"visitor\" class=\"visitor-account\">", self.app_source)
+        self.assertNotIn("visitor ? t('visitor') : user.name", self.app_source)
         self.assertIn("HuntAlphaLogo", self.auth_source)
         self.assertIn("<span>HuntAlpha</span><small>HUB</small>", self.auth_source)
         self.assertNotIn("QuantScope", self.app_source)
@@ -1000,13 +1091,15 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertIn("`${API_BASE}/api/${endpoint}?${params}`", self.app_source)
 
     def test_account_tier_badge_is_embedded_and_supports_free_and_pro(self):
-        self.assertIn("AccountTierBadge", self.app_source)
-        self.assertIn(":tier=\"user.tier\"", self.app_source)
-        self.assertIn(":tier-label=\"user.tier_label\"", self.app_source)
-        self.assertIn(":watchlist-limit=\"user.watchlist_limit\"", self.app_source)
-        self.assertIn(":user-name=\"user.name\"", self.app_source)
-        self.assertIn(":avatar-url=\"user.avatar_url\"", self.app_source)
-        self.assertIn("<AccountTierBadge v-if=\"!visitor\"", self.app_source)
+        self.assertIn("AccountPopover", self.app_source)
+        self.assertIn("<AccountTierBadge", self.popover_source)
+        self.assertIn(":tier=\"user.tier\"", self.popover_source)
+        self.assertIn(":tier-label=\"user.tier_label\"", self.popover_source)
+        self.assertIn(":watchlist-limit=\"user.watchlist_limit\"", self.popover_source)
+        self.assertIn(":user-name=\"user.name\"", self.popover_source)
+        self.assertIn(":avatar-url=\"user.avatar_url\"", self.popover_source)
+        self.assertIn("account-trigger", self.popover_source)
+        self.assertIn('aria-haspopup="dialog"', self.popover_source)
         self.assertIn('viewBox="0 0 54 48"', self.tier_badge_source)
         self.assertIn('class="crown"', self.tier_badge_source)
         self.assertIn('class="avatar-circle"', self.tier_badge_source)
@@ -1023,6 +1116,21 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertNotIn("avatar-bg", self.tier_badge_source)
         self.assertNotRegex(self.tier_badge_source, r"https?://")
         self.assertNotRegex(self.tier_badge_source, r"[\U0001F300-\U0001FAFF]")
+
+    def test_account_menu_and_personal_center_contract(self):
+        combined = self.app_source + self.popover_source + self.center_source
+        self.assertIn("/api/account/summary/", combined)
+        self.assertIn("/api/account/change-password/", self.center_source)
+        self.assertIn("window.addEventListener('popstate', handleRouteChange)", self.app_source)
+        self.assertIn("window.history.pushState", self.app_source)
+        self.assertIn("/account", self.app_source)
+        self.assertIn("个人中心", self.popover_source)
+        self.assertIn("退出登录", self.popover_source)
+        self.assertIn("prefers-reduced-motion:reduce", combined)
+        self.assertEqual(self.center_source.count("{ key:"), 5)
+        self.assertNotIn("reset_at", combined)
+        self.assertNotIn("next_reset_at", combined)
+        self.assertNotIn("每月重置", combined)
 
 
 class WatchlistModelAndApiTests(TestCase):

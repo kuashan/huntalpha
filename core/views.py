@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from django.conf import settings
-from django.contrib.auth import get_user_model, login, logout
+from django.contrib.auth import get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
@@ -83,6 +83,15 @@ def api_member_required(view):
     return wrapped
 
 
+def api_account_required(view):
+    """Require a real authenticated account for account-center APIs."""
+    def wrapped(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return json({"error": "请先登录后访问账户中心", "code": "login_required"}, 403)
+        return view(request, *args, **kwargs)
+    return wrapped
+
+
 def dsa_code(code):
     upper = code.upper()
     if upper.startswith(("SH.", "SZ.")):
@@ -137,6 +146,61 @@ def auth_session(request):
     if is_visitor(request):
         return json({"authenticated": True, "visitor": True, **account_tier_payload(None), "user": visitor_payload()})
     return json({"authenticated": False, **account_tier_payload(None)}, 401)
+
+
+@require_GET
+@api_account_required
+def account_summary(request):
+    tier = account_tier_payload(request.user)
+    total = WatchlistEntry.objects.filter(user=request.user).count()
+    limit = watchlist_limit_for_user(request.user)
+    return json({
+        "user": {
+            "name": request.user.get_full_name() or request.user.first_name or request.user.email.split("@", 1)[0],
+            "email": request.user.email,
+            "avatar_url": None,
+        },
+        "membership": {
+            "tier": tier["tier"],
+            "tier_label": tier["tier_label"],
+            "expires_at": None,
+        },
+        "ai_beans": {
+            "status": "not_enabled",
+            "balance": None,
+            "permanent": True,
+        },
+        "watchlist": {
+            "total": total,
+            "limit": limit,
+            "remaining": max(limit - total, 0),
+        },
+    })
+
+
+@require_POST
+@api_account_required
+def change_password(request):
+    payload = auth_body(request)
+    if not isinstance(payload, dict):
+        return json({"error": "请求格式无效", "code": "invalid_request"}, 400)
+    current_password = str(payload.get("current_password", ""))
+    new_password = str(payload.get("new_password", ""))
+    confirm_password = str(payload.get("confirm_password", ""))
+    if not request.user.check_password(current_password):
+        return json({"error": "当前密码不正确", "code": "current_password_invalid"}, 400)
+    if new_password != confirm_password:
+        return json({"error": "两次输入的新密码不一致", "code": "password_mismatch"}, 400)
+    if not new_password:
+        return json({"error": "请输入新密码", "code": "password_invalid"}, 400)
+    try:
+        validate_password(new_password, request.user)
+    except ValidationError as exc:
+        return json({"error": " ".join(exc.messages), "code": "password_invalid"}, 400)
+    request.user.set_password(new_password)
+    request.user.save(update_fields=["password"])
+    update_session_auth_hash(request, request.user)
+    return json({"status": "ok", "message": "密码已更新"})
 
 
 def auth_body(request):
