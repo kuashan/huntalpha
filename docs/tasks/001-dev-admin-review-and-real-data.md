@@ -114,11 +114,11 @@ HuntAlpha 是准备正式上线、长期维护的真实产品。前端原有的�
 ## Codex Completion Report
 
 - Branch: `codex/001-dev-admin-review-and-real-data`
-- Commits: `e5c45ee`（恢复标准认证流程并移除管理员审查模式）；`03fc99d`（远端新增 Decision 0003/0004 文档）；本次 merge commit 和文档合并结果将在合并提交后记录于最终报告。
-- Push: merge 完成并通过检查后 Push 回原开发分支。
+- Commits: `b36e2fb50d42618e141895cc17ffb0c2f366aaf8`（普通 merge commit，父提交为 `03fc99d` 与 `ea6c3f9`）；`e5c45ee`（恢复标准认证流程并移除管理员审查模式）；`03fc99d`（远端新增 Decision 0003/0004 文档）。
+- Push: merge 后的文档更新和代码分支已成功 Push 回 `origin/codex/001-dev-admin-review-and-real-data`。
 - Summary: 按 PR #2 最新产品决定撤销管理员专用审查模式，恢复完整登录/注册/访客流程；保留富途 OpenD 真实报价、涨跌幅、OHLC、K 线和 OpenD 不可用时的显式错误，不允许假数据回退。
 - Files changed: 本次冲突解决涉及 `docs/decisions/0003-development-admin-review-and-real-data-policy.md` 与 `docs/tasks/001-dev-admin-review-and-real-data.md`；main 上新增的 `docs/decisions/0004-standard-auth-and-real-data-baseline.md` 已保留。业务代码未因本次文档 merge 改动。
-- Checks run: merge 后填写最终检查结果。
+- Checks run: `git diff --check` 通过；`python manage.py check` 通过，只有既有的两个 `core` 模型 `DEFAULT_AUTO_FIELD` warning；`python manage.py test core` 通过，20 项测试全部通过；`npm run build` 通过；当前仓库没有前端自动测试脚本。
 - Real-data verification: 当前富途 OpenD 已在 `127.0.0.1:11111` 监听；此前已通过本分支 Django API 的访客 Session 端到端验证 `SH.600519`，真实报价返回 1330.0、`+2.396%`、OHLC 1295.88 / 1338.86 / 1295.6，真实日线 K 线最近一根收盘 1330.0，数据源为 `futu-opend`。
 - Authentication verification: `AuthenticationApiTests` 覆盖正常注册、访客、未登录终端拦截和访客 AI 限制；`AuthGate.vue` 保留登录/注册切换、`?register=1` 和访客按钮。
 - Design choices: Decision 0003 明确标记 `SUPERSEDED`，Decision 0004 保持 `ACCEPTED`；`marketData.js` 仅保留代码/名称导航清单；删除 `makeBars()` 和静态行情摘要；OpenD 失败时返回错误或不可用状态，不生成行情回退。
