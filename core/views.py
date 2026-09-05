@@ -23,7 +23,7 @@ from formula_editor.models import Formula
 from .models import MarketSymbol, WatchlistEntry
 from .market_indices import FutuOpenDIndexAdapter, grouped_snapshot_response, unavailable_index_items
 from .symbol_catalog import FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
-from .watchlist import watchlist_limit_for_user
+from .watchlist import account_tier_payload, watchlist_limit_for_user
 
 PERIODS = {"1分": KLType.K_1M, "5分": KLType.K_5M, "15分": KLType.K_15M, "30分": KLType.K_30M, "60分": KLType.K_60M, "2小时": KLType.K_120M, "4小时": KLType.K_240M, "日线": KLType.K_DAY, "周线": KLType.K_WEEK, "月线": KLType.K_MON}
 KLINE_PAGE_SIZE = 1000
@@ -44,7 +44,12 @@ def user_payload(user):
     return {
         "email": user.email,
         "name": user.get_full_name() or user.first_name or user.email.split("@", 1)[0],
+        **account_tier_payload(user),
     }
+
+
+def visitor_payload():
+    return {"email": "", "name": "访客模式", **account_tier_payload(None)}
 
 
 COMMON_INDICATORS = [
@@ -128,10 +133,10 @@ def ai_analysis_status(request, task_id):
 @require_GET
 def auth_session(request):
     if request.user.is_authenticated:
-        return json({"authenticated": True, "visitor": False, "user": user_payload(request.user)})
+        return json({"authenticated": True, "visitor": False, **account_tier_payload(request.user), "user": user_payload(request.user)})
     if is_visitor(request):
-        return json({"authenticated": True, "visitor": True, "user": {"email": "", "name": "访客模式"}})
-    return json({"authenticated": False}, 401)
+        return json({"authenticated": True, "visitor": True, **account_tier_payload(None), "user": visitor_payload()})
+    return json({"authenticated": False, **account_tier_payload(None)}, 401)
 
 
 def auth_body(request):
@@ -166,7 +171,7 @@ def auth_register(request):
     candidate.save()
     request.session.pop("quantscope_visitor", None)
     login(request, candidate)
-    return json({"authenticated": True, "user": user_payload(candidate)}, 201)
+    return json({"authenticated": True, **account_tier_payload(candidate), "user": user_payload(candidate)}, 201)
 
 
 @csrf_exempt
@@ -183,7 +188,7 @@ def auth_login(request):
         return json({"error": "邮箱或密码不正确"}, 401)
     request.session.pop("quantscope_visitor", None)
     login(request, user)
-    return json({"authenticated": True, "user": user_payload(user)})
+    return json({"authenticated": True, **account_tier_payload(user), "user": user_payload(user)})
 
 
 @csrf_exempt
@@ -198,7 +203,7 @@ def auth_logout(request):
 @require_POST
 def auth_guest(request):
     request.session["quantscope_visitor"] = True
-    return json({"authenticated": True, "visitor": True, "user": {"email": "", "name": "访客模式"}})
+    return json({"authenticated": True, "visitor": True, **account_tier_payload(None), "user": visitor_payload()})
 
 
 @require_GET
