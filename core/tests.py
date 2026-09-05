@@ -26,6 +26,7 @@ from .market_indices import INDEX_DEFINITIONS, FutuOpenDIndexAdapter, convert_sn
 from .models import MarketSymbol, WatchlistEntry
 from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
 from .views import _watchlist_create, bar_rows
+from .watchlist import resolve_account_tier, resolve_watchlist_limit
 
 
 class LocalDatabaseBackupCommandTests(SimpleTestCase):
@@ -159,6 +160,11 @@ class AuthenticationApiTests(TestCase):
         response = self.client.get('/api/indicators/')
         self.assertEqual(response.status_code, 401)
         self.assertFalse(response.json()['authenticated'])
+        session = self.client.get('/api/auth/session/')
+        self.assertEqual(session.status_code, 401)
+        self.assertIsNone(session.json()['tier'])
+        self.assertIsNone(session.json()['tier_label'])
+        self.assertIsNone(session.json()['watchlist_limit'])
 
     def test_email_registration_creates_a_session(self):
         response = self.client.post(
@@ -168,12 +174,43 @@ class AuthenticationApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()['user']['email'], 'researcher@example.com')
+        self.assertEqual(response.json()['user']['tier'], 'free')
+        self.assertEqual(response.json()['user']['tier_label'], 'FREE')
+        self.assertEqual(response.json()['user']['watchlist_limit'], 10)
+        self.assertEqual(response.json()['tier'], 'free')
+        self.assertEqual(response.json()['tier_label'], 'FREE')
+        self.assertEqual(response.json()['watchlist_limit'], 10)
         self.assertEqual(self.client.get('/api/auth/session/').status_code, 200)
+
+    def test_authenticated_tier_uses_free_without_a_real_pro_entitlement(self):
+        User = get_user_model()
+        user = User.objects.create_user(username='tier@example.com', email='tier@example.com', password='safe-password-123')
+        user.is_staff = True
+        user.is_superuser = True
+        user.save(update_fields=['is_staff', 'is_superuser'])
+        self.client.force_login(user)
+
+        payload = self.client.get('/api/auth/session/').json()
+        self.assertEqual(resolve_account_tier(user), 'free')
+        self.assertEqual(resolve_watchlist_limit(user), 10)
+        self.assertEqual(payload['user']['tier'], 'free')
+        self.assertEqual(payload['user']['tier_label'], 'FREE')
+        self.assertEqual(payload['user']['watchlist_limit'], 10)
+        self.assertNotEqual(payload['user']['tier'], 'pro')
+        self.assertEqual(payload['tier'], 'free')
+        self.assertEqual(payload['tier_label'], 'FREE')
+        self.assertEqual(payload['watchlist_limit'], 10)
 
     def test_guest_session_can_see_common_indicators_only(self):
         response = self.client.post('/api/auth/guest/')
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()['visitor'])
+        self.assertIsNone(response.json()['user']['tier'])
+        self.assertIsNone(response.json()['user']['tier_label'])
+        self.assertIsNone(response.json()['user']['watchlist_limit'])
+        self.assertIsNone(response.json()['tier'])
+        self.assertIsNone(response.json()['tier_label'])
+        self.assertIsNone(response.json()['watchlist_limit'])
         indicators = self.client.get('/api/indicators/').json()['items']
         self.assertEqual({item['code'] for item in indicators if item['visitor_available']}, {'MA', 'BOLL', 'VOL', 'MACD', 'KDJ', 'RSI'})
 
@@ -931,6 +968,7 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.base_dir = Path(settings.BASE_DIR)
         self.app_source = (self.base_dir / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
         self.auth_source = (self.base_dir / "frontend" / "src" / "components" / "AuthGate.vue").read_text(encoding="utf-8")
+        self.tier_badge_source = (self.base_dir / "frontend" / "src" / "components" / "AccountTierBadge.vue").read_text(encoding="utf-8")
 
     def test_visible_brand_uses_huntalpha_hub_and_real_account_state(self):
         self.assertIn("HuntAlphaLogo", self.app_source)
@@ -960,6 +998,31 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertIn("toggleWatchlist", self.app_source)
         self.assertIn("@click.stop=\"toggleWatchlist(item)\"", self.app_source)
         self.assertIn("`${API_BASE}/api/${endpoint}?${params}`", self.app_source)
+
+    def test_account_tier_badge_is_embedded_and_supports_free_and_pro(self):
+        self.assertIn("AccountTierBadge", self.app_source)
+        self.assertIn(":tier=\"user.tier\"", self.app_source)
+        self.assertIn(":tier-label=\"user.tier_label\"", self.app_source)
+        self.assertIn(":watchlist-limit=\"user.watchlist_limit\"", self.app_source)
+        self.assertIn(":user-name=\"user.name\"", self.app_source)
+        self.assertIn(":avatar-url=\"user.avatar_url\"", self.app_source)
+        self.assertIn("<AccountTierBadge v-if=\"!visitor\"", self.app_source)
+        self.assertIn('viewBox="0 0 54 48"', self.tier_badge_source)
+        self.assertIn('class="crown"', self.tier_badge_source)
+        self.assertIn('class="avatar-circle"', self.tier_badge_source)
+        self.assertIn('<circle class="avatar-circle"', self.tier_badge_source)
+        self.assertIn('class="ribbon"', self.tier_badge_source)
+        self.assertIn('class="ribbon-label" x="27" y="44.3"', self.tier_badge_source)
+        self.assertIn('>{{ displayLabel }}</text>', self.tier_badge_source)
+        self.assertIn('v-if="avatarUrl"', self.tier_badge_source)
+        self.assertIn('v-else-if="avatarInitial"', self.tier_badge_source)
+        self.assertIn('class="avatar-fallback"', self.tier_badge_source)
+        self.assertIn("tier-free .crown", self.tier_badge_source)
+        self.assertIn("tier-pro .crown", self.tier_badge_source)
+        self.assertNotIn("avatar-ring", self.tier_badge_source)
+        self.assertNotIn("avatar-bg", self.tier_badge_source)
+        self.assertNotRegex(self.tier_badge_source, r"https?://")
+        self.assertNotRegex(self.tier_badge_source, r"[\U0001F300-\U0001FAFF]")
 
 
 class WatchlistModelAndApiTests(TestCase):
