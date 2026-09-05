@@ -1,5 +1,6 @@
 import hashlib
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ from formula_editor.models import Formula
 from .market_indices import INDEX_DEFINITIONS, FutuOpenDIndexAdapter, convert_snapshot_frame
 from .models import MarketSymbol, WatchlistEntry
 from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
-from .views import bar_rows
+from .views import _watchlist_create, bar_rows
 
 
 class LocalDatabaseBackupCommandTests(SimpleTestCase):
@@ -1060,6 +1061,23 @@ class WatchlistModelAndApiTests(TestCase):
         self.assertEqual(second.json()["status"], "already_exists")
         self.assertEqual(second.json()["total"], 1)
         self.assertEqual(WatchlistEntry.objects.filter(user=self.user_a).count(), 1)
+
+    def test_create_serializes_quota_check_on_locked_user_row(self):
+        source = inspect.getsource(_watchlist_create)
+        lock_position = source.index("locked_user = get_user_model().objects.select_for_update()")
+        duplicate_position = source.index('WatchlistEntry.objects.select_related("symbol")', lock_position)
+        quota_position = source.index("totals = _watchlist_totals_for_user(locked_user)", duplicate_position)
+        create_position = source.index("WatchlistEntry.objects.create(user=locked_user", quota_position)
+
+        self.assertLess(lock_position, duplicate_position)
+        self.assertLess(duplicate_position, quota_position)
+        self.assertLess(quota_position, create_position)
+        constraints = [
+            constraint for constraint in WatchlistEntry._meta.constraints
+            if constraint.name == "core_watch_user_symbol_uniq"
+        ]
+        self.assertEqual(len(constraints), 1)
+        self.assertEqual(tuple(constraints[0].fields), ("user", "symbol"))
 
     def test_quota_is_backend_enforced_and_shared_across_markets(self):
         entries = self.cn_symbols[:4] + self.hk_symbols + self.us_symbols[:3]

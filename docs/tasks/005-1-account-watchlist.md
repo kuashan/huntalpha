@@ -21,15 +21,33 @@ Status: IMPLEMENTED
 
 - `core/migrations/0007_watchlistentry.py`：创建自选关系表、唯一约束和用户查询索引。
 - `core/migrations/0008_alter_calibrationdataset_id_alter_indicator_id_and_more.py`：同步仓库既有主键迁移状态，避免 `makemigrations --check` 报遗漏；不涉及 Formula 业务字段。
-- 正式本地迁移前备份：`C:\Users\Administrator\Documents\ChatGPT\huntalpha-db-backups\huntalpha-local-db-20260905-130406-832263.sqlite3`。
-- 备份 SHA-256：`028e428644eb029081268e1aa839745200ae7f7e8bc5d0b80a14ee1fb74c5cd4`；`integrity_check: ok`。
+
+### Migration safety
+
+迁移前正式备份：
+
+- path: `C:\Users\Administrator\Documents\ChatGPT\huntalpha-db-backups\huntalpha-local-db-20260905-130022-326987.sqlite3`
+- SHA-256: `79a208c0e3e8697c47a286996901de90149d76f7a6eecdc71ca60d520ecd5625`
+- `integrity_check: ok`
+
+应用迁移：
+
+- `core/migrations/0007_watchlistentry.py`
+- `core/migrations/0008_alter_calibrationdataset_id_alter_indicator_id_and_more.py`
+
+迁移后验证备份：
+
+- path: `C:\Users\Administrator\Documents\ChatGPT\huntalpha-db-backups\huntalpha-local-db-20260905-130406-832263.sqlite3`
+- SHA-256: `028e428644eb029081268e1aa839745200ae7f7e8bc5d0b80a14ee1fb74c5cd4`
+- `integrity_check: ok`
 
 ## Completion Report
 
 - 分支：`codex/005-1-account-watchlist`
 - 实现 Commit：`b7ad4e5`（后续 Completion Report 文档更新另有提交）
 - PR：[#17](https://github.com/kuashan/huntalpha/pull/17)，目标 `main`，未合并
-- 自动测试：`python manage.py test core`，64 项全部通过。
+- 本轮 review 修复：用户级 `select_for_update()` 锁定当前认证用户行；锁内按“重复检查 → 全局额度统计 → 创建”顺序执行，保留 `(user, symbol)` 唯一约束。
+- 自动测试：`python manage.py test core`，65 项全部通过（含本轮用户行锁顺序契约测试）。
 - `python manage.py check`：通过，保留既有 MarketSymbol AutoField warning。
 - `npm run build`：通过。
 - `git diff --check`：通过。
@@ -48,4 +66,5 @@ Status: IMPLEMENTED
 - 左栏：无搜索词加载当前市场自选；有搜索词加载当前市场真实目录并带一次性 `watchlisted` 标记；保留 `market_leaders` 后端，不再作为左栏默认请求；移除市值列；☆/★ 点击阻止行选择事件。
 - 性能边界：自选/搜索仅请求可见证券的轻量 quote/change；未为整个列表加载 K 线、Formula 或 AI。
 - 迁移：正式数据库已在备份并确认 `integrity_check: ok` 后应用 `0007`、`0008`；未执行 flush/reset，Formula 仍为 4 条。
+- 并发边界：本地 SQLite 无法完整模拟 PostgreSQL `SELECT FOR UPDATE` 的并发阻塞语义；实现使用数据库无关的 Django ORM 用户行锁，并以稳定的代码契约与额度/重复收藏回归测试验证锁和检查顺序。
 - 浏览器：真实搜索 `600519` 返回真实证券与 OpenD 报价；添加后显示黄色 ★ 与 `1 / 10`，取消后恢复 ☆ 与 `0 / 10`；Crypto 显示 unavailable，无假价格。

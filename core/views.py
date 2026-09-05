@@ -262,27 +262,28 @@ def _watchlist_create(request):
         return _watchlist_error("仅支持普通股票", "symbol_unavailable", request, 409)
     try:
         with transaction.atomic():
+            locked_user = get_user_model().objects.select_for_update().get(pk=request.user.pk)
             entry = WatchlistEntry.objects.select_related("symbol").filter(
-                user=request.user, symbol=symbol
+                user=locked_user, symbol=symbol
             ).first()
             if entry is not None:
                 return json({
                     "status": "already_exists",
                     "item": watchlist_item_data(entry),
-                    **_watchlist_totals(request),
+                    **_watchlist_totals_for_user(locked_user),
                 })
-            totals = _watchlist_totals(request)
+            totals = _watchlist_totals_for_user(locked_user)
             if totals["total"] >= totals["limit"]:
                 return json({
                     "error": "自选已满",
                     "code": "watchlist_limit_reached",
                     **totals,
                 }, 409)
-            entry = WatchlistEntry.objects.create(user=request.user, symbol=symbol)
+            entry = WatchlistEntry.objects.create(user=locked_user, symbol=symbol)
             return json({
                 "status": "created",
                 "item": watchlist_item_data(entry),
-                **_watchlist_totals(request),
+                **_watchlist_totals_for_user(locked_user),
             }, 201)
     except IntegrityError:
         # The unique constraint makes a concurrent duplicate idempotent even
@@ -496,12 +497,18 @@ def symbol_data(item):
     }
 
 
+def _watchlist_totals_for_user(user):
+    if not user.is_authenticated:
+        return {"total": 0, "limit": 0, "remaining": 0}
+    limit = watchlist_limit_for_user(user)
+    total = WatchlistEntry.objects.filter(user=user).count()
+    return {"total": total, "limit": limit, "remaining": max(limit - total, 0)}
+
+
 def _watchlist_totals(request):
     if not request.user.is_authenticated:
         return {"total": 0, "limit": 0, "remaining": 0}
-    limit = watchlist_limit_for_user(request.user)
-    total = WatchlistEntry.objects.filter(user=request.user).count()
-    return {"total": total, "limit": limit, "remaining": max(limit - total, 0)}
+    return _watchlist_totals_for_user(request.user)
 
 
 def _watchlisted_codes(request, items):
