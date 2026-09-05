@@ -27,22 +27,35 @@ function distributeTriangle(low, high, average, step) {
   return entries.map(([price, weight]) => [price, weight / total])
 }
 
-function quantile(chips, percentage) {
-  const target = Math.min(1, Math.max(0, percentage / 100))
-  let cumulative = 0
-  for (const [price, weight] of [...chips.entries()].sort((a, b) => a[0] - b[0])) {
-    cumulative += weight
-    if (cumulative >= target) return price
-  }
-  return [...chips.keys()].sort((a, b) => b - a)[0] || 0
+function sortedChips(chips, onSort) {
+  onSort()
+  return [...chips.entries()].sort((a, b) => a[0] - b[0])
 }
 
-export function calculateChipDistribution(rawBars, { floatShares = 0, decay = 1 } = {}) {
+function quantiles(sorted) {
+  if (!sorted.length) return Array(101).fill(0)
+
+  const values = []
+  let cursor = 0
+  let cumulative = 0
+  for (let percentage = 0; percentage <= 100; percentage += 1) {
+    const target = percentage / 100
+    while (cursor < sorted.length && cumulative < target) {
+      cumulative += sorted[cursor][1]
+      cursor += 1
+    }
+    values.push(sorted[Math.min(sorted.length - 1, Math.max(0, cursor - 1))][0])
+  }
+  return values
+}
+
+export function calculateChipDistribution(rawBars, { floatShares = 0, decay = 1 } = {}, diagnostics = {}) {
   const bars = rawBars.filter(bar => number(bar.high) >= number(bar.low) && number(bar.high) > 0)
   const step = priceStep(bars)
   const costs = Object.fromEntries(Array.from({ length: 101 }, (_, key) => [key, []]))
   const winners = []
   const knownFloatShares = number(floatShares)
+  const onSort = typeof diagnostics.onSort === 'function' ? diagnostics.onSort : () => {}
   let chips = new Map()
 
   for (const bar of bars) {
@@ -71,11 +84,10 @@ export function calculateChipDistribution(rawBars, { floatShares = 0, decay = 1 
     for (const [price, weight] of today) chips.set(price, (chips.get(price) || 0) + weight * replacement)
     const total = [...chips.values()].reduce((sum, weight) => sum + weight, 0) || 1
     for (const [price, weight] of chips) chips.set(price, weight / total)
-    for (const percentage of Object.keys(costs)) {
-      costs[percentage].push(quantile(chips, Number(percentage)))
-    }
+    const sorted = sortedChips(chips, onSort)
+    quantiles(sorted).forEach((value, percentage) => costs[percentage].push(value))
     const close = number(bar.close)
-    winners.push([...chips.entries()].reduce((sum, [price, weight]) => sum + (price <= close ? weight : 0), 0))
+    winners.push(sorted.reduce((sum, [price, weight]) => sum + (price <= close ? weight : 0), 0))
   }
   return { costs, winners, available: knownFloatShares > 0, method: 'triangular-turnover' }
 }

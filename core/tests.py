@@ -17,6 +17,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.contrib.auth import get_user_model
 from futu import RET_OK
 
+from formula_editor.models import Formula
 from .views import bar_rows
 
 
@@ -268,6 +269,30 @@ class RealMarketDataApiTests(TestCase):
             response = self.client.get('/api/kline/SH.600519/?period=日线')
         self.assertEqual(response.status_code, 502)
         self.assertNotIn('bars', response.json())
+
+    def test_indicator_timeout_message_is_neutral(self):
+        self.client.force_login(self.make_user())
+        Formula.objects.create(
+            name='Synthetic timeout fixture',
+            code='SYNTHETIC_TIMEOUT',
+            placement='sub',
+            source='OUT:MA(C,3);',
+        )
+        bars = [{
+            'time': 1_700_000_000,
+            'open': 10,
+            'high': 11,
+            'low': 9,
+            'close': 10,
+            'volume': 1_000,
+            'amount': 10_000,
+        }]
+        with patch('core.views.history_bars', return_value=(bars, None, None)), patch(
+            'core.views.subprocess.run', side_effect=subprocess.TimeoutExpired(cmd='node', timeout=8)
+        ):
+            response = self.client.get('/api/indicator-render/SYNTHETIC_TIMEOUT/SH.600519/?period=日线&count=100')
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()['error'], '指标计算耗时过长，请稍后重试或降低同时运行的指标数量')
 
 
 class TongdaxinFormulaEngineTests(SimpleTestCase):
