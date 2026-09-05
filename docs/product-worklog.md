@@ -12,17 +12,18 @@
 
 ### Task 004.1 — 真实大盘指数顶部行情
 
-状态：`PLANNED / WAITING_FOR_CODEX_IMPLEMENTATION`
+状态：`IMPLEMENTED`
 
-目标：
+已完成：
 - A 股：上证指数、深证成指
 - 港股：恒生指数、恒生科技指数
-- 美股：标普 500、纳斯达克综合指数、道琼斯工业平均指数
-- 加密资产在没有真实 provider 前从主行情界面隐藏
-- 所有点位、昨收、涨跌额、涨跌幅、更新时间必须来自真实 Futu OpenD
+- 美股：标普 500、纳斯达克综合指数、道琼斯工业平均指数；当前 OpenD 不支持这三个美股指数 snapshot，因此真实显示 unavailable
+- 所有点位、昨收、涨跌额、涨跌幅、更新时间来自真实 Futu OpenD
 - provider 不可用时显示 unavailable，不使用静态数字或 fake fallback
 
 正式任务：`docs/tasks/004-1-real-market-index-header.md`
+
+已合并 PR：`#12`
 
 ## 已批准、待实现
 
@@ -119,19 +120,22 @@ Task 004 当前默认入口使用真实“总市值 Top 5”。未来榜单架�
 
 每个市场独立排名；不同币种的市值不得直接跨市场混排。
 
-### 7. Crypto 数据接入
+### 7. Crypto 市场展示与未来数据接入
 
-状态：`DEFERRED`
+状态：`APPROVED / PROVIDER_DEFERRED`
 
-当前：
-- 没有真实 crypto provider
-- 主行情界面暂时隐藏加密资产
-- 不显示静态 BTC/ETH/SOL、假指数、假报价
-- 后端现有 unavailable 设计保留
+当前批准方向：
+- 主行情顶部重新显示加密资产板块
+- 暂以 `BTC` 与 `ETH` 作为两个代表性资产名称
+- 当前没有真实 crypto provider，因此 BTC / ETH 不显示任何静态价格、涨跌幅或假报价
+- 未接入真实行情时，数值显示 `— / 暂不可用`
+- 不使用 BTC/ETH 的网页抓取值、演示值、随机值或历史静态值冒充实时行情
+- 后端现有 crypto unavailable 设计保留
 
 未来：
-- 只有接入真实 provider 后再恢复 crypto 市场
-- 再讨论证券目录/交易对、行情、K 线、指数/基准、权限和刷新策略
+- 接入真实 crypto provider 后，再为 BTC / ETH 以及其他交易对提供真实 quote / K 线
+- 再讨论证券目录/交易对、行情、K 线、基准、权限和刷新策略
+- 如未来扩展更多币种，仍必须遵守真实 provider 原则
 
 ### 8. K 线历史深度
 
