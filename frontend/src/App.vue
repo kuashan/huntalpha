@@ -26,7 +26,28 @@ const displayPrice = value => typeof value === 'number' && Number.isFinite(value
 const displayChange = value => typeof value === 'number' && Number.isFinite(value) ? `${value > 0 ? '+' : ''}${value}%` : '—'
 const itemQuote = item => quotes.value[item.code]?.data
 const itemQuoteError = item => quotes.value[item.code]?.error || ''
-const displayMarketCap = (value, currency) => typeof value === 'number' && Number.isFinite(value) ? `${value.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${currency || ''}`.trim() : '—'
+const trimCompact = value => value.toFixed(2).replace(/\.?(0+)$/, '')
+const displayMarketCap = (value, currency) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  const code = String(currency || '').toUpperCase()
+  const suffix = code && code !== 'CNY' ? ' ' + code : ''
+  const sign = value < 0 ? '-' : ''
+  const amount = Math.abs(value)
+  if (code === 'USD') {
+    if (amount >= 1e12) return sign + trimCompact(amount / 1e12) + 'T' + suffix
+    if (amount >= 1e9) return sign + trimCompact(amount / 1e9) + 'B' + suffix
+    if (amount >= 1e6) return sign + trimCompact(amount / 1e6) + 'M' + suffix
+  }
+  if (amount >= 1e12) return sign + trimCompact(amount / 1e12) + '万亿' + suffix
+  if (amount >= 1e8) return sign + trimCompact(amount / 1e8) + '亿' + suffix
+  if (amount >= 1e4) return sign + trimCompact(amount / 1e4) + '万' + suffix
+  return sign + amount.toLocaleString(undefined, { maximumFractionDigits: 2 }) + suffix
+}
+const displayMarketCapExact = (value, currency) => typeof value === 'number' && Number.isFinite(value) ? (value.toLocaleString(undefined, { maximumFractionDigits: 4 }) + ' ' + (currency || '')).trim() : '—'
+const symbolTitle = item => [
+  item.market_cap != null ? t('marketCap') + '：' + displayMarketCapExact(item.market_cap, item.market_cap_currency) : '',
+  itemQuoteError(item),
+].filter(Boolean).join(' · ') || item.name + ' · ' + item.code
 const catalogStatusText = computed(() => catalogError.value || (catalogLoading.value ? t('catalogLoading') : list.value.length ? '' : query.value.trim() ? t('noSymbol') : t('catalogNotSynced')))
 function switchMarket(item) { market.value = item; query.value = '' }
 function addIndicator(item) { if (visitor.value && !item.visitor_available) return; const list = item.placement === 'main' ? mainInstalled : subInstalled; if (item.placement === 'sub' && !list.value.some(current => current.code === item.code) && list.value.length >= 3) return; if (!list.value.some(current => current.code === item.code)) list.value = [...list.value, item] }
@@ -94,7 +115,7 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer))
   <main v-else class="terminal">
     <header><div class="brand"><b>Q</b> QuantScope <small>{{ visitor ? t('visitor') : t('pro') }}</small></div><nav><a class="active">{{ t('market') }}</a><a>{{ t('watchlist') }}</a><a>{{ t('strategy') }}</a><a>{{ t('news') }}</a></nav><div class="feed">● {{ visitor ? t('visitorAi') : user.name }}</div><select class="terminal-language" :value="locale" @change="setLocale($event.target.value)"><option v-for="item in languages" :key="item.code" :value="item.code">{{ item.label }}</option></select><button class="logout" @click="signOut">{{ t('logout') }}</button></header>
     <section class="markets"><button v-for="item in markets" :key="item.code" :class="{active: market.code === item.code}" @click="switchMarket(item)"><strong>{{ item.name }}</strong><span>—</span><em class="unavailable">{{ t('marketUnavailable') }}</em></button></section>
-    <div class="workspace"><aside><div class="aside-title">{{ t('marketList') }} <b>{{ market.name }}</b></div><label class="search">⌕ <input v-model="query" :placeholder="t('search')" /></label><div class="heads"><span>{{ t('nameCode') }}</span><span>{{ t('marketCap') }}</span><span>{{ t('latest') }}</span><span>{{ t('change') }}</span></div><button v-for="item in list" :key="item.code" class="symbol" :class="{selected: selected?.code === item.code}" :title="itemQuoteError(item)" @click="selected = item"><span><strong>{{ item.name }}</strong><small>{{ item.code }}</small></span><b>{{ displayMarketCap(item.market_cap, item.market_cap_currency) }}</b><b>{{ displayPrice(itemQuote(item)?.price) }}</b><em :class="{down:itemQuote(item)?.change < 0}">{{ displayChange(itemQuote(item)?.change) }}</em></button><p v-if="catalogStatusText">{{ catalogStatusText }}</p></aside>
+    <div class="workspace"><aside><div class="aside-title">{{ t('marketList') }} <b>{{ market.name }}</b></div><label class="search">⌕ <input v-model="query" :placeholder="t('search')" /></label><div class="heads"><span>{{ t('nameCode') }}</span><span>{{ t('latest') }}</span><span>{{ t('change') }}</span></div><button v-for="item in list" :key="item.code" class="symbol" :class="{selected: selected?.code === item.code}" :title="symbolTitle(item)" :aria-label="symbolTitle(item)" @click="selected = item"><span class="symbol-name"><strong>{{ item.name }}</strong><small>{{ item.code }}</small><small v-if="item.market_cap != null" class="symbol-cap">{{ t('marketCap') }} {{ displayMarketCap(item.market_cap, item.market_cap_currency) }}</small></span><b>{{ displayPrice(itemQuote(item)?.price) }}</b><em :class="{down:itemQuote(item)?.change < 0}">{{ displayChange(itemQuote(item)?.change) }}</em></button><p v-if="catalogStatusText">{{ catalogStatusText }}</p></aside>
       <section class="content"><div class="security"><div><p>{{ market.name }} · {{ quoteStatusText }}</p><h1>{{ selected?.name || '—' }} <small>{{ selected?.code || '' }}</small><button v-if="selected && !selected.code.startsWith('CC.')" class="ai-button" @click="requestAiAccess">AI 分析</button></h1></div><div class="price"><strong>{{ displayPrice(quoteData?.price) }}</strong><span :class="{down:quoteData?.change < 0}">{{ displayChange(quoteData?.change) }}</span></div><dl><div><dt>{{ t('open') }}</dt><dd>{{ displayPrice(quoteData?.open) }}</dd></div><div><dt>{{ t('high') }}</dt><dd>{{ displayPrice(quoteData?.high) }}</dd></div><div><dt>{{ t('low') }}</dt><dd>{{ displayPrice(quoteData?.low) }}</dd></div></dl></div>
         <div class="toolbar"><div><button v-for="item in ['分时','1分','5分','15分','30分','60分','2小时','4小时','日线','周线','月线']" :key="item" :class="{active:period === item}" @click="period=item">{{ item }}</button></div><div class="common-tools"><button v-for="item in commonIndicators" :key="item.code" :class="{on:installedIndicators.some(current=>current.code===item.code)}" @click="toggleCommon(item)">{{item.name}}</button><button @click="manager.open()">{{ t('manager') }}</button></div></div>
         <div class="labels"><span>{{ t('main') }}{{ mainInstalled.map(item => item.name).join(' · ') || t('candle') }}</span></div><MarketChart v-if="selected" :symbol="selected" :period="period" :installed-indicators="installedIndicators" /><div v-else class="catalog-empty">{{ catalogStatusText }}</div><footer>{{ t('disclaimer') }}</footer>
@@ -106,7 +127,8 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer))
 <style scoped>
 .markets{grid-template-columns:repeat(4,minmax(0,1fr))}
 .markets em.unavailable{color:#8193a7;font-size:10px}
-.heads,.symbol{grid-template-columns:minmax(0,1fr) 88px 68px 55px}
+.heads,.symbol{grid-template-columns:minmax(0,1fr) 58px 58px}
+.symbol{min-height:55px}.symbol-name{min-width:0}.symbol b,.symbol em{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.symbol-cap{color:#8ba2b3!important;font:9px/1.2 'DM Mono',monospace!important;letter-spacing:-.02em}
 .catalog-empty{min-height:460px;display:grid;place-items:center;color:#8193a7;font-size:13px}
 .toolbar{gap:8px}.common-tools{display:flex;justify-content:flex-end;flex-wrap:wrap}.common-tools button:last-child{margin-left:4px;border-left:1px solid #31465a;color:#b8cee0}
 .terminal-language{border:1px solid #344b5c;border-radius:4px;background:#101d29;color:#c4d4df;padding:5px;font-size:11px}
