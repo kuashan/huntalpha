@@ -1,15 +1,149 @@
+import hashlib
+import io
 import json
+import os
 from pathlib import Path
 import subprocess
+import sqlite3
+import tempfile
 from types import SimpleNamespace
+from datetime import datetime, timezone as datetime_timezone
+from unittest import mock
 from unittest.mock import patch
 
 from django.conf import settings
-from django.test import SimpleTestCase, TestCase
+from django.core.management import call_command, CommandError
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.contrib.auth import get_user_model
 from futu import RET_OK
 
 from .views import bar_rows
+
+
+class LocalDatabaseBackupCommandTests(SimpleTestCase):
+    def create_temp_database(self, path):
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute("CREATE TABLE sample (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO sample (value) VALUES (?)", ("temporary-test-value",))
+            connection.commit()
+        finally:
+            connection.close()
+
+    def run_backup(self, database_path, backup_directory, keep=None):
+        output = io.StringIO()
+        database_settings = {
+            "default": {
+                "ENGINE": "django.db.backends.sqlite3",
+                "NAME": str(database_path),
+            }
+        }
+        environment = {"HUNTALPHA_LOCAL_BACKUP_DIR": str(backup_directory)}
+        with override_settings(DATABASES=database_settings), mock.patch.dict(os.environ, environment, clear=False):
+            arguments = {"stdout": output}
+            if keep is not None:
+                arguments["keep"] = keep
+            call_command("backup_local_db", **arguments)
+        return output.getvalue()
+
+    def test_creates_consistent_backup_with_hash_and_integrity_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database_path = root / "input.sqlite3"
+            backup_directory = root / "backups"
+            self.create_temp_database(database_path)
+
+            output = self.run_backup(database_path, backup_directory)
+            backups = list(backup_directory.glob("huntalpha-local-db-*.sqlite3"))
+
+            self.assertEqual(len(backups), 1)
+            backup = backups[0]
+            digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+            self.assertIn(f"path: {backup}", output)
+            self.assertIn(f"size: {backup.stat().st_size}", output)
+            self.assertIn(f"sha256: {digest}", output)
+            self.assertIn("integrity_check: ok", output)
+            self.assertNotIn("temporary-test-value", output)
+            connection = sqlite3.connect(str(backup))
+            try:
+                self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            finally:
+                connection.close()
+
+    def test_rejects_backup_directory_inside_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            database_path = Path(temporary) / "input.sqlite3"
+            self.create_temp_database(database_path)
+            target = Path(settings.BASE_DIR) / f".task002-rejected-{os.getpid()}"
+            with override_settings(DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": str(database_path)}}), mock.patch.dict(
+                os.environ, {"HUNTALPHA_LOCAL_BACKUP_DIR": str(target)}, clear=False
+            ):
+                with self.assertRaises(CommandError):
+                    call_command("backup_local_db", stdout=io.StringIO())
+            self.assertFalse(target.exists())
+
+    def test_does_not_overwrite_existing_timestamped_backup(self):
+        fixed_time = datetime(2026, 1, 2, 3, 4, 5, 123456, tzinfo=datetime_timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database_path = root / "input.sqlite3"
+            backup_directory = root / "backups"
+            self.create_temp_database(database_path)
+            with mock.patch("core.management.commands.backup_local_db.timezone.now", return_value=fixed_time):
+                self.run_backup(database_path, backup_directory)
+                backup = next(backup_directory.glob("huntalpha-local-db-*.sqlite3"))
+                original = backup.read_bytes()
+                with self.assertRaises(CommandError):
+                    self.run_backup(database_path, backup_directory)
+                self.assertEqual(backup.read_bytes(), original)
+
+    def test_retention_only_removes_matching_automatic_backups(self):
+        fixed_time = datetime(2030, 1, 1, 0, 0, 0, tzinfo=datetime_timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database_path = root / "input.sqlite3"
+            backup_directory = root / "backups"
+            backup_directory.mkdir()
+            self.create_temp_database(database_path)
+            old_names = [
+                "huntalpha-local-db-20200101-000000-000000.sqlite3",
+                "huntalpha-local-db-20210101-000000-000000.sqlite3",
+                "huntalpha-local-db-20220101-000000-000000.sqlite3",
+            ]
+            for name in old_names:
+                (backup_directory / name).write_bytes(b"old automatic backup")
+            unknown = backup_directory / "manual-recovery.sqlite3"
+            unknown.write_bytes(b"keep this unknown file")
+
+            with mock.patch("core.management.commands.backup_local_db.timezone.now", return_value=fixed_time):
+                self.run_backup(database_path, backup_directory, keep=2)
+
+            self.assertFalse((backup_directory / old_names[0]).exists())
+            self.assertFalse((backup_directory / old_names[1]).exists())
+            self.assertTrue((backup_directory / old_names[2]).exists())
+            self.assertTrue(unknown.exists())
+            self.assertEqual(len(list(backup_directory.glob("huntalpha-local-db-*.sqlite3"))), 2)
+
+    def test_non_sqlite_configuration_is_rejected_without_creating_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            backup_directory = Path(temporary) / "backups"
+            with override_settings(DATABASES={"default": {"ENGINE": "django.db.backends.postgresql", "NAME": "not-used"}}), mock.patch.dict(
+                os.environ, {"HUNTALPHA_LOCAL_BACKUP_DIR": str(backup_directory)}, clear=False
+            ):
+                with self.assertRaises(CommandError):
+                    call_command("backup_local_db", stdout=io.StringIO())
+            self.assertFalse(backup_directory.exists())
+
+    def test_failed_source_does_not_leave_a_pseudo_success_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database_path = root / "invalid.sqlite3"
+            backup_directory = root / "backups"
+            database_path.write_bytes(b"not a sqlite database")
+            with self.assertRaises(CommandError):
+                self.run_backup(database_path, backup_directory)
+            self.assertEqual(list(backup_directory.glob("huntalpha-local-db-*.sqlite3")), [])
+            self.assertEqual(list(backup_directory.glob("*.tmp")), [])
 
 
 class AuthenticationApiTests(TestCase):
