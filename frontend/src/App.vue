@@ -16,11 +16,20 @@ const analysisCode = new URLSearchParams(window.location.search).get('analysis')
 const analysisName = new URLSearchParams(window.location.search).get('name') || analysisCode
 const analysisMarket = new URLSearchParams(window.location.search).get('market') || ''
 const installedIndicators = computed(() => [...mainInstalled.value, ...subInstalled.value])
-const visibleMarkets = computed(() => markets.filter(item => item.code !== 'crypto'))
+const visibleMarkets = computed(() => markets)
 const indexMarketLayout = { cn: ['上证指数', '深证成指'], hk: ['恒生指数', '恒生科技指数'], us: ['标普500', '纳斯达克综合指数', '道琼斯工业平均指数'] }
+const cryptoPreviewRows = [{ name: 'BTC' }, { name: 'ETH' }]
+const displayIndexNames = { 上证指数: '上证', 深证成指: '深证', 恒生指数: '恒指', 恒生科技指数: '恒生科技', 标普500: '标普500', 标普500指数: '标普500', 纳斯达克综合指数: '纳斯达克', 道琼斯工业平均指数: '道琼斯', 道琼斯指数: '道琼斯' }
+const displayIndexName = name => displayIndexNames[name] || name
+const isFiniteNumber = value => typeof value === 'number' && Number.isFinite(value)
 const indexRowsForMarket = code => {
+  if (code === 'crypto') return cryptoPreviewRows.map(item => ({ ...item, status: 'unavailable', provider_status: 'not_connected' }))
   const items = indexSnapshots.value.filter(item => item.market === code)
   return items.length ? items : (indexMarketLayout[code] || []).map(name => ({ name, status: indexLoading.value ? 'loading' : 'unavailable' }))
+}
+const indexTitle = index => {
+  const status = index.provider_status === 'not_connected' ? '待接入真实数据源' : index.status === 'loading' ? t('indexLoading') : t('indexUnavailable')
+  return [index.name, displayIndexPrice(index.price), displayIndexChange(index.change_percent), index.updated_at ? `更新时间：${index.updated_at}` : status].join(' · ')
 }
 const list = computed(() => symbols.value)
 const selectedQuote = computed(() => quotes.value[selected.value?.code] || { status: 'idle' })
@@ -152,7 +161,7 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); stopMarketIndexRefresh
   <AiAnalysis v-else-if="analysisCode" :code="analysisCode" :name="analysisName" :market="analysisMarket" @back="backToTerminal" />
   <main v-else class="terminal">
     <header><div class="brand"><HuntAlphaLogo class="brand-logo" /><span class="brand-name">HuntAlpha</span><small class="brand-hub">HUB</small></div><nav><a class="active">{{ t('market') }}</a><a>{{ t('watchlist') }}</a><a>{{ t('strategy') }}</a><a>{{ t('news') }}</a></nav><div class="feed"><span class="feed-dot">●</span><span>{{ visitor ? t('visitor') : user.name }}</span></div><select class="terminal-language" :value="locale" @change="setLocale($event.target.value)"><option v-for="item in languages" :key="item.code" :value="item.code">{{ item.label }}</option></select><button class="logout" @click="signOut">{{ t('logout') }}</button></header>
-    <section class="markets" aria-label="真实大盘指数"><button v-for="item in visibleMarkets" :key="item.code" class="market-card" :class="{active: market.code === item.code}" @click="switchMarket(item)"><div class="market-card-title"><strong>{{ item.name }}</strong><small>futu-opend</small></div><div v-for="index in indexRowsForMarket(item.code)" :key="index.code || index.name" class="market-index"><span class="market-index-name">{{ index.name }}</span><span class="market-index-values"><b>{{ displayIndexPrice(index.price) }}</b><em :class="{down: index.change_percent < 0}">{{ displayIndexChange(index.change_percent) }}</em></span><small v-if="index.updated_at" class="market-index-updated">{{ index.updated_at }}</small><small v-else class="market-index-status">{{ index.status === 'loading' ? t('indexLoading') : t('indexUnavailable') }}</small></div></button></section>
+    <section class="markets" aria-label="市场概览"><button v-for="item in visibleMarkets" :key="item.code" class="market-card" :class="{active: market.code === item.code}" @click="switchMarket(item)"><div class="market-card-title"><strong>{{ item.name }}</strong><small>{{ item.code === 'crypto' ? '待接入真实数据源' : 'futu-opend' }}</small></div><div v-for="index in indexRowsForMarket(item.code)" :key="index.code || index.name" class="market-index" :title="indexTitle(index)" :aria-label="indexTitle(index)"><span class="market-index-name">{{ displayIndexName(index.name) }}</span><span class="market-index-values"><b :class="{unavailable: !isFiniteNumber(index.price)}">{{ displayIndexPrice(index.price) }}</b><em :class="{down: index.change_percent < 0, unavailable: !isFiniteNumber(index.change_percent)}">{{ displayIndexChange(index.change_percent) }}</em></span></div></button></section>
     <div class="workspace"><aside><div class="aside-title">{{ t('marketList') }} <b>{{ market.name }}</b></div><label class="search">⌕ <input v-model="query" :placeholder="t('search')" /></label><div class="heads"><span>{{ t('nameCode') }}</span><span>{{ t('latest') }}</span><span>{{ t('change') }}</span></div><button v-for="item in list" :key="item.code" class="symbol" :class="{selected: selected?.code === item.code}" :title="symbolTitle(item)" :aria-label="symbolTitle(item)" @click="selected = item"><span class="symbol-name"><strong>{{ item.name }}</strong><small>{{ item.code }}</small><small v-if="item.market_cap != null" class="symbol-cap">{{ t('marketCap') }} {{ displayMarketCap(item.market_cap, item.market_cap_currency) }}</small></span><b>{{ displayPrice(itemQuote(item)?.price) }}</b><em :class="{down:itemQuote(item)?.change < 0}">{{ displayChange(itemQuote(item)?.change) }}</em></button><p v-if="catalogStatusText">{{ catalogStatusText }}</p></aside>
       <section class="content"><div class="security"><div><p>{{ market.name }} · {{ quoteStatusText }}</p><h1>{{ selected?.name || '—' }} <small>{{ selected?.code || '' }}</small><button v-if="selected && !selected.code.startsWith('CC.')" class="ai-button" @click="requestAiAccess">AI 分析</button></h1></div><div class="price"><strong>{{ displayPrice(quoteData?.price) }}</strong><span :class="{down:quoteData?.change < 0}">{{ displayChange(quoteData?.change) }}</span></div><dl><div><dt>{{ t('open') }}</dt><dd>{{ displayPrice(quoteData?.open) }}</dd></div><div><dt>{{ t('high') }}</dt><dd>{{ displayPrice(quoteData?.high) }}</dd></div><div><dt>{{ t('low') }}</dt><dd>{{ displayPrice(quoteData?.low) }}</dd></div></dl></div>
         <div class="toolbar"><div><button v-for="item in ['分时','1分','5分','15分','30分','60分','2小时','4小时','日线','周线','月线']" :key="item" :class="{active:period === item}" @click="period=item">{{ item }}</button></div><div class="common-tools"><button v-for="item in commonIndicators" :key="item.code" :class="{on:installedIndicators.some(current=>current.code===item.code)}" @click="toggleCommon(item)">{{item.name}}</button><button @click="manager.open()">{{ t('manager') }}</button></div></div>
@@ -163,7 +172,7 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); stopMarketIndexRefresh
 </template>
 
 <style scoped>
-.markets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.markets{grid-template-columns:repeat(4,minmax(0,1fr));min-height:100px}
 .brand{gap:8px;min-width:0}.brand-logo{width:30px;height:30px}.brand-name{color:#f4f8fb;white-space:nowrap}.brand-hub{padding:2px 5px;border:1px solid #3b5369;border-radius:3px;color:#9eb0c0;font-size:10px;font-weight:500;letter-spacing:.08em;white-space:nowrap}.feed{display:flex;align-items:center;gap:6px;white-space:nowrap}.feed-dot{color:#f4bf50;font-size:10px}
 .market-card{display:block;min-width:0;border:0;border-right:1px solid #233143;color:#95a7ba;padding:11px 16px;text-align:left;background:#101a26}
 .market-card:last-child{border-right:0}.market-card:hover,.market-card.active{background:#162435}
@@ -175,5 +184,6 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); stopMarketIndexRefresh
 .toolbar{gap:8px}.common-tools{display:flex;justify-content:flex-end;flex-wrap:wrap}.common-tools button:last-child{margin-left:4px;border-left:1px solid #31465a;color:#b8cee0}
 .terminal-language{border:1px solid #344b5c;border-radius:4px;background:#101d29;color:#c4d4df;padding:5px;font-size:11px}
 .ai-button{margin-left:10px;border:1px solid #3ccca3;border-radius:4px;background:#10372f;color:#75e2c1;padding:5px 8px;font-size:11px;vertical-align:middle}
-@media(max-width:800px){.markets{grid-template-columns:1fr}.market-card{border-right:0;border-bottom:1px solid #233143;padding:10px 12px}.market-card:last-child{border-bottom:0}.market-card-title{margin-bottom:5px}.market-index{padding:3px 0}.brand-name{font-size:16px}.brand-hub{display:none}}
+.market-card{min-height:100px;padding:9px 14px}.market-card-title{margin-bottom:5px}.market-index{display:flex;align-items:center;gap:8px;min-height:21px;padding:2px 0}.market-index-name{flex:1;min-width:0}.market-index-values{flex:0 0 auto;display:flex;align-items:baseline;gap:6px;white-space:nowrap}.market-index-values b.unavailable,.market-index-values em.unavailable{color:#8193a7!important}.market-index-updated,.market-index-status{display:none}
+@media(max-width:800px){.markets{grid-template-columns:repeat(2,minmax(0,1fr))}.market-card{border-right:0;border-bottom:1px solid #233143;padding:8px 10px}.market-card:nth-child(odd){border-right:1px solid #233143}.market-card:last-child{border-bottom:0}.market-card-title{margin-bottom:4px}.market-index{padding:2px 0}.brand-name{font-size:16px}.brand-hub{display:none}}
 </style>

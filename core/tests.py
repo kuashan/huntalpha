@@ -903,16 +903,24 @@ class MarketIndexSnapshotTests(SimpleTestCase):
         self.assertTrue(all(item["price"] is None for item in items))
         self.assertTrue(all(item["change_percent"] is None for item in items))
 
-    def test_frontend_header_uses_only_index_snapshot_data_and_hides_crypto_card(self):
+    def test_frontend_header_keeps_index_data_and_uses_crypto_preview_without_quotes(self):
         app_source = (Path(settings.BASE_DIR) / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
-        self.assertIn("const visibleMarkets = computed(() => markets.filter(item => item.code !== 'crypto'))", app_source)
+        self.assertIn("const visibleMarkets = computed(() => markets)", app_source)
         self.assertIn('v-for="item in visibleMarkets"', app_source)
         self.assertIn("/api/market-index-snapshots/", app_source)
         self.assertIn("displayIndexPrice(index.price)", app_source)
         self.assertIn("index.status === 'loading'", app_source)
+        self.assertIn("const cryptoPreviewRows = [{ name: 'BTC' }, { name: 'ETH' }]", app_source)
+        self.assertIn("item.code === 'crypto' ? '待接入真实数据源' : 'futu-opend'", app_source)
+        self.assertIn("provider_status: 'not_connected'", app_source)
+        self.assertIn(":title=\"indexTitle(index)\"", app_source)
         self.assertNotIn("v-for=\"item in markets\"", app_source)
         self.assertNotIn("/api/kline/", app_source)
         self.assertNotIn("/api/indicator-render/", app_source)
+        self.assertNotIn("/api/quote/CC.", app_source)
+        self.assertIn(".markets{grid-template-columns:repeat(4,minmax(0,1fr));min-height:100px}", app_source)
+        self.assertIn("@media(max-width:800px){.markets{grid-template-columns:repeat(2,minmax(0,1fr))}", app_source)
+        self.assertIn("index.updated_at ? `更新时间：${index.updated_at}` : status", app_source)
 
 
 class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
