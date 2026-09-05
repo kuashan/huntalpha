@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sqlite3
 import tempfile
+import shutil
 from decimal import Decimal
 from types import SimpleNamespace
 from datetime import datetime, timezone as datetime_timezone
@@ -15,6 +16,7 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.core.management import call_command, CommandError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
 from django.db.models.deletion import ProtectedError
 from django.test import Client, SimpleTestCase, TestCase, override_settings
@@ -23,10 +25,11 @@ from futu import Market, RET_OK
 
 from formula_editor.models import Formula
 from .market_indices import INDEX_DEFINITIONS, FutuOpenDIndexAdapter, convert_snapshot_frame
-from .models import MarketSymbol, WatchlistEntry
+from .models import AccountProfile, MarketSymbol, WatchlistEntry
 from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
 from .views import _watchlist_create, bar_rows
 from .watchlist import resolve_account_tier, resolve_watchlist_limit
+from PIL import Image
 
 
 class LocalDatabaseBackupCommandTests(SimpleTestCase):
@@ -305,6 +308,115 @@ class AccountCenterApiTests(TestCase):
         refreshed = get_user_model().objects.get(pk=self.user.pk)
         self.assertTrue(refreshed.check_password('New-secure-password-43'))
         self.assertEqual(self.client.get('/api/auth/session/').status_code, 200)
+
+
+class AccountProfileApiTests(TestCase):
+    def setUp(self):
+        self.client = Client(enforce_csrf_checks=True)
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='profile@example.com', email='profile@example.com', first_name='研究员', password='Original-password-42'
+        )
+        self.media_temp = tempfile.TemporaryDirectory()
+        self.media_root = Path(self.media_temp.name)
+        self.media_override = override_settings(MEDIA_ROOT=self.media_root)
+        self.media_override.enable()
+        self.addCleanup(self.media_override.disable)
+        self.addCleanup(self.media_temp.cleanup)
+
+    def csrf_headers(self):
+        self.client.get('/api/csrf/')
+        return {'HTTP_X_CSRFTOKEN': self.client.cookies['csrftoken'].value}
+
+    def patch_json(self, path, payload, headers=None):
+        return self.client.patch(path, data=json.dumps(payload), content_type='application/json', **(headers or {}))
+
+    def image_upload(self, image_format='PNG', name=None, size=(64, 64)):
+        output = io.BytesIO()
+        Image.new('RGB', size, (43, 113, 158)).save(output, format=image_format)
+        extension = image_format.lower()
+        return SimpleUploadedFile(name or f'avatar.{extension}', output.getvalue(), content_type=f'image/{extension}')
+
+    def test_summary_defaults_do_not_create_profile_and_auth_payload_has_preferences(self):
+        self.client.force_login(self.user)
+        response = self.client.get('/api/account/summary/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['preferences'], {'price_color_mode': 'cn', 'default_market': 'cn', 'default_period': '日线'})
+        self.assertIsNone(response.json()['user']['avatar_url'])
+        self.assertFalse(AccountProfile.objects.filter(user=self.user).exists())
+        session = self.client.get('/api/auth/session/').json()
+        self.assertEqual(session['user']['preferences'], response.json()['preferences'])
+
+    def test_profile_is_authenticated_csrf_protected_and_only_updates_display_name(self):
+        anonymous = self.patch_json('/api/account/profile/', {'display_name': '新名称'})
+        self.assertEqual(anonymous.status_code, 403)
+        self.client.post('/api/auth/guest/')
+        visitor = self.patch_json('/api/account/profile/', {'display_name': '新名称'}, self.csrf_headers())
+        self.assertEqual(visitor.status_code, 403)
+        self.client.force_login(self.user)
+        without_csrf = self.patch_json('/api/account/profile/', {'display_name': '新名称'})
+        self.assertEqual(without_csrf.status_code, 403)
+        headers = self.csrf_headers()
+        updated = self.patch_json('/api/account/profile/', {'display_name': '  新名称  '}, headers)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()['user']['name'], '新名称')
+        self.assertEqual(get_user_model().objects.get(pk=self.user.pk).first_name, '新名称')
+        forbidden = self.patch_json('/api/account/profile/', {'display_name': '另一个', 'tier': 'pro'}, headers)
+        self.assertEqual(forbidden.status_code, 400)
+        non_string = self.patch_json('/api/account/profile/', {'display_name': ['不是字符串']}, headers)
+        self.assertEqual(non_string.status_code, 400)
+        self.assertEqual(self.client.get('/api/auth/session/').json()['user']['tier'], 'free')
+
+    def test_preferences_validate_persist_and_keep_account_tier_separate(self):
+        self.client.force_login(self.user)
+        self.assertEqual(self.patch_json('/api/account/preferences/', {'default_market': 'us'}).status_code, 403)
+        headers = self.csrf_headers()
+        invalid = self.patch_json('/api/account/preferences/', {'default_market': 'crypto'}, headers)
+        self.assertEqual(invalid.status_code, 400)
+        non_string = self.patch_json('/api/account/preferences/', {'default_market': ['us']}, headers)
+        self.assertEqual(non_string.status_code, 400)
+        valid = self.patch_json('/api/account/preferences/', {
+            'price_color_mode': 'international', 'default_market': 'hk', 'default_period': '30分',
+        }, headers)
+        self.assertEqual(valid.status_code, 200)
+        expected = {'price_color_mode': 'international', 'default_market': 'hk', 'default_period': '30分'}
+        self.assertEqual(valid.json()['preferences'], expected)
+        self.assertEqual(self.client.get('/api/account/summary/').json()['preferences'], expected)
+        self.assertEqual(self.client.get('/api/auth/session/').json()['user']['preferences'], expected)
+        self.assertEqual(valid.json()['user']['tier'], 'free')
+
+    def test_avatar_requires_auth_csrf_validates_and_replaces_then_deletes(self):
+        upload = self.image_upload()
+        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': upload}).status_code, 403)
+        self.client.force_login(self.user)
+        no_csrf = self.client.post('/api/account/avatar/', {'avatar': self.image_upload()})
+        self.assertEqual(no_csrf.status_code, 403)
+        headers = self.csrf_headers()
+        svg = SimpleUploadedFile('avatar.svg', b'<svg xmlns="http://www.w3.org/2000/svg"></svg>', content_type='image/svg+xml')
+        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': svg}, **headers).status_code, 400)
+        oversized = SimpleUploadedFile('avatar.png', b'x' * (5 * 1024 * 1024 + 1), content_type='image/png')
+        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': oversized}, **headers).status_code, 400)
+        too_wide = self.image_upload(size=(4097, 1))
+        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': too_wide}, **headers).status_code, 400)
+
+        for image_format in ('JPEG', 'PNG', 'WEBP'):
+            response = self.client.post('/api/account/avatar/', {'avatar': self.image_upload(image_format)}, **headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertIsNotNone(response.json()['avatar_url'])
+        profile = AccountProfile.objects.get(user=self.user)
+        old_name = profile.avatar.name
+        old_path = self.media_root / old_name
+        self.assertTrue(old_path.is_file())
+        replacement = self.client.post('/api/account/avatar/', {'avatar': self.image_upload('PNG', 'replacement.png')}, **headers)
+        self.assertEqual(replacement.status_code, 200)
+        new_name = AccountProfile.objects.get(user=self.user).avatar.name
+        self.assertNotEqual(old_name, new_name)
+        self.assertFalse(old_path.exists())
+        self.assertTrue((self.media_root / new_name).is_file())
+        deleted = self.client.delete('/api/account/avatar/', **headers)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertIsNone(deleted.json()['avatar_url'])
+        self.assertFalse((self.media_root / new_name).exists())
 
 
 class SymbolCatalogSyncTests(TestCase):
@@ -1131,6 +1243,23 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertNotIn("reset_at", combined)
         self.assertNotIn("next_reset_at", combined)
         self.assertNotIn("每月重置", combined)
+
+    def test_account_center_profile_preferences_and_live_terminal_state_contract(self):
+        self.assertIn(':watchlist-total="watchlistTotal"', self.app_source)
+        self.assertIn(':watchlist-limit="watchlistLimit"', self.app_source)
+        self.assertIn(':watchlist-remaining="watchlistRemaining"', self.app_source)
+        self.assertIn('marketColorTokens', self.app_source)
+        self.assertIn(':market-color-tokens="marketColorTokens"', self.app_source)
+        self.assertLess(self.app_source.index('<AccountPopover v-else'), self.app_source.index('<select class="terminal-language"'))
+        self.assertIn('/api/account/profile/', self.center_source)
+        self.assertIn('/api/account/avatar/', self.center_source)
+        self.assertIn('/api/account/preferences/', self.center_source)
+        self.assertIn('price_color_mode', self.center_source)
+        self.assertIn('default_market', self.center_source)
+        self.assertIn('default_period', self.center_source)
+        self.assertNotIn('setLocale', self.center_source)
+        self.assertNotIn('languages', self.center_source)
+        self.assertIn('applyOptions', (self.base_dir / 'frontend' / 'src' / 'components' / 'MarketChart.vue').read_text(encoding='utf-8'))
 
 
 class WatchlistModelAndApiTests(TestCase):

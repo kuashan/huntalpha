@@ -1,5 +1,11 @@
 from django.conf import settings
 from django.db import models
+from uuid import uuid4
+
+
+def account_avatar_upload_to(instance, filename):
+    """Use an unpredictable, normalized destination for account avatars."""
+    return f"avatars/{instance.user_id}/{uuid4().hex}.webp"
 
 
 class CalibrationDataset(models.Model):
@@ -113,3 +119,47 @@ class WatchlistEntry(models.Model):
 
     def __str__(self):
         return f"{self.user_id} · {self.symbol_id}"
+
+
+class AccountProfile(models.Model):
+    """Small, durable account settings record; created only on write."""
+
+    class PriceColorMode(models.TextChoices):
+        CN = "cn", "中国市场习惯"
+        INTERNATIONAL = "international", "国际市场习惯"
+
+    class DefaultMarket(models.TextChoices):
+        CN = "cn", "沪深 A 股"
+        HK = "hk", "港股"
+        US = "us", "美股"
+
+    PERIOD_CHOICES = (
+        ("1分", "1 分钟"), ("5分", "5 分钟"), ("15分", "15 分钟"),
+        ("30分", "30 分钟"), ("60分", "60 分钟"), ("2小时", "2 小时"),
+        ("4小时", "4 小时"), ("日线", "日线"), ("周线", "周线"), ("月线", "月线"),
+    )
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="account_profile",
+        verbose_name="用户",
+    )
+    avatar = models.FileField("头像", upload_to=account_avatar_upload_to, blank=True, null=True)
+    price_color_mode = models.CharField(
+        "涨跌颜色习惯", max_length=16, choices=PriceColorMode.choices, default=PriceColorMode.CN
+    )
+    default_market = models.CharField(
+        "默认市场", max_length=8, choices=DefaultMarket.choices, default=DefaultMarket.CN
+    )
+    default_period = models.CharField(
+        "默认周期", max_length=8, choices=PERIOD_CHOICES, default="日线"
+    )
+    updated_at = models.DateTimeField("更新时间", auto_now=True)
+
+    class Meta:
+        verbose_name = "账户资料与偏好"
+        verbose_name_plural = "账户资料与偏好"
+
+    def __str__(self):
+        return f"账户 {self.user_id}"

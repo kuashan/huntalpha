@@ -17,6 +17,6 @@ class ApiCorsMiddleware:
         if request.path.startswith("/api/"):
             response["Access-Control-Allow-Origin"] = self.allowed_origin
             response["Access-Control-Allow-Credentials"] = "true"
-            response["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+            response["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
             response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
         return response

@@ -3,7 +3,12 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AccountTierBadge from './AccountTierBadge.vue'
 
 const API_BASE = 'http://127.0.0.1:8003'
-const props = defineProps({ user: { type: Object, required: true } })
+const props = defineProps({
+  user: { type: Object, required: true },
+  watchlistTotal: { type: Number, default: null },
+  watchlistLimit: { type: Number, default: null },
+  watchlistRemaining: { type: Number, default: null },
+})
 const emit = defineEmits(['navigate', 'logout'])
 
 const open = ref(false)
@@ -18,7 +23,16 @@ let closeTimer
 const identity = computed(() => summary.value?.user || props.user || {})
 const membership = computed(() => summary.value?.membership || null)
 const aiBeans = computed(() => summary.value?.ai_beans || null)
-const watchlist = computed(() => summary.value?.watchlist || null)
+const watchlist = computed(() => {
+  if (props.watchlistTotal !== null && props.watchlistLimit !== null) {
+    return {
+      total: props.watchlistTotal,
+      limit: props.watchlistLimit,
+      remaining: props.watchlistRemaining ?? Math.max(props.watchlistLimit - props.watchlistTotal, 0),
+    }
+  }
+  return summary.value?.watchlist || null
+})
 const avatarInitial = computed(() => {
   const name = String(identity.value.name || '').trim()
   return name ? Array.from(name)[0].toUpperCase() : '·'

@@ -10,6 +10,7 @@ const props = defineProps({
   symbol: Object,
   period: String,
   installedIndicators: { type: Array, default: () => [] },
+  marketColorTokens: { type: Object, default: () => ({ up: '#ef5350', down: '#20bd92' }) },
 })
 
 const el = ref(null)
@@ -18,6 +19,8 @@ const subTitlePositions = ref([])
 const renderErrors = ref([])
 const historyStatus = ref('')
 let chart
+let candleSeries
+let marketCandleSeries = false
 let resize
 let panePointerUp
 let drawVersion = 0
@@ -144,6 +147,8 @@ async function draw(options = {}) {
   historyStatus.value = ''
   if (panePointerUp) el.value.removeEventListener('pointerup', panePointerUp)
   chart?.remove()
+  candleSeries = undefined
+  marketCandleSeries = false
 
   if (!options.keepBars || loadedKey !== key || !loadedBars.length) {
     loadedKey = key
@@ -185,9 +190,11 @@ async function draw(options = {}) {
     upColor: 'transparent', downColor: 'transparent', borderVisible: false,
     wickUpColor: 'transparent', wickDownColor: 'transparent',
   } : {
-    upColor: '#ef5350', downColor: '#20bd92', borderVisible: false,
-    wickUpColor: '#ef5350', wickDownColor: '#20bd92',
+    upColor: props.marketColorTokens.up, downColor: props.marketColorTokens.down, borderVisible: false,
+    wickUpColor: props.marketColorTokens.up, wickDownColor: props.marketColorTokens.down,
   }, 0)
+  candleSeries = candle
+  marketCandleSeries = !formulaCandleLayer
   candle.setData(bars)
 
   let nextPane = 1
@@ -264,6 +271,9 @@ onBeforeUnmount(() => {
   chart?.remove()
 })
 watch(() => [props.symbol, props.period, props.installedIndicators], scheduleDraw, { deep: true })
+watch(() => props.marketColorTokens, tokens => {
+  if (marketCandleSeries && candleSeries && tokens) candleSeries.applyOptions({ upColor: tokens.up, downColor: tokens.down, wickUpColor: tokens.up, wickDownColor: tokens.down })
+}, { deep: true })
 </script>
 
 <template>

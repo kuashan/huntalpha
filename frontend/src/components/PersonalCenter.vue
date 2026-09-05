@@ -1,7 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import AccountTierBadge from './AccountTierBadge.vue'
-import { languages, locale, setLocale } from '../i18n'
 
 const API_BASE = 'http://127.0.0.1:8003'
 const sections = [
@@ -11,15 +10,37 @@ const sections = [
   { key: 'security', label: '账户安全' },
   { key: 'preferences', label: '偏好设置' },
 ]
+const priceColorOptions = [
+  { value: 'cn', label: '中国市场习惯（涨红跌绿）' },
+  { value: 'international', label: '国际市场习惯（涨绿跌红）' },
+]
+const marketOptions = [
+  { value: 'cn', label: '沪深 A 股' },
+  { value: 'hk', label: '港股' },
+  { value: 'us', label: '美股' },
+]
+const periodOptions = ['1分', '5分', '15分', '30分', '60分', '2小时', '4小时', '日线', '周线', '月线']
 const props = defineProps({
   user: { type: Object, required: true },
   section: { type: String, default: 'overview' },
 })
-const emit = defineEmits(['back', 'section-change', 'logout'])
+const emit = defineEmits(['back', 'section-change', 'logout', 'user-updated', 'preferences-updated'])
 
 const summary = ref(null)
 const summaryLoading = ref(false)
 const summaryError = ref('')
+const profileForm = ref({ display_name: '' })
+const profileSaving = ref(false)
+const profileMessage = ref('')
+const profileError = ref('')
+const avatarInput = ref(null)
+const avatarSaving = ref(false)
+const avatarMessage = ref('')
+const avatarError = ref('')
+const preferenceForm = ref({ price_color_mode: 'cn', default_market: 'cn', default_period: '日线' })
+const preferenceSaving = ref(false)
+const preferenceMessage = ref('')
+const preferenceError = ref('')
 const currentPassword = ref('')
 const newPassword = ref('')
 const confirmPassword = ref('')
@@ -38,13 +59,19 @@ const avatarInitial = computed(() => {
   return name ? Array.from(name)[0].toUpperCase() : '·'
 })
 
+function syncSummary(payload) {
+  summary.value = payload
+  profileForm.value.display_name = payload.user?.name || ''
+  if (payload.preferences) preferenceForm.value = { ...preferenceForm.value, ...payload.preferences }
+}
+
 function loadSummary() {
   summaryLoading.value = true
   fetch(`${API_BASE}/api/account/summary/`, { credentials: 'include' })
     .then(async reply => {
       const payload = await reply.json()
       if (!reply.ok) throw new Error(payload.error || '账户摘要暂不可用')
-      summary.value = payload
+      syncSummary(payload)
     })
     .catch(error => { summaryError.value = error.message || '账户摘要暂不可用' })
     .finally(() => { summaryLoading.value = false })
@@ -60,7 +87,7 @@ function readCookie(name) {
   return value ? decodeURIComponent(value.slice(prefix.length)) : ''
 }
 
-async function csrfHeaders() {
+async function csrfToken() {
   let token = readCookie('csrftoken')
   if (!token) {
     const reply = await fetch(`${API_BASE}/api/csrf/`, { credentials: 'include' })
@@ -68,7 +95,82 @@ async function csrfHeaders() {
     token = readCookie('csrftoken')
   }
   if (!token) throw new Error('无法取得安全令牌')
-  return { 'Content-Type': 'application/json', 'X-CSRFToken': token }
+  return token
+}
+
+async function csrfHeaders() {
+  return { 'Content-Type': 'application/json', 'X-CSRFToken': await csrfToken() }
+}
+
+async function saveProfile() {
+  profileMessage.value = ''; profileError.value = ''; profileSaving.value = true
+  try {
+    const reply = await fetch(`${API_BASE}/api/account/profile/`, {
+      method: 'PATCH', credentials: 'include', headers: await csrfHeaders(),
+      body: JSON.stringify({ display_name: profileForm.value.display_name }),
+    })
+    const payload = await reply.json()
+    if (!reply.ok) throw new Error(payload.error || '资料保存失败')
+    summary.value = { ...summary.value, user: payload.user }
+    profileForm.value.display_name = payload.user.name
+    emit('user-updated', payload.user)
+    profileMessage.value = '显示名称已更新'
+  } catch (error) { profileError.value = error.message || '资料保存失败' }
+  finally { profileSaving.value = false }
+}
+
+function chooseAvatar() { avatarInput.value?.click() }
+
+async function uploadAvatar(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file) return
+  avatarMessage.value = ''; avatarError.value = ''; avatarSaving.value = true
+  try {
+    const formData = new FormData(); formData.append('avatar', file)
+    const reply = await fetch(`${API_BASE}/api/account/avatar/`, {
+      method: 'POST', credentials: 'include', headers: { 'X-CSRFToken': await csrfToken() }, body: formData,
+    })
+    const payload = await reply.json()
+    if (!reply.ok) throw new Error(payload.error || '头像上传失败')
+    const nextUser = { ...identity.value, avatar_url: payload.avatar_url }
+    summary.value = { ...summary.value, user: nextUser }; emit('user-updated', nextUser)
+    avatarMessage.value = '头像已更新'
+  } catch (error) { avatarError.value = error.message || '头像上传失败' }
+  finally { avatarSaving.value = false }
+}
+
+async function deleteAvatar() {
+  if (!identity.value.avatar_url || !window.confirm('删除当前头像？')) return
+  avatarMessage.value = ''; avatarError.value = ''; avatarSaving.value = true
+  try {
+    const reply = await fetch(`${API_BASE}/api/account/avatar/`, {
+      method: 'DELETE', credentials: 'include', headers: { 'X-CSRFToken': await csrfToken() },
+    })
+    const payload = await reply.json()
+    if (!reply.ok) throw new Error(payload.error || '头像删除失败')
+    const nextUser = { ...identity.value, avatar_url: payload.avatar_url }
+    summary.value = { ...summary.value, user: nextUser }; emit('user-updated', nextUser)
+    avatarMessage.value = '头像已删除'
+  } catch (error) { avatarError.value = error.message || '头像删除失败' }
+  finally { avatarSaving.value = false }
+}
+
+async function savePreferences() {
+  preferenceMessage.value = ''; preferenceError.value = ''; preferenceSaving.value = true
+  try {
+    const reply = await fetch(`${API_BASE}/api/account/preferences/`, {
+      method: 'PATCH', credentials: 'include', headers: await csrfHeaders(), body: JSON.stringify(preferenceForm.value),
+    })
+    const payload = await reply.json()
+    if (!reply.ok) throw new Error(payload.error || '偏好保存失败')
+    summary.value = { ...summary.value, preferences: payload.preferences, user: payload.user || summary.value.user }
+    preferenceForm.value = { ...preferenceForm.value, ...payload.preferences }
+    emit('preferences-updated', payload.preferences)
+    if (payload.user) emit('user-updated', payload.user)
+    preferenceMessage.value = '偏好已保存'
+  } catch (error) { preferenceError.value = error.message || '偏好保存失败' }
+  finally { preferenceSaving.value = false }
 }
 
 async function changePassword() {
@@ -118,7 +220,7 @@ onMounted(loadSummary)
               <span v-else>{{ avatarInitial }}</span>
             </div>
             <div class="hero-copy"><h2>{{ identity.name || '—' }}</h2><p>{{ identity.email || '—' }}</p></div>
-            <AccountTierBadge :tier="membership?.tier || user.tier" :tier-label="membership?.tier_label || user.tier_label" :watchlist-limit="membership?.tier ? watchlist?.limit : user.watchlist_limit" :user-name="identity.name" :avatar-url="identity.avatar_url" />
+            <AccountTierBadge :tier="membership?.tier || user.tier" :tier-label="membership?.tier_label || user.tier_label" :watchlist-limit="watchlist?.limit || user.watchlist_limit" :user-name="identity.name" :avatar-url="identity.avatar_url" />
           </div>
           <div class="account-cards">
             <article><small>会员计划</small><strong>{{ membership?.tier_label || '—' }}</strong><span>当前真实账户状态</span></article>
@@ -129,8 +231,9 @@ onMounted(loadSummary)
 
         <section v-else-if="activeSection === 'profile'" class="account-panel detail-panel">
           <div class="profile-row"><div class="profile-avatar"><img v-if="identity.avatar_url" :src="identity.avatar_url" alt="" /><span v-else>{{ avatarInitial }}</span></div><div><h2>{{ identity.name || '—' }}</h2><p>{{ identity.email || '—' }}</p></div></div>
-          <dl><div><dt>显示名称</dt><dd>{{ identity.name || '—' }}</dd></div><div><dt>邮箱</dt><dd>{{ identity.email || '—' }}</dd></div><div><dt>账户等级</dt><dd>{{ membership?.tier_label || '—' }}</dd></div></dl>
-          <p class="panel-note">当前使用用户名首字母作为头像。真实头像上传将在独立任务中实现。</p>
+          <div class="avatar-actions"><input ref="avatarInput" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" @change="uploadAvatar" /><button type="button" @click="chooseAvatar" :disabled="avatarSaving">{{ avatarSaving ? '处理中…' : '上传头像' }}</button><button v-if="identity.avatar_url" type="button" class="subtle-button" @click="deleteAvatar" :disabled="avatarSaving">删除头像</button><small>支持 JPEG、PNG、WebP，最大 5 MB；服务器会统一处理为安全的圆形头像。</small></div>
+          <form class="profile-form" @submit.prevent="saveProfile"><label>显示名称<input v-model="profileForm.display_name" maxlength="50" autocomplete="name" required /></label><label>邮箱<input :value="identity.email || '—'" readonly /></label><label>账户等级<input :value="membership?.tier_label || '—'" readonly /></label><button type="submit" :disabled="profileSaving">{{ profileSaving ? '保存中…' : '保存资料' }}</button></form>
+          <p v-if="profileMessage" class="form-success">{{ profileMessage }}</p><p v-if="profileError" class="form-error">{{ profileError }}</p><p v-if="avatarMessage" class="form-success">{{ avatarMessage }}</p><p v-if="avatarError" class="form-error">{{ avatarError }}</p>
         </section>
 
         <section v-else-if="activeSection === 'membership'" class="account-panel detail-panel">
@@ -145,7 +248,7 @@ onMounted(loadSummary)
         </section>
 
         <section v-else class="account-panel detail-panel">
-          <h2>偏好设置</h2><label class="preference-field">语言<select :value="locale" @change="setLocale($event.target.value)"><option v-for="item in languages" :key="item.code" :value="item.code">{{ item.label }}</option></select></label><p class="panel-note">当前语言设置沿用浏览器本地偏好；账户级跨设备同步将在后续任务中处理。</p>
+          <h2>偏好设置</h2><div class="preference-grid"><label class="preference-field">涨跌颜色<select v-model="preferenceForm.price_color_mode"><option v-for="item in priceColorOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label><label class="preference-field">默认市场<select v-model="preferenceForm.default_market"><option v-for="item in marketOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label><label class="preference-field">默认 K 线周期<select v-model="preferenceForm.default_period"><option v-for="item in periodOptions" :key="item" :value="item">{{ item }}</option></select></label></div><button type="button" class="save-preferences" :disabled="preferenceSaving || !summary" @click="savePreferences">{{ preferenceSaving ? '保存中…' : '保存偏好' }}</button><p v-if="preferenceMessage" class="form-success">{{ preferenceMessage }}</p><p v-if="preferenceError" class="form-error">{{ preferenceError }}</p><p class="panel-note">偏好绑定当前账户，会在下次进入行情时应用默认市场和周期；当前手动选择不会被保存时强行覆盖。</p>
         </section>
       </main>
     </div>
@@ -158,4 +261,7 @@ onMounted(loadSummary)
 @media(max-width:800px){.account-layout{grid-template-columns:1fr;gap:18px;padding-top:22px}.account-nav{display:flex;align-items:center;gap:5px;overflow-x:auto;padding:8px}.account-nav p{display:none}.account-nav button{width:auto;flex:0 0 auto;margin:0;padding:9px 12px;border-left:0;border-bottom:2px solid transparent;white-space:nowrap}.account-nav button:hover,.account-nav button.active{border-left-color:transparent;border-bottom-color:#59d5b1}.account-content-heading{margin-top:0}}
 @media(max-width:520px){.account-page-header{min-height:60px;padding:0 14px}.account-page-brand strong{font-size:16px}.account-layout{width:calc(100% - 24px)}.account-content-heading{display:block}.account-content-heading h1{margin-top:6px;font-size:21px}.account-hero{padding:16px;gap:10px}.hero-avatar{flex-basis:54px;width:54px;height:54px;font-size:20px}.hero-copy h2{font-size:16px}.account-hero :deep(.account-tier-badge){width:46px;height:42px}.account-cards{grid-template-columns:1fr;padding:12px}.account-cards article{min-height:0}.detail-panel{padding:16px}}
 @media(prefers-reduced-motion:reduce){.account-page,.account-panel{animation:none}}
+.avatar-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:18px 0;border-bottom:1px solid #1d3747}.avatar-actions button,.profile-form button,.save-preferences{padding:8px 12px;border:1px solid #365269;border-radius:5px;background:#0e202e;color:#c2d3dc;cursor:pointer}.avatar-actions button:hover,.avatar-actions button:focus-visible,.profile-form button:hover,.profile-form button:focus-visible,.save-preferences:hover,.save-preferences:focus-visible{border-color:#5ad5b2;color:#fff;outline:0}.avatar-actions small{flex-basis:100%;color:#7894a4;font-size:11px}.subtle-button{background:transparent!important;color:#a8bbc5!important}.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}.profile-form{display:grid;max-width:480px;gap:13px;margin-top:18px}.profile-form label{display:grid;gap:6px;color:#a8bbc5;font-size:12px}.profile-form input{padding:10px 11px;border:1px solid #355468;border-radius:5px;outline:0;background:#08131c;color:#edf6fa}.profile-form input:focus{border-color:#5ad7b1;box-shadow:0 0 0 3px #42cda21c}.profile-form button,.save-preferences{justify-self:start;background:#48c99f;border-color:#48c99f;color:#061119;font-weight:700}.profile-form button:disabled,.save-preferences:disabled,.avatar-actions button:disabled{opacity:.6;cursor:wait}.preference-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:18px}.save-preferences{margin-top:20px}
+@media(max-width:800px){.preference-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:520px){.preference-grid{grid-template-columns:1fr}}
 </style>

@@ -151,6 +151,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = Path(os.environ.get('HUNTALPHA_MEDIA_ROOT', str(BASE_DIR.parent / 'huntalpha-user-media')))
 
 # Local daily_stock_analysis adapter.  The browser only calls Django; AI keys
 # and the upstream analysis service remain private to the host.
