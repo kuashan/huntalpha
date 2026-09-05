@@ -4,7 +4,9 @@ Status: IMPLEMENTED
 
 ## 产品决定
 
-PR #2 的最新 ChatGPT comment 已撤销本任务此前新增的“管理员专用审查模式”。本任务继续使用当前分支和 PR #2，不创建新 PR，也不合并 `main`。
+PR #2 的最新 ChatGPT comment 已确认：本任务继续使用当前分支和 PR #2，不创建新分支、不创建新 PR，也不合并 `main`。
+
+本任务此前新增的“管理员专用审查模式”已撤销。Decision 0003 已标记为 `SUPERSEDED`，Decision 0004 为当前有效且 `ACCEPTED` 的产品基线。
 
 保留本 PR 已完成的真实行情改造：富途 OpenD 真实报价、涨跌幅、OHLC、K 线，以及 OpenD 不可用时的明确不可用状态；禁止静态或生成行情回退。
 
@@ -13,8 +15,6 @@ PR #2 的最新 ChatGPT comment 已撤销本任务此前新增的“管理员专
 HuntAlpha 是准备正式上线、长期维护的真实产品。前端原有的登录、注册、访客入口和 Django Session 认证流程应保持可用；本次产品决定要求撤销新增的管理员专用入口和限制，恢复完整的用户进入流程。
 
 另一方面，行情页面不能把演示数字当作实时数据。当前支持的报价、开高低和历史 K 线应统一来自本机富途 OpenD `127.0.0.1:11111`；数据源不可用时必须明确显示不可用，不得生成或展示假行情。
-
-历史决策文档 `docs/decisions/0003-development-admin-review-and-real-data-policy.md` 记录了此前的管理员审查方案；本次 PR 产品决定已取代该方案的运行时实现范围，保留其真实数据与安全边界要求。
 
 ## 目标
 
@@ -34,7 +34,7 @@ HuntAlpha 是准备正式上线、长期维护的真实产品。前端原有的�
 - 当前支持证券的前端最新价、涨跌幅、开高低等展示改为调用后端真实行情接口 `/api/quote/<code>/`。
 - 保留现有 `/api/kline/<code>/` 的真实 OpenD K 线数据流，不增加任何演示回退。
 - 清理/停止使用 `frontend/src/data/marketData.js` 中的硬编码价格、涨跌幅和生成行情作为网页运行时数据。
-- 如果市场/证券当前没有真实数据源（例如当前未接入的加密资产或 OpenD 不支持的代码），显示明确的“暂未接入真实数据/行情不可用”，不得显示模拟数字。
+- 如果市场/证券当前没有真实数据源，显示明确的“暂未接入真实数据/行情不可用”，不得显示模拟数字。
 - 页面上的市场摘要如果目前只有静态值：要么接入已经确认可从 OpenD 获取的真实指数/市场数据，要么先显示不可用；不得保留静态数字冒充实时数据。
 - 保留证券代码/名称的静态“导航清单”是允许的，但价格、涨跌、OHLC、历史行情等市场数据必须来自真实数据源。
 - 为正常认证流程和真实行情展示保留相关自动测试。
@@ -54,12 +54,14 @@ HuntAlpha 是准备正式上线、长期维护的真实产品。前端原有的�
 
 - `AGENTS.md`
 - `docs/decisions/0003-development-admin-review-and-real-data-policy.md`
+- `docs/decisions/0004-standard-auth-and-real-data-baseline.md`
 - `frontend/src/App.vue`
 - `frontend/src/components/AuthGate.vue`
 - `frontend/src/components/MarketChart.vue`
 - `frontend/src/data/marketData.js`
 - `core/views.py`
 - `quant_site/settings.py`
+- `.env.example`
 - `core/tests.py`
 - 相关前端测试文件（如仓库已有测试框架）
 
@@ -112,15 +114,15 @@ HuntAlpha 是准备正式上线、长期维护的真实产品。前端原有的�
 ## Codex Completion Report
 
 - Branch: `codex/001-dev-admin-review-and-real-data`
-- Commits: `e5c45ee`（本次恢复标准认证流程并移除管理员审查模式）；`564685f`（原 PR 的真实行情实现，现仍保留）。本 Completion Report 位于随后提交的 Task 001 文档更新中。
-- Push: `e5c45ee` 和本次文档更新均已成功 Push 到 `origin/codex/001-dev-admin-review-and-real-data`。
+- Commits: `e5c45ee`（恢复标准认证流程并移除管理员审查模式）；`03fc99d`（远端新增 Decision 0003/0004 文档）；本次 merge commit 和文档合并结果将在合并提交后记录于最终报告。
+- Push: merge 完成并通过检查后 Push 回原开发分支。
 - Summary: 按 PR #2 最新产品决定撤销管理员专用审查模式，恢复完整登录/注册/访客流程；保留富途 OpenD 真实报价、涨跌幅、OHLC、K 线和 OpenD 不可用时的显式错误，不允许假数据回退。
-- Files changed: 本次最终提交涉及 `.env.example`、`quant_site/settings.py`、`core/views.py`、`core/tests.py`、`frontend/src/App.vue`、`frontend/src/components/AuthGate.vue`、`frontend/src/i18n.js`、`docs/tasks/001-dev-admin-review-and-real-data.md`；真实行情改造涉及的 `frontend/src/components/MarketChart.vue` 和 `frontend/src/data/marketData.js` 保持在 PR 中。
-- Checks run: `git diff --check` 通过；`python manage.py check` 通过，只有既有的两个 `core` 模型 `DEFAULT_AUTO_FIELD` warning；`python manage.py test core` 通过，20 项测试全部通过；`npm run build` 通过；`frontend/package.json` 没有前端自动测试脚本。代码静态核验确认运行时配置、后端和前端不再引用管理员审查模式或其文案。
-- Real-data verification: 当前富途 OpenD 已在 `127.0.0.1:11111` 监听；通过本分支 Django API 的访客 Session 端到端验证 `SH.600519` 成功。`/api/quote/` 返回真实快照价 1330.0、真实涨跌幅 `+2.396%`、开 1295.88、最高 1338.86、最低 1295.6、`source: futu-opend`；`/api/kline/` 返回真实日线 K 线，最近一根的 OHLC 为 1295.88 / 1338.86 / 1295.6 / 1330.0。富途原生脚本也返回同一快照和 K 线结果。
-- Authentication verification: `AuthenticationApiTests` 保留并通过正常注册、访客、未登录终端拦截和访客 AI 限制测试；真实行情 API 测试已改为普通登录用户上下文并通过。`AuthGate.vue` 恢复登录/注册切换、`?register=1` 和访客按钮。
-- Design choices: `marketData.js` 仅保留代码/名称导航清单；删除 `makeBars()` 和静态行情摘要；OpenD 连接先做 1 秒 TCP 预检并返回 503，不生成任何行情回退；认证入口不再由管理员审查模式改变。
-- Unresolved issues/risks: 若 OpenD 后续停止，页面会按当前实现显示行情不可用且不回退假数据；顶部市场指数摘要当前显示“暂未接入真实市场指数”，待后续接入 OpenD 真实指数源；`python manage.py check` 的两个 `DEFAULT_AUTO_FIELD` warning 为既有问题；生产环境安全配置仍需独立任务处理。
+- Files changed: 本次冲突解决涉及 `docs/decisions/0003-development-admin-review-and-real-data-policy.md` 与 `docs/tasks/001-dev-admin-review-and-real-data.md`；main 上新增的 `docs/decisions/0004-standard-auth-and-real-data-baseline.md` 已保留。业务代码未因本次文档 merge 改动。
+- Checks run: merge 后填写最终检查结果。
+- Real-data verification: 当前富途 OpenD 已在 `127.0.0.1:11111` 监听；此前已通过本分支 Django API 的访客 Session 端到端验证 `SH.600519`，真实报价返回 1330.0、`+2.396%`、OHLC 1295.88 / 1338.86 / 1295.6，真实日线 K 线最近一根收盘 1330.0，数据源为 `futu-opend`。
+- Authentication verification: `AuthenticationApiTests` 覆盖正常注册、访客、未登录终端拦截和访客 AI 限制；`AuthGate.vue` 保留登录/注册切换、`?register=1` 和访客按钮。
+- Design choices: Decision 0003 明确标记 `SUPERSEDED`，Decision 0004 保持 `ACCEPTED`；`marketData.js` 仅保留代码/名称导航清单；删除 `makeBars()` 和静态行情摘要；OpenD 失败时返回错误或不可用状态，不生成行情回退。
+- Unresolved issues/risks: 若 OpenD 停止，页面会显示行情不可用且不回退假数据；顶部市场指数摘要当前显示“暂未接入真实市场指数”，待后续接入 OpenD 真实指数源；`python manage.py check` 的两个 `DEFAULT_AUTO_FIELD` warning 为既有问题；生产环境安全配置仍需独立任务处理。
 - PR: [#2 — feat: add admin review gate and real market data](https://github.com/kuashan/huntalpha/pull/2)
 
 ## Review
