@@ -198,22 +198,48 @@ class FutuOpenDAdapter:
         market_caps = {}
         for provider_market in definition.market_cap_markets:
             expected_prefix = _provider_market_prefix(provider_market)
-            ret, data = client.get_stock_filter(
-                provider_market,
-                filter_list=[filter_item],
-                begin=0,
-                num=MAX_MARKET_CAP_ROWS,
-            )
-            if ret != RET_OK or not isinstance(data, tuple) or len(data) != 3:
-                raise ProviderSyncError("market_cap_fetch_failed")
-            for row in data[2]:
-                code = _text(_field(row, "stock_code")).upper()
-                if expected_prefix and not code.startswith(expected_prefix):
-                    continue
-                item = catalog_by_code.get(code)
-                value = _decimal_market_cap(_field(row, "market_val"))
-                if item is not None and item.market_cap_eligible and value is not None:
-                    market_caps[code] = value
+            begin = 0
+            matched_codes = set()
+            seen_pages = set()
+            while True:
+                ret, data = client.get_stock_filter(
+                    provider_market,
+                    filter_list=[filter_item],
+                    begin=begin,
+                    num=MAX_MARKET_CAP_ROWS,
+                )
+                if ret != RET_OK or not isinstance(data, tuple) or len(data) != 3:
+                    raise ProviderSyncError("market_cap_fetch_failed")
+                rows = list(data[2])
+                page_codes = tuple(_text(_field(row, "stock_code")).upper() for row in rows)
+                if page_codes in seen_pages:
+                    break
+                seen_pages.add(page_codes)
+                for row in rows:
+                    code = _text(_field(row, "stock_code")).upper()
+                    if expected_prefix and not code.startswith(expected_prefix):
+                        continue
+                    item = catalog_by_code.get(code)
+                    if expected_prefix and code in matched_codes:
+                        continue
+                    if expected_prefix and len(matched_codes) >= MAX_MARKET_CAP_ROWS:
+                        break
+                    if item is not None:
+                        matched_codes.add(code)
+                    value = _decimal_market_cap(_field(row, "market_val"))
+                    if item is not None and item.market_cap_eligible and value is not None:
+                        market_caps[code] = value
+
+                # OpenD normally scopes the call to the requested market.  A
+                # current version can return mixed SH/SZ pages instead, so
+                # page through those pages until the requested exchange has
+                # its own 200 candidates.
+                if not expected_prefix or len(matched_codes) >= MAX_MARKET_CAP_ROWS or data[0] or not rows:
+                    break
+                next_begin = begin + len(rows)
+                if next_begin <= begin:
+                    break
+                begin = next_begin
         return market_caps
 
     def fetch_market(self, market):
@@ -259,7 +285,11 @@ def apply_catalog_snapshot(snapshot, now=None):
         updated = 0
         for item in symbols:
             market_cap = snapshot.market_caps.get(item.code)
-            clear_market_cap = bool(snapshot.market_cap_error) or item.code in snapshot.market_cap_reset_codes
+            clear_market_cap = (
+                bool(snapshot.market_cap_error)
+                or item.code in snapshot.market_cap_reset_codes
+                or market_cap is None
+            )
             if item.market_cap_currency is None:
                 currency = MARKET_DEFINITIONS[item.market].currency if item.market_cap_eligible else ""
             else:

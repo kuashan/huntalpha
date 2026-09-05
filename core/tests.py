@@ -279,7 +279,7 @@ class SymbolCatalogSyncTests(TestCase):
                     Market.SH: [SimpleNamespace(stock_code='SH.600001', market_val='100')],
                     Market.SZ: [SimpleNamespace(stock_code='SZ.000001', market_val='1000')],
                 }[market]
-                return RET_OK, (False, len(rows), rows)
+                return RET_OK, (True, len(rows), rows)
 
             def close(self):
                 pass
