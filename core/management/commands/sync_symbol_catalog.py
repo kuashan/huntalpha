@@ -17,8 +17,9 @@ class Command(BaseCommand):
                 snapshot = provider.fetch_market(market)
                 stats = apply_catalog_snapshot(snapshot)
             except Exception as exc:
+                error_type = getattr(exc, "error_type", type(exc).__name__)
                 self.stdout.write(
-                    f"market={market} status=error error_type={type(exc).__name__}"
+                    f"market={market} status=error error_type={error_type}"
                 )
                 continue
             cap_status = "ok" if not snapshot.market_cap_error else f"error:{snapshot.market_cap_error}"

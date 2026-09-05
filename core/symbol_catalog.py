@@ -19,14 +19,14 @@ class MarketDefinition:
     code: str
     name: str
     provider_markets: tuple
-    market_cap_market: str
+    market_cap_markets: tuple
     currency: str
 
 
 MARKET_DEFINITIONS = {
-    "cn": MarketDefinition("cn", "沪深 A 股", (Market.SH, Market.SZ), Market.SH, "CNY"),
-    "hk": MarketDefinition("hk", "港股", (Market.HK,), Market.HK, "HKD"),
-    "us": MarketDefinition("us", "美股", (Market.US,), Market.US, "USD"),
+    "cn": MarketDefinition("cn", "沪深 A 股", (Market.SH, Market.SZ), (Market.SH, Market.SZ), "CNY"),
+    "hk": MarketDefinition("hk", "港股", (Market.HK,), (Market.HK,), "HKD"),
+    "us": MarketDefinition("us", "美股", (Market.US,), (Market.US,), "USD"),
 }
 SUPPORTED_MARKETS = tuple(MARKET_DEFINITIONS)
 
@@ -40,6 +40,8 @@ class ProviderSymbol:
     security_type: str
     active: bool
     provider: str = FUTU_PROVIDER
+    market_cap_currency: str | None = None
+    market_cap_eligible: bool = True
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,7 @@ class ProviderCatalogSnapshot:
     symbols: tuple
     market_caps: dict
     market_cap_error: str | None = None
+    market_cap_reset_codes: tuple = ()
 
 
 class ProviderSyncError(RuntimeError):
@@ -89,6 +92,57 @@ def _decimal_market_cap(value):
         return None
 
 
+def _provider_market_prefix(provider_market):
+    return {
+        Market.SH: "SH.",
+        Market.SZ: "SZ.",
+    }.get(provider_market)
+
+
+def _provider_currency(row):
+    """Return an explicitly supplied provider currency, when one exists."""
+    for field_name in (
+        "currency", "market_currency", "quote_currency", "trading_currency",
+        "stock_currency", "market_cap_currency",
+    ):
+        value = _text(_field(row, field_name))
+        if value:
+            value = value.upper()
+            return {"RMB": "CNY", "CNH": "CNY"}.get(value, value)
+    return None
+
+
+def _is_hk_alternate_counter(row, code):
+    """Identify HK alternate-currency counters from provider attributes.
+
+    OpenD currently does not expose a currency column for HK stock basic info or
+    snapshots.  Prefer an explicit currency/counter attribute when available;
+    otherwise use the provider's alternate-counter name/code
+    convention.  This is deliberately generic and never names an individual
+    security.
+    """
+    for field_name in (
+        "currency", "market_currency", "quote_currency", "trading_currency",
+        "stock_currency", "market_cap_currency", "counter_currency",
+        "counter_type", "stock_child_type",
+    ):
+        value = _text(_field(row, field_name)).upper()
+        if value in {"RMB", "CNY", "CNH", "RMB_COUNTER", "CNY_COUNTER", "CNH_COUNTER", "ALTERNATE"}:
+            return True
+        if value in {"HKD", "HKD_COUNTER", "PRIMARY", "MAIN"}:
+            return False
+
+    name = _text(_field(row, "name")).upper()
+    if name.endswith("-R") or name.endswith("-RMB") or "人民币柜台" in name:
+        return True
+
+    # HK RMB counters use the provider's 8xxxx code range.  The range check
+    # is a provider symbol attribute, not a hand-maintained security list.
+    provider_code = code.upper()
+    local_code = provider_code[3:] if provider_code.startswith("HK.") else provider_code
+    return local_code.isdigit() and len(local_code) == 5 and local_code.startswith("8")
+
+
 def _default_context():
     host = os.environ.get("FUTU_OPEND_HOST", "127.0.0.1")
     try:
@@ -121,6 +175,8 @@ class FutuOpenDAdapter:
                 if not code or not name or security_type != "STOCK" or code in seen:
                     continue
                 seen.add(code)
+                alternate_counter = definition.code == "hk" and _is_hk_alternate_counter(row, code)
+                provider_currency = _provider_currency(row)
                 rows.append(ProviderSymbol(
                     code=code,
                     name=name,
@@ -128,28 +184,36 @@ class FutuOpenDAdapter:
                     exchange=_text(_field(row, "exchange_type")) or str(provider_market),
                     security_type=security_type,
                     active=not _truthy(_field(row, "delisting", False)),
+                    market_cap_currency=provider_currency or (None if alternate_counter else definition.currency),
+                    market_cap_eligible=not alternate_counter,
                 ))
         return tuple(rows)
 
-    def _market_caps(self, client, definition, catalog_codes):
+    def _market_caps(self, client, definition, catalog_symbols):
         filter_item = SimpleFilter()
         filter_item.stock_field = StockField.MARKET_VAL
         filter_item.sort = SortDir.DESCEND
         filter_item.is_no_filter = True
-        ret, data = client.get_stock_filter(
-            definition.market_cap_market,
-            filter_list=[filter_item],
-            begin=0,
-            num=MAX_MARKET_CAP_ROWS,
-        )
-        if ret != RET_OK or not isinstance(data, tuple) or len(data) != 3:
-            raise ProviderSyncError("market_cap_fetch_failed")
+        catalog_by_code = {item.code: item for item in catalog_symbols}
         market_caps = {}
-        for row in data[2]:
-            code = _text(_field(row, "stock_code")).upper()
-            value = _decimal_market_cap(_field(row, "market_val"))
-            if code in catalog_codes and value is not None:
-                market_caps[code] = value
+        for provider_market in definition.market_cap_markets:
+            expected_prefix = _provider_market_prefix(provider_market)
+            ret, data = client.get_stock_filter(
+                provider_market,
+                filter_list=[filter_item],
+                begin=0,
+                num=MAX_MARKET_CAP_ROWS,
+            )
+            if ret != RET_OK or not isinstance(data, tuple) or len(data) != 3:
+                raise ProviderSyncError("market_cap_fetch_failed")
+            for row in data[2]:
+                code = _text(_field(row, "stock_code")).upper()
+                if expected_prefix and not code.startswith(expected_prefix):
+                    continue
+                item = catalog_by_code.get(code)
+                value = _decimal_market_cap(_field(row, "market_val"))
+                if item is not None and item.market_cap_eligible and value is not None:
+                    market_caps[code] = value
         return market_caps
 
     def fetch_market(self, market):
@@ -160,13 +224,16 @@ class FutuOpenDAdapter:
         client = self.context_factory()
         try:
             symbols = self._catalog_rows(client, definition)
+            if not symbols:
+                raise ProviderSyncError("suspicious_empty_catalog")
             try:
-                market_caps = self._market_caps(client, definition, {item.code for item in symbols})
+                market_caps = self._market_caps(client, definition, symbols)
                 market_cap_error = None
             except ProviderSyncError as exc:
                 market_caps = {}
                 market_cap_error = exc.error_type
-            return ProviderCatalogSnapshot(market, symbols, market_caps, market_cap_error)
+            reset_codes = tuple(item.code for item in symbols if not item.market_cap_eligible)
+            return ProviderCatalogSnapshot(market, symbols, market_caps, market_cap_error, reset_codes)
         finally:
             client.close()
 
@@ -181,6 +248,8 @@ SYNC_FIELDS = (
 def apply_catalog_snapshot(snapshot, now=None):
     now = now or timezone.now()
     symbols = list(snapshot.symbols)
+    if not symbols:
+        raise ProviderSyncError("suspicious_empty_catalog")
     codes = {item.code for item in symbols}
     with transaction.atomic():
         existing = {item.code: item for item in MarketSymbol.objects.filter(code__in=codes)}
@@ -190,7 +259,11 @@ def apply_catalog_snapshot(snapshot, now=None):
         updated = 0
         for item in symbols:
             market_cap = snapshot.market_caps.get(item.code)
-            clear_market_cap = bool(snapshot.market_cap_error)
+            clear_market_cap = bool(snapshot.market_cap_error) or item.code in snapshot.market_cap_reset_codes
+            if item.market_cap_currency is None:
+                currency = MARKET_DEFINITIONS[item.market].currency if item.market_cap_eligible else ""
+            else:
+                currency = item.market_cap_currency
             desired = {
                 "code": item.code,
                 "name": item.name,
@@ -201,7 +274,7 @@ def apply_catalog_snapshot(snapshot, now=None):
                 "provider": item.provider,
                 "provider_symbol": item.code,
                 "market_cap": market_cap,
-                "market_cap_currency": MARKET_DEFINITIONS[item.market].currency,
+                "market_cap_currency": currency,
             }
             target = existing.get(item.code)
             if target is None:

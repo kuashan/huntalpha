@@ -16,11 +16,11 @@ from django.conf import settings
 from django.core.management import call_command, CommandError
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.contrib.auth import get_user_model
-from futu import RET_OK
+from futu import Market, RET_OK
 
 from formula_editor.models import Formula
 from .models import MarketSymbol
-from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol
+from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
 from .views import bar_rows
 
 
@@ -218,12 +218,120 @@ class SymbolCatalogSyncTests(TestCase):
             code='HK.09999', name='历史证券', market='hk', exchange='HK_MAINBOARD',
             security_type='STOCK', provider='futu-opend', provider_symbol='HK.09999',
         )
-        snapshot = ProviderCatalogSnapshot('hk', (), {})
+        snapshot = ProviderCatalogSnapshot(
+            'hk', (self.symbol('HK.10000', '当前证券', market='hk', exchange='HK_MAINBOARD'),),
+            {'HK.10000': Decimal('10')},
+        )
         output = self.run_sync(snapshot, market='hk')
         self.assertIn('inactive=1', output)
         row = MarketSymbol.objects.get(code='HK.09999')
         self.assertFalse(row.active)
-        self.assertEqual(MarketSymbol.objects.count(), 1)
+        self.assertEqual(MarketSymbol.objects.count(), 2)
+
+    def test_suspicious_empty_catalog_preserves_existing_market(self):
+        MarketSymbol.objects.create(
+            code='HK.09999', name='历史证券', market='hk', exchange='HK_MAINBOARD',
+            security_type='STOCK', provider='futu-opend', provider_symbol='HK.09999',
+        )
+        output = self.run_sync(ProviderCatalogSnapshot('hk', (), {}), market='hk')
+        self.assertIn('market=hk status=error error_type=suspicious_empty_catalog', output)
+        self.assertTrue(MarketSymbol.objects.get(code='HK.09999').active)
+
+    def test_adapter_rejects_successful_empty_provider_catalog(self):
+        class EmptyFrame:
+            def itertuples(self, index=False):
+                return iter(())
+
+        class Client:
+            def get_stock_basicinfo(self, market, stock_type):
+                return RET_OK, EmptyFrame()
+
+            def close(self):
+                pass
+
+        with self.assertRaises(ProviderSyncError) as raised:
+            FutuOpenDAdapter(context_factory=Client).fetch_market('hk')
+        self.assertEqual(raised.exception.error_type, 'suspicious_empty_catalog')
+
+    def test_cn_market_caps_merge_sh_and_sz_before_ranking(self):
+        class Frame:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def itertuples(self, index=False):
+                return iter(self.rows)
+
+        class Client:
+            basic_calls = []
+            filter_calls = []
+
+            def get_stock_basicinfo(self, market, stock_type):
+                self.basic_calls.append(market)
+                rows = {
+                    Market.SH: [SimpleNamespace(code='SH.600001', name='上海样本', stock_type='STOCK', exchange_type='SH_MAINBOARD', delisting=False)],
+                    Market.SZ: [SimpleNamespace(code='SZ.000001', name='深圳样本', stock_type='STOCK', exchange_type='SZ_MAINBOARD', delisting=False)],
+                }[market]
+                return RET_OK, Frame(rows)
+
+            def get_stock_filter(self, market, **kwargs):
+                self.filter_calls.append(market)
+                rows = {
+                    Market.SH: [SimpleNamespace(stock_code='SH.600001', market_val='100')],
+                    Market.SZ: [SimpleNamespace(stock_code='SZ.000001', market_val='1000')],
+                }[market]
+                return RET_OK, (False, len(rows), rows)
+
+            def close(self):
+                pass
+
+        client = Client()
+        snapshot = FutuOpenDAdapter(context_factory=lambda: client).fetch_market('cn')
+        self.assertEqual(client.basic_calls, [Market.SH, Market.SZ])
+        self.assertEqual(client.filter_calls, [Market.SH, Market.SZ])
+        self.assertEqual(snapshot.market_caps['SZ.000001'], Decimal('1000.0000'))
+        self.assertEqual(snapshot.market_caps['SH.600001'], Decimal('100.0000'))
+
+        apply_catalog_snapshot(snapshot)
+        ranked = list(MarketSymbol.objects.filter(market='cn').order_by('-market_cap').values_list('code', flat=True))
+        self.assertEqual(ranked, ['SZ.000001', 'SH.600001'])
+
+    def test_hk_alternate_currency_is_not_mixed_into_leaders(self):
+        class Frame:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def itertuples(self, index=False):
+                return iter(self.rows)
+
+        class Client:
+            def get_stock_basicinfo(self, market, stock_type):
+                return RET_OK, Frame([
+                    SimpleNamespace(code='HK.00001', name='主柜台样本', stock_type='STOCK', exchange_type='HK_MAINBOARD', stock_child_type='N/A', delisting=False),
+                    SimpleNamespace(code='HK.80001', name='主柜台样本-R', stock_type='STOCK', exchange_type='HK_MAINBOARD', stock_child_type='N/A', currency='CNY', delisting=False),
+                ])
+
+            def get_stock_filter(self, market, **kwargs):
+                return RET_OK, (False, 2, [
+                    SimpleNamespace(stock_code='HK.80001', market_val='999999'),
+                    SimpleNamespace(stock_code='HK.00001', market_val='100'),
+                ])
+
+            def close(self):
+                pass
+
+        snapshot = FutuOpenDAdapter(context_factory=Client).fetch_market('hk')
+        alternate = next(item for item in snapshot.symbols if item.code == 'HK.80001')
+        self.assertEqual(alternate.market_cap_currency, 'CNY')
+        self.assertFalse(alternate.market_cap_eligible)
+        self.assertEqual(snapshot.market_caps, {'HK.00001': Decimal('100.0000')})
+
+        apply_catalog_snapshot(snapshot)
+        stored = MarketSymbol.objects.get(code='HK.80001')
+        self.assertIsNone(stored.market_cap)
+        self.assertEqual(stored.market_cap_currency, 'CNY')
+        self.client.force_login(get_user_model().objects.create_user(username='hk-catalog@example.com', password='A-safe-password-42'))
+        leaders = self.client.get('/api/market-leaders/hk/').json()['items']
+        self.assertEqual([item['code'] for item in leaders], ['HK.00001'])
 
     def test_one_market_failure_does_not_block_other_markets(self):
         snapshots = {
