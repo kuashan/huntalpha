@@ -10,6 +10,11 @@ export class TongdaxinFixedTextPrimitive {
   paneViews() { return [this.view] }
   updateAllViews() {}
 
+  update(items) {
+    this.items = items || []
+    this.updateAllViews()
+  }
+
   draw(target) {
     target.useMediaCoordinateSpace(({ context, mediaSize }) => {
       context.save()

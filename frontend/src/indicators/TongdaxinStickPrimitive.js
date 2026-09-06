@@ -17,6 +17,11 @@ export class TongdaxinStickPrimitive {
 
   updateAllViews() {}
 
+  update(groups) {
+    this.groups = groups || []
+    this.updateAllViews()
+  }
+
   barWidth() {
     const coordinates = []
     for (const group of this.groups) {

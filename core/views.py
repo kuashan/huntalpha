@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json as json_module
 import math
 import os
 import re
 import socket
 import subprocess
+import queue
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -14,7 +15,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
 from django.core.exceptions import ValidationError
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
@@ -26,6 +27,16 @@ from .account import (
     delete_avatar, save_avatar,
 )
 from .market_indices import FutuOpenDIndexAdapter, grouped_snapshot_response, unavailable_index_items
+from .realtime import (
+    NormalizedBar,
+    RealtimeProviderError,
+    get_realtime_registry,
+    market_for_symbol,
+    optional_numeric,
+    provider_time_to_timestamp,
+    timestamp_to_market_datetime,
+)
+from .realtime.provider import REALTIME_PERIOD_SUBTYPES
 from .symbol_catalog import FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 from .watchlist import account_tier_payload, watchlist_limit_for_user
 
@@ -478,14 +489,24 @@ def numeric_value(value):
 
 
 def bar_rows(frame):
-    return [{
-        "time": int(datetime.strptime(row.time_key, "%Y-%m-%d %H:%M:%S").timestamp()),
-        "open": float(row.open), "high": float(row.high), "low": float(row.low),
-        "close": float(row.close), "volume": float(row.volume),
-        "amount": float(getattr(row, "turnover", 0) or 0),
-        "turnover_rate": float(getattr(row, "turnover_rate", 0) or 0),
-        "last_close": float(getattr(row, "last_close", 0) or 0),
-    } for row in frame.itertuples()]
+    rows = []
+    for row in frame.itertuples():
+        symbol = str(getattr(row, "code", ""))
+        event_time = provider_time_to_timestamp(getattr(row, "time_key", None), market_for_symbol(symbol))
+        if event_time is None:
+            continue
+        rows.append({
+            "time": event_time,
+            "open": optional_numeric(getattr(row, "open", None)),
+            "high": optional_numeric(getattr(row, "high", None)),
+            "low": optional_numeric(getattr(row, "low", None)),
+            "close": optional_numeric(getattr(row, "close", None)),
+            "volume": optional_numeric(getattr(row, "volume", None)),
+            "amount": optional_numeric(getattr(row, "turnover", None)),
+            "turnover_rate": optional_numeric(getattr(row, "turnover_rate", None)),
+            "last_close": optional_numeric(getattr(row, "last_close", None)),
+        })
+    return rows
 
 
 def request_history_rows(client, code, period, before=None):
@@ -496,7 +517,10 @@ def request_history_rows(client, code, period, before=None):
     they remain offline regression fixtures only, so the browser cannot show
     one price series while the formula calculates another.
     """
-    end = datetime.fromtimestamp(before) if before else datetime.now()
+    market = market_for_symbol(code)
+    end = timestamp_to_market_datetime(before, market) if before else datetime.now(timezone.utc).astimezone(
+        timestamp_to_market_datetime(0, market).tzinfo
+    )
     start = end - timedelta(days=KLINE_LOOKBACK_DAYS.get(period, 1825))
     ret, frame, _ = client.request_history_kline(
         code.upper(), start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"),
@@ -515,10 +539,29 @@ def request_page(client, code, period, count, before=None):
     rows, error = request_history_rows(client, code, period, before)
     if error:
         return None, False, error
+    if before is None:
+        rows = merge_realtime_rows(rows, code, period)
     rows = rows[-count:]
     # A non-empty page can have older provider history.  The client will make
     # at most one extra request to determine the true beginning of history.
     return rows, bool(rows), None
+
+
+def merge_realtime_rows(rows, code, period):
+    """Overlay the shared authoritative current bar on a historical response."""
+    key = ("futu-opend", str(code).upper(), period)
+    state = get_realtime_registry().state_store.get(key)
+    if state is None or state.current_bar is None:
+        return rows
+    current = state.current_bar.to_dict()
+    bar = {field: current.get(field) for field in (
+        "time", "open", "high", "low", "close", "volume", "amount", "turnover_rate"
+    )}
+    if not rows or bar["time"] > rows[-1]["time"]:
+        return [*rows, bar]
+    if bar["time"] == rows[-1]["time"]:
+        return [*rows[:-1], {**rows[-1], **bar}]
+    return rows
 
 
 @require_GET
@@ -570,7 +613,17 @@ def kline(request, code):
             ret, frame = client.get_rt_data(code.upper())
             if ret != RET_OK or frame.empty:
                 return json({"error": f"富途 OpenD 未返回 {code.upper()} 的真实分时数据", "source": "futu-opend"}, 502)
-            bars = [{"time": int(datetime.strptime(f"{datetime.now().date()} {row.time}", "%Y-%m-%d %H:%M:%S").timestamp()), "open": float(row.cur_price), "high": float(row.cur_price), "low": float(row.cur_price), "close": float(row.cur_price), "volume": float(row.volume)} for row in frame.itertuples() if not row.is_blank]
+            market = market_for_symbol(code)
+            market_tz = timestamp_to_market_datetime(0, market).tzinfo
+            market_date = datetime.now(timezone.utc).astimezone(market_tz).date()
+            bars = [{
+                "time": provider_time_to_timestamp(f"{market_date} {row.time}", market),
+                "open": optional_numeric(row.cur_price),
+                "high": optional_numeric(row.cur_price),
+                "low": optional_numeric(row.cur_price),
+                "close": optional_numeric(row.cur_price),
+                "volume": optional_numeric(row.volume),
+            } for row in frame.itertuples() if not row.is_blank]
             return json({"code": code.upper(), "period": period, "bars": bars, "source": "futu-opend", "adjustment": "实时分时", "has_more": False})
         bars, has_more, error = request_page(client, code, period, count, before)
         if error: return json({"error": error}, 502)
@@ -580,6 +633,47 @@ def kline(request, code):
     finally:
         if client is not None:
             client.close()
+
+
+def _sse_event(payload):
+    event_type = payload.get("type", "message")
+    return f"event: {event_type}\ndata: {json_module.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@require_GET
+@api_terminal_required
+def realtime_market_stream(request, code):
+    period = request.GET.get("period", "日线")
+    if period not in REALTIME_PERIOD_SUBTYPES:
+        return json({"error": "该周期暂不支持实时 K 线推送", "code": "realtime_unavailable", "mode": "unavailable"}, 422)
+    registry = get_realtime_registry()
+    try:
+        consumer = registry.subscribe(code.upper(), period)
+    except RealtimeProviderError as exc:
+        return json({
+            "error": str(exc), "code": "realtime_unavailable", "source": "futu-opend", "mode": "unavailable",
+        }, 503)
+
+    def events():
+        try:
+            while not consumer.closed:
+                try:
+                    payload = consumer.get(timeout=15)
+                except queue.Empty:
+                    registry.health_check()
+                    yield ": keep-alive\n\n"
+                    continue
+                yield _sse_event(payload)
+        finally:
+            registry.unsubscribe(consumer)
+
+    response = StreamingHttpResponse(events(), content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache"
+    response["Connection"] = "keep-alive"
+    response["X-Accel-Buffering"] = "no"
+    response["Access-Control-Allow-Origin"] = "http://127.0.0.1:5173"
+    response["Access-Control-Allow-Credentials"] = "true"
+    return response
 
 
 def live_float_shares(client, code):
@@ -601,6 +695,8 @@ def history_bars(code, period):
         if period == "分时":
             return None, None, "自定义公式暂不支持分时；请选择 K 线周期"
         bars, error = request_history_rows(client, code, period)
+        if not error:
+            bars = merge_realtime_rows(bars, code, period)
         return bars, live_float_shares(client, code) if not error else None, error
     finally:
         client.close()
@@ -828,6 +924,8 @@ def indicator_render(request, code, symbol):
     # Future functions such as BACKSET and formulas using BARSCOUNT(C)=1
     # need the beginning of the same real OpenD history shown to the chart.
     # Calculate the complete bounded window, then return its visible tail.
+    realtime_key = ("futu-opend", symbol.upper(), period)
+    calculation_revision = get_realtime_registry().state_store.revision_for(realtime_key)
     calculation_bars, float_shares, error = history_bars(symbol, period)
     if error:
         return json({"error": error}, 400 if period == "分时" else 502)
@@ -924,4 +1022,4 @@ def indicator_render(request, code, symbol):
             if isinstance(row, dict)
         ],
     }
-    return json({"code": "CHANLUN" if builtin_chanlun else item.code, "name": "缠论结构" if builtin_chanlun else item.name, "placement": "main" if builtin_chanlun else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "engine": formula.get("engine", "tongdaxin"), "source": "futu-opend", "adjustment": "前复权"})
+    return json({"code": "CHANLUN" if builtin_chanlun else item.code, "name": "缠论结构" if builtin_chanlun else item.name, "placement": "main" if builtin_chanlun else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "revision": calculation_revision, "engine": formula.get("engine", "tongdaxin"), "source": "futu-opend", "adjustment": "前复权"})

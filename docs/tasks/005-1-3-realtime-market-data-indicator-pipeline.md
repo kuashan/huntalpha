@@ -1,6 +1,6 @@
 # Task 005.1.3 — Real-time Market Data & Indicator Pipeline Foundation
 
-Status: `IN_PROGRESS`
+Status: `IMPLEMENTED`
 
 ## Goal
 
@@ -289,3 +289,16 @@ git diff --check
 ## Completion rule
 
 实现分支完成后创建 PR 到 `main`，由 ChatGPT 复查真实 diff、权限、性能、reconnect、指标一致性与 no-fake 行为。未经用户确认不得 merge。
+
+## Completion Report
+
+- Branch: `codex/005-1-3-realtime-market-indicator-pipeline`
+- Scope: provider-neutral process-local realtime pipeline with a real Futu OpenD adapter, shared subscriptions, normalized bars, revisions, SSE transport, in-place chart updates, built-in indicator refresh, and coalesced custom Formula refresh.
+- Provider: local `futu-api 10.10.7008`, OpenD server version `1010`. The installed SDK/OpenD accepted real K-line subscriptions for the supported 1/5/15/30/60/120/240-minute, day, week, and month periods. No synthetic runtime provider or fake fallback was added. The separate `分时` path remains explicitly unavailable for this K-line stream because it uses different OpenD semantics.
+- Transport: `GET /api/realtime/market-stream/<code>/?period=<period>` using SSE. Access reuses the existing terminal API boundary: authenticated users and valid visitors are allowed; anonymous requests are rejected. The registry shares one provider subscription per provider/symbol/period, tracks consumers, and delays unsubscribe through a grace period.
+- Normalization: market timezones are explicit, missing `amount` and `turnover_rate` remain `null`, real zero values are preserved, same-timestamp bars merge OHLC/volume revisions, newer bars append and close the prior bar, and stale/out-of-order events are rejected.
+- Frontend: `MarketChart.vue` updates the existing candlestick series in place, refreshes built-in MA/BOLL/VOL/MACD/KDJ/RSI layers, reconnects/reconciles on visibility changes, and protects symbol/period generations from stale responses. Custom Formula refresh uses an approximately 850 ms throttle with single-flight, latest-pending coalescing, revision checks, and stale-response discard.
+- Tests: `python manage.py test core` passed `103` tests; the indicator consistency Node contract passed `6/6`; `python manage.py check`, `python manage.py makemigrations --check`, `npm run build`, and `git diff --check` passed. Django retains the repository's existing auto-primary-key warnings only.
+- Real OpenD verification: a real `SH.600519` subscription and snapshot succeeded, including OHLC-related fields and provider health. The manual probe was performed outside trading hours, so no live callback event was expected; the browser displayed the explicit unavailable state rather than synthetic values. No private Formula source or business data was printed.
+- Persistence: no migration and no formal database write were needed. The local database still contains `4` Formula records; Formula source was not read or modified. Database files, backups, logs, sessions, secrets, and private data remain outside Git.
+- Known limits: the registry is intentionally process-local for this development task; multi-process deployment needs a shared market gateway/pub-sub layer. A full 2–5 minute trading-hours soak and two simultaneous browser tabs were not reproduced during the non-trading manual probe; deterministic registry and scheduler tests cover the shared-subscription and coalescing contracts.

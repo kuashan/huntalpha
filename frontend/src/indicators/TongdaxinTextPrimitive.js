@@ -12,6 +12,11 @@ export class TongdaxinTextPrimitive {
   paneViews() { return [this.view] }
   updateAllViews() {}
 
+  update(groups) {
+    this.groups = groups || []
+    this.updateAllViews()
+  }
+
   draw(target) {
     target.useMediaCoordinateSpace(({ context }) => {
       context.save()
