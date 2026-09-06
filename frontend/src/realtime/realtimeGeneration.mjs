@@ -1,14 +1,19 @@
 export function reconcileRealtimeVersion(currentEpoch = '', currentRevision = 0, incoming = {}) {
   const epoch = String(incoming?.epoch || '').trim()
-  if (!epoch) return { accepted: false, changed: false, epoch: currentEpoch, revision: currentRevision }
-  const revision = Math.max(0, Number(incoming?.revision || 0))
+  if (!epoch) return { accepted: false, changed: false, reason: 'missing_epoch', epoch: currentEpoch, revision: currentRevision }
+  const rawRevision = incoming?.revision ?? 0
+  const parsedRevision = Number(rawRevision)
+  if (!Number.isFinite(parsedRevision) || parsedRevision < 0) {
+    return { accepted: false, changed: false, reason: 'invalid_revision', epoch, revision: currentRevision }
+  }
+  const revision = parsedRevision
   if (!currentEpoch || epoch !== currentEpoch) {
-    return { accepted: true, changed: epoch !== currentEpoch, epoch, revision }
+    return { accepted: true, changed: true, reason: 'new_epoch', epoch, revision }
   }
   if (revision < Number(currentRevision || 0)) {
-    return { accepted: false, changed: false, epoch, revision }
+    return { accepted: false, changed: false, reason: 'stale_revision', epoch, revision }
   }
-  return { accepted: true, changed: false, epoch, revision }
+  return { accepted: true, changed: false, reason: 'accepted', epoch, revision }
 }
 
 export function isFormulaResponseGenerationSafe(currentEpoch = '', requestedEpoch = '', responseEpoch = '') {

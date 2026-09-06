@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createRealtimeUiBuffer, mergeRealtimeBars, REALTIME_UI_FLUSH_MS } from './realtimeUiBuffer.mjs'
+import { createRealtimeUiBuffer, mergeRealtimeBars, mergeRealtimePayload, REALTIME_UI_FLUSH_MS } from './realtimeUiBuffer.mjs'
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from './realtimeGeneration.mjs'
 
 const timers = []
@@ -38,6 +38,8 @@ assert.equal(restarted.accepted, true)
 assert.equal(restarted.epoch, 'epoch-b')
 const staleSameGeneration = reconcileRealtimeVersion('epoch-b', 5, { epoch: 'epoch-b', revision: 4 })
 assert.equal(staleSameGeneration.accepted, false)
+assert.equal(staleSameGeneration.reason, 'stale_revision')
+assert.equal(reconcileRealtimeVersion('epoch-b', 5, { epoch: 'epoch-b', revision: 4 }).reason, 'stale_revision')
 assert.equal(isFormulaResponseGenerationSafe('epoch-b', 'epoch-a', 'epoch-a'), false)
 assert.equal(isFormulaResponseGenerationSafe('epoch-a', 'epoch-a', 'epoch-b'), true)
 
@@ -51,6 +53,21 @@ assert.deepEqual(boundaryResult, [
   { time: 100, close: 100.5, volume: 1000 },
   { time: 101, close: 101, volume: 20 },
 ])
+const firstBoundary = mergeRealtimePayload(boundaryBars, boundaryPayload)
+assert.equal(firstBoundary.closedChanged, true)
+assert.equal(firstBoundary.currentChanged, true)
+let repeatedFullSeriesUpdates = firstBoundary.closedChanged ? 1 : 0
+let currentBars = firstBoundary.bars
+for (let revision = 1; revision <= 50; revision += 1) {
+  const next = mergeRealtimePayload(currentBars, {
+    last_closed_bar: { time: 100, close: 100.5, volume: 1000 },
+    bar: { time: 101, close: 101 + revision / 100, volume: 20 + revision },
+  })
+  if (next.closedChanged) repeatedFullSeriesUpdates += 1
+  currentBars = next.bars
+}
+assert.equal(repeatedFullSeriesUpdates, 1)
+assert.equal(currentBars.at(-1).time, 101)
 
 const staleBufferTimers = []
 const staleFlushes = []

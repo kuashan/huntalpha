@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import hashlib
+import json
 from threading import Condition, RLock
 
 
@@ -13,6 +15,24 @@ class InFlightResult:
     done: bool = False
     result: object = None
     error: Exception | None = None
+
+
+def calculation_input_fingerprint(calculation_bars, float_shares, formula_params=None):
+    """Hash only the real, non-secret inputs to one Formula calculation."""
+    canonical_input = {
+        "bars": calculation_bars,
+        "float_shares": float_shares,
+    }
+    if formula_params is not None:
+        canonical_input["params"] = formula_params
+    encoded = json.dumps(
+        canonical_input,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class FormulaFlightCoordinator:

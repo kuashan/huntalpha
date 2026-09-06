@@ -5,7 +5,7 @@ import { TongdaxinStickPrimitive } from '../indicators/TongdaxinStickPrimitive'
 import { TongdaxinTextPrimitive } from '../indicators/TongdaxinTextPrimitive'
 import { TongdaxinFixedTextPrimitive } from '../indicators/TongdaxinFixedTextPrimitive'
 import { commonDrawing } from '../indicators/commonIndicators'
-import { createRealtimeUiBuffer, mergeRealtimeBars } from '../realtime/realtimeUiBuffer.mjs'
+import { createRealtimeUiBuffer, mergeRealtimePayload } from '../realtime/realtimeUiBuffer.mjs'
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from '../realtime/realtimeGeneration.mjs'
 
 const props = defineProps({
@@ -143,9 +143,9 @@ function setRealtimeStatus(status) {
 
 function acceptRealtimeVersion(payload) {
   const decision = reconcileRealtimeVersion(realtimeEpoch, realtimeRevision, payload)
-  if (!decision.accepted) return false
+  if (!decision.accepted) return decision
   if (decision.changed) acceptRealtimeEpoch(decision.epoch)
-  return true
+  return decision
 }
 
 function acceptFormulaResponseEpoch(responseEpoch, requestedEpoch) {
@@ -388,8 +388,9 @@ async function runFormulaRefresh() {
 function processRealtimePayload(payload, payloadGeneration = realtimeStatusGeneration) {
   if (!payload || !props.symbol || payload.symbol !== props.symbol.code.toUpperCase() || payload.period !== props.period) return
   if (payloadGeneration !== realtimeStatusGeneration) return
-  if (!acceptRealtimeVersion(payload)) {
-    setRealtimeStatus('unavailable')
+  const version = acceptRealtimeVersion(payload)
+  if (!version.accepted) {
+    if (version.reason !== 'stale_revision') setRealtimeStatus('unavailable')
     return
   }
   const revision = Number(payload.revision || 0)
@@ -399,10 +400,11 @@ function processRealtimePayload(payload, payloadGeneration = realtimeStatusGener
   const hasClosedBar = Number.isFinite(Number(payload.last_closed_bar?.time))
   const hasCurrentBar = Number.isFinite(Number(payload.bar?.time))
   if (!hasClosedBar && !hasCurrentBar) return
-  loadedBars = mergeRealtimeBars(loadedBars, payload)
+  const merged = mergeRealtimePayload(loadedBars, payload)
+  loadedBars = merged.bars
   if (candleSeries) {
-    if (hasClosedBar) candleSeries.setData(loadedBars)
-    else candleSeries.update({ ...payload.bar, time: Number(payload.bar.time) })
+    if (merged.closedChanged) candleSeries.setData(loadedBars)
+    else if (merged.currentBar && merged.currentChanged) candleSeries.update(merged.currentBar)
   }
   refreshBuiltInLayers()
   queueFormulaRefresh(realtimeRevision)
@@ -410,8 +412,9 @@ function processRealtimePayload(payload, payloadGeneration = realtimeStatusGener
 
 function queueRealtimePayload(payload) {
   if (!payload || !props.symbol || payload.symbol !== props.symbol.code.toUpperCase() || payload.period !== props.period) return
-  if (!acceptRealtimeVersion(payload)) {
-    setRealtimeStatus('unavailable')
+  const version = acceptRealtimeVersion(payload)
+  if (!version.accepted) {
+    if (version.reason !== 'stale_revision') setRealtimeStatus('unavailable')
     return
   }
   const revision = Number(payload.revision || 0)

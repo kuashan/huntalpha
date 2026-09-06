@@ -39,7 +39,7 @@ from .realtime import (
     merge_realtime_bar,
     provider_time_to_timestamp,
 )
-from .realtime.formula_scheduler import FormulaFlightCoordinator, FormulaRunRegistry
+from .realtime.formula_scheduler import FormulaFlightCoordinator, FormulaRunRegistry, calculation_input_fingerprint
 from PIL import Image
 
 
@@ -1848,6 +1848,8 @@ class RealtimeCoreContractTests(TestCase):
 
     def test_formula_run_registry_deduplicates_same_revision_subprocess(self):
         registry = FormulaRunRegistry()
+        input_hash = calculation_input_fingerprint([{"time": 7, "close": 100}], 123.0)
+        key = ("SH.600519", "1分", "FORMULA", 1, 7, input_hash)
         started = threading.Event()
         release = threading.Event()
         calls = []
@@ -1860,7 +1862,7 @@ class RealtimeCoreContractTests(TestCase):
             return {"drawing": "shared"}
 
         def invoke():
-            results.append(registry.run(("SH.600519", "1分", "FORMULA", 1, 7), 7, runner))
+            results.append(registry.run(key, 7, runner))
 
         first = threading.Thread(target=invoke)
         second = threading.Thread(target=invoke)
@@ -1872,14 +1874,36 @@ class RealtimeCoreContractTests(TestCase):
         second.join(timeout=1)
         self.assertEqual(len(calls), 1)
         self.assertEqual(results, [{"drawing": "shared"}, {"drawing": "shared"}])
-        self.assertEqual(registry.coordinator.state(("SH.600519", "1分", "FORMULA", 1, 7)).active_revision, None)
+        self.assertEqual(registry.coordinator.state(key).active_revision, None)
 
         def fresh_runner():
             calls.append(True)
             return {"drawing": "fresh"}
 
-        self.assertEqual(registry.run(("SH.600519", "1分", "FORMULA", 1, 7), 7, fresh_runner), {"drawing": "fresh"})
+        self.assertEqual(registry.run(key, 7, fresh_runner), {"drawing": "fresh"})
         self.assertEqual(len(calls), 2)
+
+    def test_formula_input_fingerprint_separates_real_inputs(self):
+        bars_a = [{"time": 100, "close": 10, "volume": 100}]
+        bars_b = [{"time": 100, "close": 11, "volume": 100}]
+        hash_a = calculation_input_fingerprint(bars_a, 1000.0)
+        self.assertEqual(hash_a, calculation_input_fingerprint(bars_a, 1000.0))
+        self.assertNotEqual(hash_a, calculation_input_fingerprint(bars_b, 1000.0))
+        self.assertNotEqual(hash_a, calculation_input_fingerprint(bars_a, 1001.0))
+        self.assertNotIn("source", calculation_input_fingerprint.__code__.co_varnames)
+
+        registry = FormulaRunRegistry()
+        calls = []
+
+        def runner():
+            calls.append(True)
+            return {"drawing": len(calls)}
+
+        base = ("test-provider", "SH.600519", "1分", "FORMULA", 1, "epoch", 7)
+        registry.run(base + (hash_a,), 7, runner)
+        registry.run(base + (calculation_input_fingerprint(bars_b, 1000.0),), 7, runner)
+        registry.run(base + (calculation_input_fingerprint(bars_a, 1001.0),), 7, runner)
+        self.assertEqual(len(calls), 3)
 
     def test_formula_registry_inflight_error_is_shared_but_not_cached(self):
         registry = FormulaRunRegistry()
@@ -1941,6 +1965,38 @@ class RealtimeCoreContractTests(TestCase):
         self.assertEqual(provider.status, "unavailable")
         self.assertEqual(events[-1]["status"], "unavailable")
 
+    def test_futu_connection_generation_ignores_old_frame_and_error(self):
+        class Context:
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                return None
+
+        class Frame:
+            def itertuples(self, index=False):
+                return [SimpleNamespace(
+                    code="SH.600519", k_type="K_1M", time_key="2026-09-04 09:30:00",
+                    open=10, high=11, low=9, close=10, volume=100,
+                    turnover=1000, turnover_rate=None,
+                )]
+
+        provider = FutuRealtimeProvider(context_factory=Context)
+        provider._ensure_context()
+        old_generation = provider.connection_generation
+        events = []
+        provider._callbacks[("SH.600519", "1分")] = {events.append}
+        with provider._lock:
+            provider._connection_generation += 1
+        current_generation = provider.connection_generation
+        provider._handle_frame(Frame(), generation=old_generation)
+        provider._handle_response(old_generation, -1, "late old error")
+        self.assertEqual(events, [])
+        self.assertEqual(provider.status, "live")
+        provider._handle_response(current_generation, RET_OK, Frame())
+        self.assertEqual(len(events), 1)
+        provider.close()
+
     def test_realtime_stream_requires_terminal_session_for_anonymous(self):
         response = Client().get("/api/realtime/market-stream/SH.600519/?period=1分")
         self.assertEqual(response.status_code, 401)
@@ -1952,6 +2008,8 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("self._context", source)
         self.assertIn("CurKlineHandlerBase", source)
         self.assertIn("REALTIME_PERIOD_SUBTYPES", source)
+        self.assertIn("_connection_generation", source)
+        self.assertIn("_handle_response", source)
         self.assertNotIn("FakeRealtimeProvider", source)
 
     def test_market_chart_updates_in_place_and_cleans_stream(self):
@@ -1964,6 +2022,7 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("realtimeEpoch", source)
         self.assertIn("last_closed_bar", source)
         self.assertIn("reconcileRealtimeVersion", source)
+        self.assertIn("closedChanged", source)
         self.assertIn("formulaPendingRevision", source)
         self.assertIn("createRealtimeUiBuffer", source)
         self.assertIn("flushMs: 300", source)
@@ -1977,6 +2036,7 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("REALTIME_UI_FLUSH_MS = 300", source)
         self.assertIn("latest = payload", source)
         self.assertIn("mergeRealtimeBars", source)
+        self.assertIn("mergeRealtimePayload", source)
         self.assertIn("isPaused", source)
         self.assertIn("flushCount", source)
 
@@ -1993,6 +2053,7 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("state_store.capture", source)
         self.assertIn("merge_calculation_snapshot_rows", source)
         self.assertIn("calculation_snapshot.epoch", source)
+        self.assertIn("input_hash", source)
         self.assertIn("formula_run_registry.run", source)
 
     def test_bar_rows_preserves_missing_fields_and_real_zero(self):

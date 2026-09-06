@@ -36,7 +36,7 @@ from .realtime import (
     provider_time_to_timestamp,
     timestamp_to_market_datetime,
 )
-from .realtime.formula_scheduler import FormulaRunRegistry
+from .realtime.formula_scheduler import FormulaRunRegistry, calculation_input_fingerprint
 from .realtime.provider import REALTIME_PERIOD_SUBTYPES
 from .symbol_catalog import FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 from .watchlist import account_tier_payload, watchlist_limit_for_user
@@ -984,9 +984,10 @@ def indicator_render(request, code, symbol):
     try:
         formula_id = "builtin-chanlun" if builtin_chanlun else item.code
         formula_version = 1 if builtin_chanlun else item.version
+        input_hash = calculation_input_fingerprint(calculation_bars, float_shares)
         formula_key = (
             registry.provider_name, symbol.upper(), period, formula_id, formula_version,
-            calculation_snapshot.epoch, calculation_snapshot.revision,
+            calculation_snapshot.epoch, calculation_snapshot.revision, input_hash,
         )
 
         def run_formula():

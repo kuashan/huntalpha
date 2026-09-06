@@ -23,34 +23,47 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
         self._lock = threading.RLock()
         self._callbacks = {}
         self._status = "unavailable"
+        self._connection_generation = 0
+
+    @property
+    def connection_generation(self):
+        with self._lock:
+            return self._connection_generation
 
     @property
     def status(self):
         return self._status
 
     def _ensure_context(self):
-        if self._context is not None:
-            return self._context
+        with self._lock:
+            if self._context is not None:
+                return self._context
+            self._connection_generation += 1
+            generation = self._connection_generation
         try:
-            self._context = self.context_factory()
+            context = self.context_factory()
             provider = self
 
             class Handler(CurKlineHandlerBase):
                 def on_recv_rsp(self, rsp_pb):
                     ret, frame = super().on_recv_rsp(rsp_pb)
-                    if ret != RET_OK:
-                        provider._notify_error(str(frame))
-                        return ret, frame
-                    provider._handle_frame(frame)
+                    provider._handle_response(generation, ret, frame)
                     return ret, frame
 
             self._handler = Handler()
-            self._context.set_handler(self._handler)
-            self._status = "live"
-            return self._context
+            context.set_handler(self._handler)
+            with self._lock:
+                if generation != self._connection_generation:
+                    context.close()
+                    raise RealtimeProviderError("富途 OpenD 连接代际已过期")
+                self._context = context
+                self._status = "live"
+            return context
         except Exception as exc:
-            self._status = "unavailable"
-            self._context = None
+            with self._lock:
+                if generation == self._connection_generation:
+                    self._status = "unavailable"
+                    self._context = None
             raise RealtimeProviderError(f"富途 OpenD 不可用：{exc}") from exc
 
     def _key(self, symbol, period):
@@ -58,7 +71,19 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
             raise RealtimeProviderError(f"周期 {period} 不支持实时 K 线")
         return str(symbol).upper(), period
 
-    def _handle_frame(self, frame):
+    def _handle_response(self, generation, ret, frame):
+        with self._lock:
+            if generation != self._connection_generation:
+                return
+        if ret != RET_OK:
+            self._notify_error(str(frame), generation=generation)
+            return
+        self._handle_frame(frame, generation=generation)
+
+    def _handle_frame(self, frame, generation=None):
+        with self._lock:
+            if generation is not None and generation != self._connection_generation:
+                return
         received_at = int(time.time())
         for row in frame.itertuples(index=False):
             symbol = str(getattr(row, "code", "")).upper()
@@ -89,20 +114,27 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
                 event_kind="live",
             )
             with self._lock:
+                if generation is not None and generation != self._connection_generation:
+                    return
                 callbacks = list(self._callbacks.get((symbol, period), set()))
             for callback in callbacks:
                 callback(bar)
 
-    def _notify_status(self, status, message):
+    def _notify_status(self, status, message, generation=None):
         with self._lock:
+            if generation is not None and generation != self._connection_generation:
+                return
             self._status = status
             subscriptions = [(key, list(callbacks)) for key, callbacks in self._callbacks.items()]
         for (symbol, period), callbacks in subscriptions:
             for callback in callbacks:
+                with self._lock:
+                    if generation is not None and generation != self._connection_generation:
+                        return
                 callback({"status": status, "error": message, "symbol": symbol, "period": period})
 
-    def _notify_error(self, message, status="reconnecting"):
-        self._notify_status(status, message)
+    def _notify_error(self, message, status="reconnecting", generation=None):
+        self._notify_status(status, message, generation=generation)
 
     def subscribe(self, symbol, period, callback):
         symbol, period = self._key(symbol, period)
@@ -178,6 +210,10 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
         with self._lock:
             old_context = self._context
             self._context = None
+            # Invalidate callbacks from the old OpenD context before closing
+            # it.  The next context receives a fresh generation in
+            # _ensure_context().
+            self._connection_generation += 1
             keys = list(self._callbacks)
             self._status = "reconnecting"
         if old_context is not None:
@@ -230,6 +266,7 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
 
     def close(self):
         with self._lock:
+            self._connection_generation += 1
             context, self._context = self._context, None
             self._callbacks.clear()
             self._status = "unavailable"

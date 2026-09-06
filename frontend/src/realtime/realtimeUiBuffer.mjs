@@ -1,13 +1,33 @@
 export const REALTIME_UI_FLUSH_MS = 300
 
-export function mergeRealtimeBars(loadedBars, payload) {
+const barFields = ['time', 'open', 'high', 'low', 'close', 'volume', 'amount', 'turnover_rate', 'is_closed']
+
+function barFingerprint(bar) {
+  return JSON.stringify(barFields.map(field => bar?.[field] ?? null))
+}
+
+export function mergeRealtimePayload(loadedBars, payload) {
   const byTime = new Map((loadedBars || []).map(bar => [Number(bar.time), bar]))
-  for (const candidate of [payload?.last_closed_bar, payload?.bar]) {
+  const closedBar = payload?.last_closed_bar
+  const currentBar = payload?.bar
+  const previousClosed = Number.isFinite(Number(closedBar?.time)) ? byTime.get(Number(closedBar.time)) : undefined
+  const previousCurrent = Number.isFinite(Number(currentBar?.time)) ? byTime.get(Number(currentBar.time)) : undefined
+  for (const candidate of [closedBar, currentBar]) {
     const time = Number(candidate?.time)
     if (!Number.isFinite(time)) continue
     byTime.set(time, { ...(byTime.get(time) || {}), ...candidate, time })
   }
-  return [...byTime.values()].sort((left, right) => Number(left.time) - Number(right.time))
+  return {
+    bars: [...byTime.values()].sort((left, right) => Number(left.time) - Number(right.time)),
+    closedChanged: Boolean(closedBar && (!previousClosed || barFingerprint(previousClosed) !== barFingerprint(closedBar))),
+    currentChanged: Boolean(currentBar && (!previousCurrent || barFingerprint(previousCurrent) !== barFingerprint(currentBar))),
+    closedBar: Number.isFinite(Number(closedBar?.time)) ? { ...closedBar, time: Number(closedBar.time) } : null,
+    currentBar: Number.isFinite(Number(currentBar?.time)) ? { ...currentBar, time: Number(currentBar.time) } : null,
+  }
+}
+
+export function mergeRealtimeBars(loadedBars, payload) {
+  return mergeRealtimePayload(loadedBars, payload).bars
 }
 
 export function createRealtimeUiBuffer({
