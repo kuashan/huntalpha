@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from threading import Condition, RLock
+from uuid import uuid4
 
 from .contracts import NormalizedBar, merge_realtime_bar
 
@@ -7,6 +8,7 @@ from .contracts import NormalizedBar, merge_realtime_bar
 @dataclass
 class RealtimeState:
     key: tuple
+    epoch: str
     current_bar: NormalizedBar | None = None
     last_closed_bar: NormalizedBar | None = None
     revision: int = 0
@@ -17,6 +19,7 @@ class RealtimeState:
 
     def to_dict(self):
         return {
+            "epoch": self.epoch,
             "provider": self.key[0],
             "symbol": self.key[1],
             "period": self.key[2],
@@ -33,6 +36,7 @@ class RealtimeState:
 @dataclass(frozen=True)
 class RealtimeCalculationSnapshot:
     key: tuple
+    epoch: str
     revision: int
     current_bar: NormalizedBar | None
     source: str | None
@@ -43,11 +47,12 @@ class RealtimeCalculationSnapshot:
 class RealtimeStateStore:
     def __init__(self):
         self._states = {}
+        self.epoch = uuid4().hex
         self._revision = 0
         self._condition = Condition(RLock())
 
     def _state(self, key):
-        return self._states.setdefault(key, RealtimeState(key=key))
+        return self._states.setdefault(key, RealtimeState(key=key, epoch=self.epoch))
 
     def get(self, key):
         with self._condition:
@@ -94,7 +99,7 @@ class RealtimeStateStore:
 
     def revision_for(self, key):
         with self._condition:
-            return self._states.get(key, RealtimeState(key=key)).revision
+            return self._states.get(key, RealtimeState(key=key, epoch=self.epoch)).revision
 
     def capture(self, key):
         """Capture one immutable market state for a calculation run."""
@@ -102,11 +107,12 @@ class RealtimeStateStore:
             state = self._states.get(key)
             if state is None:
                 return RealtimeCalculationSnapshot(
-                    key=key, revision=0, current_bar=None, source=None,
+                    key=key, epoch=self.epoch, revision=0, current_bar=None, source=None,
                     status="unavailable", mode="streaming",
                 )
             return RealtimeCalculationSnapshot(
                 key=key,
+                epoch=state.epoch,
                 revision=state.revision,
                 current_bar=state.current_bar,
                 source=state.source,

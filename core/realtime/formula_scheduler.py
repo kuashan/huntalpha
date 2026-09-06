@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from collections import OrderedDict
 from threading import Condition, RLock
 
 
@@ -7,6 +6,13 @@ from threading import Condition, RLock
 class FlightState:
     active_revision: int | None = None
     pending_revision: int | None = None
+
+
+@dataclass
+class InFlightResult:
+    done: bool = False
+    result: object = None
+    error: Exception | None = None
 
 
 class FormulaFlightCoordinator:
@@ -52,50 +58,52 @@ class FormulaFlightCoordinator:
 
 
 class FormulaRunRegistry:
-    """Process-local duplicate suppression for one captured formula revision."""
+    """Process-local in-flight duplicate suppression for one formula run."""
 
     def __init__(self, cache_size=128):
         self.coordinator = FormulaFlightCoordinator()
+        # Kept as a compatibility argument for callers that constructed the
+        # earlier bounded completed-result registry.  Completed results are no
+        # longer retained: the registry is only a same-flight coalescer.
         self.cache_size = cache_size
-        self._cache = OrderedDict()
-        self._inflight = set()
+        self._inflight = {}
         self._condition = Condition(RLock())
 
     def run(self, key, revision, runner):
         key = tuple(key)
         with self._condition:
-            cached = self._cache.get(key)
-            if cached is not None:
-                self._cache.move_to_end(key)
-                return cached
-            while key in self._inflight:
-                self._condition.wait()
-                cached = self._cache.get(key)
-                if cached is not None:
-                    self._cache.move_to_end(key)
-                    return cached
-            self._inflight.add(key)
+            flight = self._inflight.get(key)
+            if flight is not None:
+                while not flight.done:
+                    self._condition.wait()
+                if flight.error is not None:
+                    raise flight.error
+                return flight.result
+            flight = InFlightResult()
+            self._inflight[key] = flight
             if not self.coordinator.begin(key, revision):
-                self._inflight.remove(key)
+                self._inflight.pop(key, None)
                 raise RuntimeError("formula flight coordination failed")
         try:
             result = runner()
-        except Exception:
+        except Exception as exc:
             with self._condition:
-                self._inflight.discard(key)
+                flight.error = exc
+                flight.done = True
+                self._inflight.pop(key, None)
                 self.coordinator.finish(key, revision)
                 self._condition.notify_all()
             raise
         with self._condition:
-            self._cache[key] = result
-            self._cache.move_to_end(key)
-            while len(self._cache) > self.cache_size:
-                self._cache.popitem(last=False)
-            self._inflight.discard(key)
+            flight.result = result
+            flight.done = True
+            self._inflight.pop(key, None)
             self.coordinator.finish(key, revision)
             self._condition.notify_all()
         return result
 
     def clear(self):
         with self._condition:
-            self._cache.clear()
+            # Only completed results used to be retained here.  There is no
+            # persistent result cache to clear under the in-flight-only model.
+            self._condition.notify_all()

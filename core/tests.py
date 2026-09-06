@@ -29,7 +29,7 @@ from formula_editor.models import Formula
 from .market_indices import INDEX_DEFINITIONS, FutuOpenDIndexAdapter, convert_snapshot_frame
 from .models import AccountProfile, MarketSymbol, WatchlistEntry
 from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
-from .views import _watchlist_create, bar_rows, formula_run_registry
+from .views import _watchlist_create, bar_rows, formula_run_registry, merge_calculation_snapshot_rows
 from .watchlist import resolve_account_tier, resolve_watchlist_limit
 from .realtime import (
     FutuRealtimeProvider,
@@ -1630,6 +1630,30 @@ class RealtimeCoreContractTests(TestCase):
         live = store.set_status(key, "live", source="futu-opend")
         self.assertLess(connecting.revision, live.revision)
 
+    def test_state_payload_and_calculation_snapshot_share_process_epoch(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        state, _ = store.apply_bar(key, self.bar(100))
+        snapshot = store.capture(key)
+        self.assertTrue(store.epoch)
+        self.assertEqual(state.epoch, store.epoch)
+        self.assertEqual(state.to_dict()["epoch"], store.epoch)
+        self.assertEqual(snapshot.epoch, store.epoch)
+
+    def test_lower_revision_from_new_epoch_is_a_new_authority_generation(self):
+        first = RealtimeStateStore()
+        second = RealtimeStateStore()
+        self.assertNotEqual(first.epoch, second.epoch)
+        first_key = ("test-provider", "SH.600519", "1分")
+        second_key = ("test-provider", "SH.600519", "1分")
+        for index in range(500):
+            first.apply_bar(first_key, self.bar(100 + index))
+        first_snapshot = first.capture(first_key)
+        second_snapshot = second.capture(second_key)
+        self.assertEqual(first_snapshot.revision, 500)
+        self.assertEqual(second_snapshot.revision, 0)
+        self.assertNotEqual(first_snapshot.epoch, second_snapshot.epoch)
+
     def test_formula_flight_isolated_by_symbol_period_and_formula(self):
         coordinator = FormulaFlightCoordinator()
         self.assertTrue(coordinator.begin(("A", "1分", "MA"), 1))
@@ -1785,6 +1809,20 @@ class RealtimeCoreContractTests(TestCase):
         self.assertEqual(captured.current_bar.close, 10)
         self.assertEqual(store.capture(key).revision, 2)
 
+    def test_formula_history_is_bounded_by_captured_current_bar(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, close=100))
+        snapshot = store.capture(key)
+        history = [
+            {"time": 100, "open": 100, "high": 101, "low": 99, "close": 105, "volume": 10},
+            {"time": 101, "open": 101, "high": 102, "low": 100, "close": 102, "volume": 20},
+        ]
+        bounded = merge_calculation_snapshot_rows(history, snapshot)
+        self.assertEqual([row["time"] for row in bounded], [100])
+        self.assertEqual(bounded[0]["close"], 100)
+        self.assertEqual(bounded[0]["volume"], 100)
+
     def test_indicator_response_revision_matches_captured_calculation_snapshot(self):
         user = get_user_model().objects.create_user(username="realtime-formula-user", password="Valid-password-123")
         client = Client()
@@ -1805,6 +1843,7 @@ class RealtimeCoreContractTests(TestCase):
             response = client.get("/api/indicator-render/TEST/SH.600519/?period=1%E5%88%86&count=100&revision=1")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["revision"], 1)
+        self.assertEqual(response.json()["epoch"], store.epoch)
         self.assertNotIn("PUBLIC_FIXTURE", response.content.decode("utf-8"))
 
     def test_formula_run_registry_deduplicates_same_revision_subprocess(self):
@@ -1835,6 +1874,73 @@ class RealtimeCoreContractTests(TestCase):
         self.assertEqual(results, [{"drawing": "shared"}, {"drawing": "shared"}])
         self.assertEqual(registry.coordinator.state(("SH.600519", "1分", "FORMULA", 1, 7)).active_revision, None)
 
+        def fresh_runner():
+            calls.append(True)
+            return {"drawing": "fresh"}
+
+        self.assertEqual(registry.run(("SH.600519", "1分", "FORMULA", 1, 7), 7, fresh_runner), {"drawing": "fresh"})
+        self.assertEqual(len(calls), 2)
+
+    def test_formula_registry_inflight_error_is_shared_but_not_cached(self):
+        registry = FormulaRunRegistry()
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def runner():
+            calls.append(True)
+            started.set()
+            release.wait(timeout=1)
+            raise RuntimeError("fixture failure")
+
+        errors = []
+
+        def invoke():
+            try:
+                registry.run(("SH.600519", "1分", "FORMULA", 1, 8), 8, runner)
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        first = threading.Thread(target=invoke)
+        second = threading.Thread(target=invoke)
+        first.start()
+        self.assertTrue(started.wait(timeout=1))
+        second.start()
+        release.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+        self.assertEqual(calls, [True])
+        self.assertEqual(errors, ["fixture failure", "fixture failure"])
+        with self.assertRaises(RuntimeError):
+            registry.run(("SH.600519", "1分", "FORMULA", 1, 8), 8, runner)
+        self.assertEqual(len(calls), 2)
+
+    def test_provider_reconnect_failure_publishes_terminal_unavailable(self):
+        class FailingContext:
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def get_global_state(self):
+                return -1, "health failed"
+
+            def close(self):
+                return None
+
+            def subscribe(self, *args, **kwargs):
+                return RET_OK, ""
+
+            def get_cur_kline(self, *args, **kwargs):
+                return -1, "snapshot failed"
+
+        events = []
+        provider = FutuRealtimeProvider(context_factory=FailingContext)
+        provider._context = FailingContext()
+        provider._callbacks[("SH.600519", "1分")] = {events.append}
+        provider._status = "live"
+        self.assertEqual(provider.health_check(), "unavailable")
+        self.assertEqual(provider.status, "unavailable")
+        self.assertEqual(events[-1]["status"], "unavailable")
+
     def test_realtime_stream_requires_terminal_session_for_anonymous(self):
         response = Client().get("/api/realtime/market-stream/SH.600519/?period=1分")
         self.assertEqual(response.status_code, 401)
@@ -1855,6 +1961,9 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("eventSource?.close()", source)
         self.assertIn("visibilitychange", source)
         self.assertIn("realtimeRevision", source)
+        self.assertIn("realtimeEpoch", source)
+        self.assertIn("last_closed_bar", source)
+        self.assertIn("reconcileRealtimeVersion", source)
         self.assertIn("formulaPendingRevision", source)
         self.assertIn("createRealtimeUiBuffer", source)
         self.assertIn("flushMs: 300", source)
@@ -1867,6 +1976,7 @@ class RealtimeSourceContractTests(SimpleTestCase):
         source = (Path(settings.BASE_DIR) / "frontend" / "src" / "realtime" / "realtimeUiBuffer.mjs").read_text(encoding="utf-8")
         self.assertIn("REALTIME_UI_FLUSH_MS = 300", source)
         self.assertIn("latest = payload", source)
+        self.assertIn("mergeRealtimeBars", source)
         self.assertIn("isPaused", source)
         self.assertIn("flushCount", source)
 
@@ -1879,7 +1989,10 @@ class RealtimeSourceContractTests(SimpleTestCase):
     def test_formula_render_parses_revision_and_uses_capture_and_run_registry(self):
         source = (Path(settings.BASE_DIR) / "core" / "views.py").read_text(encoding="utf-8")
         self.assertIn('request.GET.get("revision", 0)', source)
+        self.assertIn('request.GET.get("epoch", "")', source)
         self.assertIn("state_store.capture", source)
+        self.assertIn("merge_calculation_snapshot_rows", source)
+        self.assertIn("calculation_snapshot.epoch", source)
         self.assertIn("formula_run_registry.run", source)
 
     def test_bar_rows_preserves_missing_fields_and_real_zero(self):

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { createRealtimeUiBuffer, REALTIME_UI_FLUSH_MS } from './realtimeUiBuffer.mjs'
+import { createRealtimeUiBuffer, mergeRealtimeBars, REALTIME_UI_FLUSH_MS } from './realtimeUiBuffer.mjs'
+import { reconcileRealtimeVersion } from './realtimeGeneration.mjs'
 
 const timers = []
 const flushed = []
@@ -31,5 +32,35 @@ assert.equal(buffer.flush(), false)
 paused = false
 assert.equal(buffer.flush(), true)
 assert.equal(flushed.at(-1).revision, 101)
+
+const restarted = reconcileRealtimeVersion('epoch-a', 500, { epoch: 'epoch-b', revision: 1 })
+assert.equal(restarted.accepted, true)
+assert.equal(restarted.epoch, 'epoch-b')
+const staleSameGeneration = reconcileRealtimeVersion('epoch-b', 5, { epoch: 'epoch-b', revision: 4 })
+assert.equal(staleSameGeneration.accepted, false)
+
+const boundaryBars = [{ time: 100, close: 100, volume: 900 }]
+const boundaryPayload = {
+  last_closed_bar: { time: 100, close: 100.5, volume: 1000 },
+  bar: { time: 101, close: 101, volume: 20 },
+}
+const boundaryResult = mergeRealtimeBars(boundaryBars, boundaryPayload)
+assert.deepEqual(boundaryResult, [
+  { time: 100, close: 100.5, volume: 1000 },
+  { time: 101, close: 101, volume: 20 },
+])
+
+const staleBufferTimers = []
+const staleFlushes = []
+const staleBuffer = createRealtimeUiBuffer({
+  setTimeoutFn: callback => { staleBufferTimers.push(callback); return staleBufferTimers.length - 1 },
+  clearTimeoutFn: () => {},
+  onFlush: (payload, generation) => staleFlushes.push({ payload, generation }),
+})
+staleBuffer.push({ status: 'live', revision: 9 }, 1)
+staleBuffer.clear()
+staleBuffer.push({ status: 'unavailable', revision: 10 }, 2)
+staleBufferTimers.at(-1)()
+assert.deepEqual(staleFlushes, [{ payload: { status: 'unavailable', revision: 10 }, generation: 2 }])
 
 console.log('realtime UI buffer coalescing: 100 events -> 2 flushes')

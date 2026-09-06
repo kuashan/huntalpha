@@ -5,7 +5,8 @@ import { TongdaxinStickPrimitive } from '../indicators/TongdaxinStickPrimitive'
 import { TongdaxinTextPrimitive } from '../indicators/TongdaxinTextPrimitive'
 import { TongdaxinFixedTextPrimitive } from '../indicators/TongdaxinFixedTextPrimitive'
 import { commonDrawing } from '../indicators/commonIndicators'
-import { createRealtimeUiBuffer } from '../realtime/realtimeUiBuffer.mjs'
+import { createRealtimeUiBuffer, mergeRealtimeBars } from '../realtime/realtimeUiBuffer.mjs'
+import { reconcileRealtimeVersion } from '../realtime/realtimeGeneration.mjs'
 
 const props = defineProps({
   symbol: Object,
@@ -44,7 +45,9 @@ let hasMoreHistory = false
 let loadingHistory = false
 let renderedItems = []
 let layerRefs = new Map()
+let realtimeEpoch = ''
 let realtimeRevision = 0
+let realtimeStatusGeneration = 0
 let formulaTimer
 let formulaInFlight = false
 let formulaPendingRevision = 0
@@ -77,9 +80,11 @@ function saveSubPaneHeights(rendered) {
 
 async function requestFormulaDrawing(item, bars, revision = 0) {
   try {
-    const reply = await fetch(`http://127.0.0.1:8003/api/indicator-render/${encodeURIComponent(item.code)}/${props.symbol.code}/?period=${encodeURIComponent(props.period)}&count=${bars.length}&revision=${revision}`, { credentials: 'include' })
+    const params = new URLSearchParams({ period: props.period, count: String(bars.length), revision: String(revision) })
+    if (realtimeEpoch) params.set('epoch', realtimeEpoch)
+    const reply = await fetch(`http://127.0.0.1:8003/api/indicator-render/${encodeURIComponent(item.code)}/${props.symbol.code}/?${params}`, { credentials: 'include' })
     const payload = await reply.json()
-    if (reply.ok) return { item, drawing: payload.drawing, revision: Number(payload.revision || revision) }
+    if (reply.ok) return { item, drawing: payload.drawing, epoch: payload.epoch || '', revision: Number(payload.revision || revision) }
     renderErrors.value.push(`${item.name}：${payload.error || '指标计算失败'}`)
   } catch {
     renderErrors.value.push(`${item.name}：无法连接指标计算服务`)
@@ -89,14 +94,57 @@ async function requestFormulaDrawing(item, bars, revision = 0) {
 
 async function requestDrawings(bars, revision = 0) {
   renderErrors.value = []
-  return (await Promise.all(props.installedIndicators.map(async item => {
+  const results = (await Promise.all(props.installedIndicators.map(async item => {
     if (item.common) return { item, drawing: commonDrawing(item.code, bars), revision }
     return requestFormulaDrawing(item, bars, revision)
   }))).filter(Boolean)
+  const responseEpoch = results.find(result => result.epoch)?.epoch
+  if (responseEpoch && !realtimeEpoch) acceptRealtimeEpoch(responseEpoch)
+  return results
 }
 
 const chartKey = () => `${props.symbol?.code || ''}:${props.period || ''}`
 const orderedUniqueBars = bars => [...new Map(bars.map(bar => [bar.time, bar])).values()].sort((left, right) => left.time - right.time)
+
+function cancelFormulaWork() {
+  if (formulaTimer) window.clearTimeout(formulaTimer)
+  formulaTimer = undefined
+  formulaPendingRevision = 0
+  formulaRunToken += 1
+  formulaInFlight = false
+}
+
+function acceptRealtimeEpoch(epoch) {
+  const incoming = String(epoch || '').trim()
+  if (!incoming) return false
+  if (!realtimeEpoch) {
+    realtimeEpoch = incoming
+    return true
+  }
+  if (incoming === realtimeEpoch) return true
+  realtimeEpoch = incoming
+  realtimeRevision = 0
+  realtimeStatusGeneration += 1
+  realtimeUiBuffer?.clear()
+  cancelFormulaWork()
+  return true
+}
+
+function setRealtimeStatus(status) {
+  if (!status) return
+  if (status === 'connecting' || status === 'reconnecting' || status === 'unavailable') {
+    realtimeStatusGeneration += 1
+    realtimeUiBuffer?.clear()
+  }
+  realtimeStatus.value = status
+}
+
+function acceptRealtimeVersion(payload) {
+  const decision = reconcileRealtimeVersion(realtimeEpoch, realtimeRevision, payload)
+  if (!decision.accepted) return false
+  if (decision.changed) acceptRealtimeEpoch(decision.epoch)
+  return true
+}
 
 async function fetchKlinePage(before = null) {
   const query = new URLSearchParams({ period: props.period, count: '1000' })
@@ -308,6 +356,10 @@ async function runFormulaRefresh() {
   const items = props.installedIndicators.filter(item => !item.common)
   try {
     const results = (await Promise.all(items.map(item => requestFormulaDrawing(item, bars, requestRevision)))).filter(Boolean)
+    const responseEpoch = results.find(result => result.epoch)?.epoch
+    if (responseEpoch && !realtimeEpoch) acceptRealtimeEpoch(responseEpoch)
+    if (responseEpoch && responseEpoch !== realtimeEpoch) return
+    if (results.some(result => result.epoch && result.epoch !== realtimeEpoch)) return
     const latestResponseRevision = results.reduce((latest, result) => Math.max(latest, result.revision), requestRevision)
     if (runToken !== formulaRunToken || generation !== drawVersion || latestResponseRevision < realtimeRevision) return
     results.forEach(applyLayerResult)
@@ -324,49 +376,58 @@ async function runFormulaRefresh() {
   }
 }
 
-function processRealtimePayload(payload) {
+function processRealtimePayload(payload, payloadGeneration = realtimeStatusGeneration) {
   if (!payload || !props.symbol || payload.symbol !== props.symbol.code.toUpperCase() || payload.period !== props.period) return
+  if (payloadGeneration !== realtimeStatusGeneration) return
+  if (!acceptRealtimeVersion(payload)) {
+    setRealtimeStatus('unavailable')
+    return
+  }
   const revision = Number(payload.revision || 0)
   if (revision && revision < realtimeRevision) return
   realtimeRevision = Math.max(realtimeRevision, revision)
   realtimeStatus.value = payload.status || realtimeStatus.value
-  const bar = payload.bar
-  if (!bar || !Number.isFinite(Number(bar.time))) return
-  const normalized = { ...bar, time: Number(bar.time) }
-  const last = loadedBars[loadedBars.length - 1]
-  if (last && normalized.time < last.time) return
-  if (last && normalized.time === last.time) loadedBars = [...loadedBars.slice(0, -1), { ...last, ...normalized }]
-  else loadedBars = orderedUniqueBars([...loadedBars, normalized])
-  if (candleSeries) candleSeries.update(normalized)
+  const hasClosedBar = Number.isFinite(Number(payload.last_closed_bar?.time))
+  const hasCurrentBar = Number.isFinite(Number(payload.bar?.time))
+  if (!hasClosedBar && !hasCurrentBar) return
+  loadedBars = mergeRealtimeBars(loadedBars, payload)
+  if (candleSeries) {
+    if (hasClosedBar) candleSeries.setData(loadedBars)
+    else candleSeries.update({ ...payload.bar, time: Number(payload.bar.time) })
+  }
   refreshBuiltInLayers()
   queueFormulaRefresh(realtimeRevision)
 }
 
 function queueRealtimePayload(payload) {
   if (!payload || !props.symbol || payload.symbol !== props.symbol.code.toUpperCase() || payload.period !== props.period) return
-  const revision = Number(payload.revision || 0)
-  if (revision && revision < realtimeRevision) return
-  if (payload.status && !payload.bar) {
-    realtimeStatus.value = payload.status
+  if (!acceptRealtimeVersion(payload)) {
+    setRealtimeStatus('unavailable')
     return
   }
-  if (realtimeUiBuffer) realtimeUiBuffer.push(payload)
-  else processRealtimePayload(payload)
+  const revision = Number(payload.revision || 0)
+  if (revision && revision < realtimeRevision) return
+  if (payload.type === 'status' || (payload.status && !payload.bar && !payload.last_closed_bar)) {
+    setRealtimeStatus(payload.status)
+    return
+  }
+  if (realtimeUiBuffer) realtimeUiBuffer.push(payload, realtimeStatusGeneration)
+  else processRealtimePayload(payload, realtimeStatusGeneration)
 }
 
 function connectRealtime() {
   if (!props.symbol || !props.period || typeof EventSource === 'undefined') {
-    realtimeStatus.value = 'unavailable'
+    setRealtimeStatus('unavailable')
     return
   }
   const generation = ++streamGeneration
-  realtimeStatus.value = 'connecting'
+  setRealtimeStatus('connecting')
   const url = `http://127.0.0.1:8003/api/realtime/market-stream/${encodeURIComponent(props.symbol.code)}/?period=${encodeURIComponent(props.period)}`
   const source = new EventSource(url, { withCredentials: true })
   eventSource = source
   const handle = event => {
     if (generation !== streamGeneration) return
-    try { queueRealtimePayload(JSON.parse(event.data)) } catch { realtimeStatus.value = 'unavailable' }
+    try { queueRealtimePayload(JSON.parse(event.data)) } catch { setRealtimeStatus('unavailable') }
   }
   source.addEventListener('snapshot', handle)
   source.addEventListener('bar', handle)
@@ -374,7 +435,7 @@ function connectRealtime() {
   source.onmessage = handle
   source.onerror = () => {
     if (generation !== streamGeneration) return
-    realtimeStatus.value = source.readyState === EventSource.CLOSED ? 'unavailable' : 'reconnecting'
+    setRealtimeStatus(source.readyState === EventSource.CLOSED ? 'unavailable' : 'reconnecting')
   }
 }
 
@@ -383,11 +444,7 @@ function disconnectRealtime() {
   eventSource?.close()
   eventSource = undefined
   realtimeUiBuffer?.clear()
-  if (formulaTimer) window.clearTimeout(formulaTimer)
-  formulaTimer = undefined
-  formulaPendingRevision = 0
-  formulaRunToken += 1
-  formulaInFlight = false
+  cancelFormulaWork()
 }
 
 function handleVisibilityChange() {

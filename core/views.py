@@ -568,6 +568,34 @@ def merge_realtime_rows(rows, code, period, calculation_snapshot=None):
     return rows
 
 
+def merge_calculation_snapshot_rows(rows, calculation_snapshot):
+    """Build Formula input bounded by one captured realtime bar.
+
+    Formula calculation must describe the exact state represented by the
+    captured epoch/revision.  A history request can finish after the provider
+    has advanced to a newer bar, so rows newer than the captured current bar
+    are excluded and the captured bar authoritatively replaces any same-time
+    history row.
+    """
+    history = list(rows or [])
+    current = calculation_snapshot.current_bar
+    if current is None:
+        return history
+    captured_time = current.time
+    bounded = {
+        row["time"]: row
+        for row in history
+        if isinstance(row, dict) and isinstance(row.get("time"), (int, float))
+        and row["time"] <= captured_time
+    }
+    captured = {
+        field: getattr(current, field)
+        for field in ("time", "open", "high", "low", "close", "volume", "amount", "turnover_rate")
+    }
+    bounded[captured_time] = {**bounded.get(captured_time, {}), **captured}
+    return [bounded[key] for key in sorted(bounded)]
+
+
 @require_GET
 @api_terminal_required
 def quote(request, code):
@@ -700,7 +728,7 @@ def history_bars(code, period, calculation_snapshot=None):
             return None, None, "自定义公式暂不支持分时；请选择 K 线周期"
         bars, error = request_history_rows(client, code, period)
         if not error:
-            bars = merge_realtime_rows(bars, code, period, calculation_snapshot)
+            bars = merge_calculation_snapshot_rows(bars, calculation_snapshot)
         return bars, live_float_shares(client, code) if not error else None, error
     finally:
         client.close()
@@ -929,15 +957,23 @@ def indicator_render(request, code, symbol):
         requested_revision = max(0, int(request.GET.get("revision", 0)))
     except (TypeError, ValueError):
         return json({"error": "revision 必须是整数", "code": "invalid_revision"}, 400)
+    requested_epoch = str(request.GET.get("epoch", "")).strip()
     # Future functions such as BACKSET and formulas using BARSCOUNT(C)=1
     # need the beginning of the same real OpenD history shown to the chart.
     # Calculate the complete bounded window, then return its visible tail.
     registry = get_realtime_registry()
     calculation_snapshot = registry.state_store.capture(registry.key_for(symbol, period))
+    # A revision from a previous process generation is not comparable with
+    # the current process-local counter.  Recalculate against the current
+    # captured snapshot and return its actual epoch/revision instead of
+    # reporting a misleading "future revision" error.
+    if requested_epoch and requested_epoch != calculation_snapshot.epoch:
+        requested_revision = 0
     if requested_revision > calculation_snapshot.revision:
         return json({
             "error": "实时版本已更新，请重试",
             "code": "revision_not_available",
+            "epoch": calculation_snapshot.epoch,
             "revision": calculation_snapshot.revision,
         }, 409)
     calculation_bars, float_shares, error = history_bars(symbol, period, calculation_snapshot)
@@ -949,7 +985,8 @@ def indicator_render(request, code, symbol):
         formula_id = "builtin-chanlun" if builtin_chanlun else item.code
         formula_version = 1 if builtin_chanlun else item.version
         formula_key = (
-            registry.provider_name, symbol.upper(), period, formula_id, formula_version, calculation_snapshot.revision,
+            registry.provider_name, symbol.upper(), period, formula_id, formula_version,
+            calculation_snapshot.epoch, calculation_snapshot.revision,
         )
 
         def run_formula():
@@ -1045,4 +1082,4 @@ def indicator_render(request, code, symbol):
             if isinstance(row, dict)
         ],
     }
-    return json({"code": "CHANLUN" if builtin_chanlun else item.code, "name": "缠论结构" if builtin_chanlun else item.name, "placement": "main" if builtin_chanlun else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "revision": calculation_snapshot.revision, "engine": formula.get("engine", "tongdaxin"), "source": registry.provider_name, "adjustment": "前复权"})
+    return json({"code": "CHANLUN" if builtin_chanlun else item.code, "name": "缠论结构" if builtin_chanlun else item.name, "placement": "main" if builtin_chanlun else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "epoch": calculation_snapshot.epoch, "revision": calculation_snapshot.revision, "engine": formula.get("engine", "tongdaxin"), "source": registry.provider_name, "adjustment": "前复权"})

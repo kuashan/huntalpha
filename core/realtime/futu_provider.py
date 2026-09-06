@@ -93,13 +93,16 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
             for callback in callbacks:
                 callback(bar)
 
-    def _notify_error(self, message):
+    def _notify_status(self, status, message):
         with self._lock:
-            self._status = "reconnecting"
+            self._status = status
             subscriptions = [(key, list(callbacks)) for key, callbacks in self._callbacks.items()]
         for (symbol, period), callbacks in subscriptions:
             for callback in callbacks:
-                callback({"status": "reconnecting", "error": message, "symbol": symbol, "period": period})
+                callback({"status": status, "error": message, "symbol": symbol, "period": period})
+
+    def _notify_error(self, message, status="reconnecting"):
+        self._notify_status(status, message)
 
     def subscribe(self, symbol, period, callback):
         symbol, period = self._key(symbol, period)
@@ -164,12 +167,11 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
             return self._status
         except Exception as exc:
             self._status = "reconnecting"
-            self._notify_error(str(exc))
+            self._notify_error(str(exc), status="reconnecting")
             try:
                 self.reconnect()
             except Exception as reconnect_error:
-                self._status = "unavailable"
-                self._notify_error(str(reconnect_error))
+                self._notify_error(str(reconnect_error), status="unavailable")
             return self._status
 
     def reconnect(self):
