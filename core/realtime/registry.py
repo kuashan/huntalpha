@@ -35,7 +35,11 @@ class RealtimeRegistry:
         self._last_health_check = 0.0
 
     def _key(self, symbol, period):
-        return (self.provider_name, str(symbol).upper(), period)
+        return (self.provider_name_for(symbol), str(symbol).upper(), period)
+
+    def provider_name_for(self, symbol):
+        resolver = getattr(self.provider, "provider_name_for", None)
+        return resolver(symbol) if resolver else self.provider_name
 
     def key_for(self, symbol, period):
         return self._key(symbol, period)
@@ -58,7 +62,7 @@ class RealtimeRegistry:
             return
         status = event.get("status", "unavailable")
         state = self.state_store.set_status(
-            key, status, mode=event.get("mode", "streaming"), source=event.get("source") or self.provider_name, error=event.get("error"),
+            key, status, mode=event.get("mode", "streaming"), source=event.get("source") or key[0], error=event.get("error"),
         )
         self._publish(key, {"type": "status", **state.to_dict()})
 
@@ -80,7 +84,7 @@ class RealtimeRegistry:
                 subscribed = bool(self._entries[key]["subscribed"])
             else:
                 subscribed = False
-                self.state_store.set_status(key, "connecting", source=self.provider_name)
+                self.state_store.set_status(key, "connecting", source=key[0])
                 try:
                     self.provider.subscribe(symbol, period, lambda event: self._provider_event(key, event))
                 except Exception as exc:
@@ -94,7 +98,7 @@ class RealtimeRegistry:
                         self.provider.unsubscribe(symbol, period)
                     except Exception:
                         pass
-                    self.state_store.set_status(key, "unavailable", source=self.provider_name, error=str(exc))
+                    self.state_store.set_status(key, "unavailable", source=key[0], error=str(exc))
                     raise RealtimeProviderError(str(exc)) from exc
                 self._entries[key]["subscribed"] = True
                 subscribed = True
@@ -103,14 +107,14 @@ class RealtimeRegistry:
             try:
                 bar = self.provider.latest_snapshot(symbol, period)
             except Exception as exc:
-                self.state_store.set_status(key, "reconnecting", source=self.provider_name, error=str(exc))
+                self.state_store.set_status(key, "reconnecting", source=key[0], error=str(exc))
             else:
                 if bar is not None:
                     self._provider_event(key, bar)
 
         state = self.state_store.get(key)
         if state is None or state.status == "connecting":
-            state = self.state_store.set_status(key, "live", mode="streaming", source=self.provider_name)
+            state = self.state_store.set_status(key, "live", mode="streaming", source=key[0])
         consumer.events.put({"type": "status", **state.to_dict()})
         latest = self.state_store.get(key)
         if latest and latest.current_bar:
@@ -144,7 +148,7 @@ class RealtimeRegistry:
             if entry.get("subscribed"):
                 self.provider.unsubscribe(key[1], key[2])
         finally:
-            self.state_store.set_status(key, "unavailable", source=self.provider_name)
+            self.state_store.set_status(key, "unavailable", source=key[0])
 
     def stats(self, key=None):
         with self._lock:
@@ -211,9 +215,14 @@ _default_lock = threading.Lock()
 
 def create_default_realtime_registry(**kwargs):
     """Application composition point for the currently selected provider."""
+    from ..crypto_provider import CoinbaseRealtimeProvider
     from .futu_provider import FutuRealtimeProvider
+    from .router import MarketDataProviderRouter
 
-    return RealtimeRegistry(provider=FutuRealtimeProvider(), **kwargs)
+    return RealtimeRegistry(
+        provider=MarketDataProviderRouter(FutuRealtimeProvider(), CoinbaseRealtimeProvider()),
+        **kwargs,
+    )
 
 
 def get_realtime_registry():

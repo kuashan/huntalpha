@@ -1,6 +1,7 @@
 from django.core.management.base import BaseCommand
 
-from core.symbol_catalog import FutuOpenDAdapter, SUPPORTED_MARKETS, apply_catalog_snapshot
+from core.crypto_provider import CoinbaseCryptoCatalogAdapter
+from core.symbol_catalog import CRYPTO_MARKET, FutuOpenDAdapter, SUPPORTED_MARKETS, apply_catalog_snapshot
 
 
 class Command(BaseCommand):
@@ -11,9 +12,9 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         markets = [options["market"]] if options.get("market") else list(SUPPORTED_MARKETS)
-        provider = FutuOpenDAdapter()
         for market in markets:
             try:
+                provider = CoinbaseCryptoCatalogAdapter() if market == CRYPTO_MARKET else FutuOpenDAdapter()
                 snapshot = provider.fetch_market(market)
                 stats = apply_catalog_snapshot(snapshot)
             except Exception as exc:

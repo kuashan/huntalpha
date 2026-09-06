@@ -173,11 +173,11 @@
 
 要求：所有权益必须由真实后端 entitlement 决定；没有真实 entitlement 时不能伪造 PRO 状态。
 
-### Task 005.1.4 — Coinbase Crypto Market Data
+### Task 005.1.4 — Crypto Market Data Foundation
 
-状态：`PLANNED`
+状态：`IN_PROGRESS`
 
-规划关系：先由 Task 005.1.3 建立 realtime pipeline，再实现 Coinbase adapter，接入统一管线并提供 BTC / ETH 真实行情、实时 K 线与指标联动。本任务当前不实现 Coinbase。
+Task 005.1.3 的 stacked implementation branch 已开始接入 Coinbase 第一批真实加密资产（BTC-USD / ETH-USD）。本任务沿用统一 MarketSymbol、Watchlist、Kline、Indicator、Formula 和 RealtimeRegistry 管线，不创建第二套 Crypto runtime；当前仍保留 Task 005.1.3 的 `IN_PROGRESS` 状态，等待其 Futu 真实交易时段最终验证。
 
 ---
 

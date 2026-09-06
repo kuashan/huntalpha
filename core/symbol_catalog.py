@@ -11,6 +11,7 @@ from .models import MarketSymbol
 
 
 FUTU_PROVIDER = "futu-opend"
+COINBASE_PROVIDER = "coinbase"
 MAX_MARKET_CAP_ROWS = 200
 
 
@@ -28,7 +29,8 @@ MARKET_DEFINITIONS = {
     "hk": MarketDefinition("hk", "港股", (Market.HK,), (Market.HK,), "HKD"),
     "us": MarketDefinition("us", "美股", (Market.US,), (Market.US,), "USD"),
 }
-SUPPORTED_MARKETS = tuple(MARKET_DEFINITIONS)
+CRYPTO_MARKET = "crypto"
+SUPPORTED_MARKETS = tuple(MARKET_DEFINITIONS) + (CRYPTO_MARKET,)
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class ProviderSymbol:
     provider: str = FUTU_PROVIDER
     market_cap_currency: str | None = None
     market_cap_eligible: bool = True
+    provider_symbol: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,7 @@ class ProviderCatalogSnapshot:
     market_caps: dict
     market_cap_error: str | None = None
     market_cap_reset_codes: tuple = ()
+    provider: str = FUTU_PROVIDER
 
 
 class ProviderSyncError(RuntimeError):
@@ -186,6 +190,7 @@ class FutuOpenDAdapter:
                     active=not _truthy(_field(row, "delisting", False)),
                     market_cap_currency=provider_currency or (None if alternate_counter else definition.currency),
                     market_cap_eligible=not alternate_counter,
+                    provider_symbol=code,
                 ))
         return tuple(rows)
 
@@ -302,7 +307,7 @@ def apply_catalog_snapshot(snapshot, now=None):
                 "security_type": item.security_type,
                 "active": item.active,
                 "provider": item.provider,
-                "provider_symbol": item.code,
+                "provider_symbol": item.provider_symbol or item.code,
                 "market_cap": market_cap,
                 "market_cap_currency": currency,
             }
@@ -333,7 +338,7 @@ def apply_catalog_snapshot(snapshot, now=None):
             MarketSymbol.objects.bulk_update(changed_items, fields=SYNC_FIELDS, batch_size=500)
         inactive = MarketSymbol.objects.filter(
             market=snapshot.market,
-            provider=FUTU_PROVIDER,
+            provider=snapshot.provider,
             active=True,
         ).exclude(code__in=codes)
         inactive_count = inactive.update(active=False, catalog_updated_at=now)
