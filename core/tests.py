@@ -2324,6 +2324,10 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("getVisibleLogicalRange", source)
         self.assertIn("latestRealtimePayloadGeneration", source)
         self.assertIn("cancelFormulaWork()", source)
+        self.assertIn("invalidateFormulaResults({ clearPending: false })", source)
+        self.assertIn("formulaRefreshPending", source)
+        self.assertIn("historyReconcilePendingGeneration", source)
+        self.assertIn("settleHistoryReconcile", source)
         self.assertNotIn("applyRealtimePayload", source)
         self.assertGreaterEqual(source.count("chart?.remove()"), 2)
 

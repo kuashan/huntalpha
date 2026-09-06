@@ -7,6 +7,8 @@ import { TongdaxinFixedTextPrimitive } from '../indicators/TongdaxinFixedTextPri
 import { commonDrawing } from '../indicators/commonIndicators'
 import { createRealtimeUiBuffer, mergeHistoricalTail, mergeRealtimePayload } from '../realtime/realtimeUiBuffer.mjs'
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from '../realtime/realtimeGeneration.mjs'
+import { settleHistoryReconcile } from '../realtime/historyRecovery.mjs'
+import { isCurrentFormulaResult, shouldScheduleFormulaRefresh } from '../realtime/formulaRefreshScheduler.mjs'
 
 const props = defineProps({
   symbol: Object,
@@ -51,13 +53,14 @@ let realtimeStatusGeneration = 0
 let formulaTimer
 let formulaInFlight = false
 let formulaPendingRevision = 0
+let formulaRefreshPending = false
 let formulaRunToken = 0
 let realtimeUiBuffer
 let latestRealtimePayload
 let latestRealtimePayloadGeneration = 0
 let realtimePayloadSequence = 0
 let historyReconcileInFlight = false
-let historyReconcilePending = false
+let historyReconcilePendingGeneration = null
 let pendingRecoveryLiveStatus = false
 let needsHistoryReconcile = false
 let historyReconcileRetryTimer
@@ -118,12 +121,18 @@ async function requestDrawings(bars, revision = 0) {
 const chartKey = () => `${props.symbol?.code || ''}:${props.period || ''}`
 const orderedUniqueBars = bars => [...new Map(bars.map(bar => [bar.time, bar])).values()].sort((left, right) => left.time - right.time)
 
-function cancelFormulaWork() {
+function invalidateFormulaResults({ clearPending = true } = {}) {
   if (formulaTimer) window.clearTimeout(formulaTimer)
   formulaTimer = undefined
-  formulaPendingRevision = 0
+  if (clearPending) {
+    formulaPendingRevision = 0
+    formulaRefreshPending = false
+  }
   formulaRunToken += 1
-  formulaInFlight = false
+}
+
+function cancelFormulaWork() {
+  invalidateFormulaResults()
 }
 
 function clearHistoryReconcileRetry() {
@@ -138,16 +147,16 @@ function markHistoryReconcileNeeded() {
 
 function cancelHistoryReconcile({ clearLatch = false } = {}) {
   clearHistoryReconcileRetry()
-  historyReconcilePending = false
+  historyReconcilePendingGeneration = null
   if (clearLatch) needsHistoryReconcile = false
 }
 
-function scheduleHistoryReconcileRetry(streamGenerationAtStart = streamGeneration) {
+function scheduleHistoryReconcileRetry() {
   if (historyReconcileRetryTimer || document.hidden || !needsHistoryReconcile) return
   historyReconcileRetryTimer = window.setTimeout(() => {
     historyReconcileRetryTimer = undefined
-    if (document.hidden || streamGenerationAtStart !== streamGeneration || !needsHistoryReconcile || !props.symbol || !chart) return
-    requestHistoryTailReconcile(streamGenerationAtStart)
+    if (document.hidden || !needsHistoryReconcile || !props.symbol || !chart) return
+    requestHistoryTailReconcile(streamGeneration)
   }, HISTORY_RECONCILE_RETRY_MS)
 }
 
@@ -398,6 +407,7 @@ function refreshBuiltInLayers() {
 function queueFormulaRefresh(revision) {
   if (!props.installedIndicators.some(item => !item.common) || !chart) return
   formulaPendingRevision = Math.max(formulaPendingRevision, Number(revision || 0))
+  formulaRefreshPending = true
   if (formulaTimer || formulaInFlight) return
   formulaTimer = window.setTimeout(() => {
     formulaTimer = undefined
@@ -413,6 +423,7 @@ async function runFormulaRefresh() {
   const requestRevision = formulaPendingRevision
   const requestedEpoch = realtimeEpoch
   formulaPendingRevision = 0
+  formulaRefreshPending = false
   const bars = loadedBars.slice()
   const items = props.installedIndicators.filter(item => !item.common)
   try {
@@ -421,13 +432,18 @@ async function runFormulaRefresh() {
     if (responseEpoch && !acceptFormulaResponseEpoch(responseEpoch, requestedEpoch)) return
     if (results.some(result => result.epoch && result.epoch !== realtimeEpoch)) return
     const latestResponseRevision = results.reduce((latest, result) => Math.max(latest, result.revision), requestRevision)
-    if (runToken !== formulaRunToken || generation !== drawVersion || latestResponseRevision < realtimeRevision) return
+    if (!isCurrentFormulaResult({ runToken, currentRunToken: formulaRunToken, generation, currentGeneration: drawVersion }) || latestResponseRevision < realtimeRevision) return
     results.forEach(applyLayerResult)
     setCandleMode(renderedItems)
   } finally {
-    if (runToken !== formulaRunToken) return
     formulaInFlight = false
-    if (formulaPendingRevision && !formulaTimer) {
+    if (shouldScheduleFormulaRefresh({
+      pendingRevision: formulaPendingRevision,
+      refreshPending: formulaRefreshPending,
+      timerActive: Boolean(formulaTimer),
+      hasChart: Boolean(chart),
+      hasSymbol: Boolean(props.symbol),
+    })) {
       formulaTimer = window.setTimeout(() => {
         formulaTimer = undefined
         runFormulaRefresh()
@@ -485,7 +501,7 @@ function queueRealtimePayload(payload) {
 
 async function reconcileHistoryTail(streamGenerationAtStart = streamGeneration) {
   if (historyReconcileInFlight) {
-    historyReconcilePending = true
+    historyReconcilePendingGeneration = streamGenerationAtStart
     return
   }
   const version = drawVersion
@@ -519,7 +535,7 @@ async function reconcileHistoryTail(streamGenerationAtStart = streamGeneration) 
     const visibleRange = chart?.timeScale().getVisibleLogicalRange()
     loadedBars = merged.bars
     if (merged.changed) {
-      cancelFormulaWork()
+      invalidateFormulaResults({ clearPending: false })
       if (candleSeries) {
         candleSeries.setData(loadedBars)
         if (visibleRange) chart?.timeScale().setVisibleLogicalRange(visibleRange)
@@ -532,19 +548,29 @@ async function reconcileHistoryTail(streamGenerationAtStart = streamGeneration) 
     if (version === drawVersion && key === chartKey() && streamGenerationAtStart === streamGeneration) {
       needsHistoryReconcile = true
       if (realtimeStatus.value !== 'unavailable') realtimeStatus.value = 'reconnecting'
-      scheduleHistoryReconcileRetry(streamGenerationAtStart)
+      scheduleHistoryReconcileRetry()
     } else {
       current = false
     }
   } finally {
     historyReconcileInFlight = false
-    if (!current) return
-    if (historyReconcilePending) {
-      historyReconcilePending = false
+    const recovery = settleHistoryReconcile({
+      current,
+      pendingGeneration: historyReconcilePendingGeneration,
+      currentGeneration: streamGeneration,
+      needsHistoryReconcile,
+      hidden: document.hidden,
+      hasChart: Boolean(chart),
+      hasSymbol: Boolean(props.symbol),
+    })
+    historyReconcilePendingGeneration = null
+    if (recovery.action === 'reconcile') {
       needsHistoryReconcile = true
-      if (!document.hidden && props.symbol && chart) requestHistoryTailReconcile(streamGeneration)
-      else scheduleHistoryReconcileRetry(streamGeneration)
-    } else if (succeeded) {
+      requestHistoryTailReconcile(recovery.generation)
+    } else if (recovery.action === 'retry') {
+      needsHistoryReconcile = true
+      scheduleHistoryReconcileRetry()
+    } else if (recovery.action === 'complete' && succeeded) {
       needsHistoryReconcile = false
       clearHistoryReconcileRetry()
       pendingRecoveryLiveStatus = false
@@ -556,7 +582,7 @@ async function reconcileHistoryTail(streamGenerationAtStart = streamGeneration) 
 function requestHistoryTailReconcile(streamGenerationAtStart = streamGeneration) {
   markHistoryReconcileNeeded()
   if (historyReconcileInFlight) {
-    historyReconcilePending = true
+    historyReconcilePendingGeneration = streamGenerationAtStart
     return
   }
   void reconcileHistoryTail(streamGenerationAtStart)

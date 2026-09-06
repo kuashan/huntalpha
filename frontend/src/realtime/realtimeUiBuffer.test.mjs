@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createRealtimeUiBuffer, mergeHistoricalTail, mergeRealtimeBars, mergeRealtimePayload, REALTIME_UI_FLUSH_MS } from './realtimeUiBuffer.mjs'
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from './realtimeGeneration.mjs'
+import { settleHistoryReconcile } from './historyRecovery.mjs'
+import { isCurrentFormulaResult, shouldScheduleFormulaRefresh } from './formulaRefreshScheduler.mjs'
 
 const timers = []
 const flushed = []
@@ -104,36 +106,50 @@ const latestPayloadCorrection = mergeHistoricalTail(
 )
 assert.equal(latestPayloadCorrection.bars.at(-1).close, 102)
 
-const recovery = { needs: false, inFlight: false, retryTimer: false, status: 'live' }
-const requestRecovery = () => {
-  recovery.needs = true
-  if (recovery.inFlight) return
-  recovery.inFlight = true
-  recovery.status = 'reconnecting'
-}
-const failRecovery = () => {
-  recovery.inFlight = false
-  recovery.needs = true
-  recovery.retryTimer = true
-  recovery.status = 'reconnecting'
-}
-const succeedRecovery = () => {
-  recovery.inFlight = false
-  recovery.needs = false
-  recovery.retryTimer = false
-  recovery.status = 'live'
-}
-requestRecovery()
-failRecovery()
-assert.deepEqual(recovery, { needs: true, inFlight: false, retryTimer: true, status: 'reconnecting' })
-requestRecovery()
-succeedRecovery()
-assert.deepEqual(recovery, { needs: false, inFlight: false, retryTimer: false, status: 'live' })
+assert.deepEqual(settleHistoryReconcile({
+  current: false,
+  pendingGeneration: 1,
+  currentGeneration: 2,
+  needsHistoryReconcile: true,
+  hidden: false,
+  hasChart: true,
+  hasSymbol: true,
+}), { action: 'reconcile', generation: 2, needsHistoryReconcile: true })
+assert.deepEqual(settleHistoryReconcile({
+  current: false,
+  pendingGeneration: null,
+  currentGeneration: 3,
+  needsHistoryReconcile: true,
+  hidden: true,
+  hasChart: true,
+  hasSymbol: true,
+}), { action: 'retry', generation: 3, needsHistoryReconcile: true })
+assert.deepEqual(settleHistoryReconcile({
+  current: true,
+  pendingGeneration: null,
+  currentGeneration: 4,
+  needsHistoryReconcile: true,
+  hidden: false,
+  hasChart: true,
+  hasSymbol: true,
+}), { action: 'complete', generation: 4, needsHistoryReconcile: false })
 
-let formulaRunToken = 1
-const staleFormulaToken = formulaRunToken
-formulaRunToken += 1
-assert.notEqual(staleFormulaToken, formulaRunToken)
+assert.equal(shouldScheduleFormulaRefresh({ pendingRevision: 0, refreshPending: true, timerActive: false, hasChart: true, hasSymbol: true }), true)
+assert.equal(shouldScheduleFormulaRefresh({ pendingRevision: 100, refreshPending: false, timerActive: false, hasChart: true, hasSymbol: true }), true)
+assert.equal(shouldScheduleFormulaRefresh({ pendingRevision: 100, refreshPending: true, timerActive: true, hasChart: true, hasSymbol: true }), false)
+assert.equal(isCurrentFormulaResult({ runToken: 10, currentRunToken: 11, generation: 1, currentGeneration: 1 }), false)
+assert.equal(isCurrentFormulaResult({ runToken: 11, currentRunToken: 11, generation: 1, currentGeneration: 1 }), true)
+const physicalFormula = { inFlight: true, runToken: 10, pendingRevision: 0, refreshPending: false }
+const invalidatedFormula = { ...physicalFormula, runToken: 11, pendingRevision: 100, refreshPending: true }
+assert.equal(invalidatedFormula.inFlight, true)
+const finishedStaleFormula = { ...invalidatedFormula, inFlight: false }
+assert.equal(shouldScheduleFormulaRefresh({
+  pendingRevision: finishedStaleFormula.pendingRevision,
+  refreshPending: finishedStaleFormula.refreshPending,
+  timerActive: false,
+  hasChart: true,
+  hasSymbol: true,
+}), true)
 
 const marketChartSource = readFileSync(new URL('../components/MarketChart.vue', import.meta.url), 'utf8')
 assert.match(marketChartSource, /needsHistoryReconcile/)
@@ -143,7 +159,19 @@ const reconcileSource = marketChartSource.slice(
   marketChartSource.indexOf('async function reconcileHistoryTail'),
   marketChartSource.indexOf('function requestHistoryTailReconcile'),
 )
-assert.ok(reconcileSource.indexOf('cancelFormulaWork()') < reconcileSource.indexOf('queueFormulaRefresh'))
+assert.ok(reconcileSource.indexOf('invalidateFormulaResults({ clearPending: false })') < reconcileSource.indexOf('queueFormulaRefresh'))
+assert.match(marketChartSource, /historyReconcilePendingGeneration/)
+assert.match(marketChartSource, /formulaRefreshPending/)
+assert.match(marketChartSource, /formulaInFlight = false/)
+const formulaRunSource = marketChartSource.slice(
+  marketChartSource.indexOf('async function runFormulaRefresh'),
+  marketChartSource.indexOf('function processRealtimePayload'),
+)
+assert.ok(formulaRunSource.indexOf('formulaInFlight = false') < formulaRunSource.indexOf('shouldScheduleFormulaRefresh'))
+assert.doesNotMatch(formulaRunSource, /if \(runToken !== formulaRunToken\) return/)
+assert.match(formulaRunSource, /if \(formulaInFlight \|\| !props\.symbol \|\| !chart\) return/)
+assert.equal((formulaRunSource.match(/formulaInFlight = true/g) || []).length, 1)
+assert.equal((formulaRunSource.match(/formulaInFlight = false/g) || []).length, 1)
 
 const staleBufferTimers = []
 const staleFlushes = []
