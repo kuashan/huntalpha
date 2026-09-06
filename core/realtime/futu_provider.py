@@ -24,6 +24,7 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
         self._callbacks = {}
         self._status = "unavailable"
         self._connection_generation = 0
+        self._reconnect_lock = threading.Lock()
 
     @property
     def connection_generation(self):
@@ -32,7 +33,8 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
 
     @property
     def status(self):
-        return self._status
+        with self._lock:
+            return self._status
 
     def _ensure_context(self):
         with self._lock:
@@ -189,54 +191,70 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
         with self._lock:
             context = self._context
             keys = list(self._callbacks)
-        if context is None or not keys:
-            return self._status
+            generation = self._connection_generation
+            status = self._status
+        if not keys:
+            return status
+        if context is None:
+            self._notify_error("OpenD context unavailable", status="reconnecting", generation=generation)
+            try:
+                self.reconnect()
+            except Exception as reconnect_error:
+                self._notify_error(str(reconnect_error), status="unavailable", generation=self.connection_generation)
+            return self.status
         try:
             ret, _ = context.get_global_state()
             if ret != RET_OK:
                 raise RealtimeProviderError("OpenD health check failed")
-            self._status = "live"
-            return self._status
+            with self._lock:
+                if generation != self._connection_generation or context is not self._context:
+                    return self._status
+                self._status = "live"
+                return self._status
         except Exception as exc:
-            self._status = "reconnecting"
-            self._notify_error(str(exc), status="reconnecting")
+            with self._lock:
+                if generation != self._connection_generation or context is not self._context:
+                    return self._status
+            self._notify_error(str(exc), status="reconnecting", generation=generation)
             try:
                 self.reconnect()
             except Exception as reconnect_error:
-                self._notify_error(str(reconnect_error), status="unavailable")
+                self._notify_error(str(reconnect_error), status="unavailable", generation=self.connection_generation)
             return self._status
 
     def reconnect(self):
-        with self._lock:
-            old_context = self._context
-            self._context = None
-            # Invalidate callbacks from the old OpenD context before closing
-            # it.  The next context receives a fresh generation in
-            # _ensure_context().
-            self._connection_generation += 1
-            keys = list(self._callbacks)
-            self._status = "reconnecting"
-        if old_context is not None:
-            try:
-                old_context.close()
-            except Exception:
-                pass
-        context = self._ensure_context()
-        for symbol, period in keys:
-            ret, message = context.subscribe(
-                [symbol], [getattr(SubType, REALTIME_PERIOD_SUBTYPES[period])],
-                is_first_push=True, subscribe_push=True,
-            )
-            if ret != RET_OK:
-                raise RealtimeProviderError(str(message))
-            snapshot = self.latest_snapshot(symbol, period)
-            if snapshot is not None:
-                with self._lock:
-                    callbacks = list(self._callbacks.get((symbol, period), set()))
-                for callback in callbacks:
-                    callback(snapshot)
-        self._status = "live"
-        return True
+        with self._reconnect_lock:
+            with self._lock:
+                old_context = self._context
+                self._context = None
+                # Invalidate callbacks from the old OpenD context before closing
+                # it.  The next context receives a fresh generation in
+                # _ensure_context().
+                self._connection_generation += 1
+                keys = list(self._callbacks)
+                self._status = "reconnecting"
+            if old_context is not None:
+                try:
+                    old_context.close()
+                except Exception:
+                    pass
+            context = self._ensure_context()
+            for symbol, period in keys:
+                ret, message = context.subscribe(
+                    [symbol], [getattr(SubType, REALTIME_PERIOD_SUBTYPES[period])],
+                    is_first_push=True, subscribe_push=True,
+                )
+                if ret != RET_OK:
+                    raise RealtimeProviderError(str(message))
+                snapshot = self.latest_snapshot(symbol, period)
+                if snapshot is not None:
+                    with self._lock:
+                        callbacks = list(self._callbacks.get((symbol, period), set()))
+                    for callback in callbacks:
+                        callback(snapshot)
+            generation = self.connection_generation
+            self._notify_status("live", None, generation=generation)
+            return True
 
     def _row_to_bar(self, row, period):
         symbol = str(row.get("code", "")).upper()

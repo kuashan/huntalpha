@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createRealtimeUiBuffer, mergeRealtimeBars, mergeRealtimePayload, REALTIME_UI_FLUSH_MS } from './realtimeUiBuffer.mjs'
+import { createRealtimeUiBuffer, mergeHistoricalTail, mergeRealtimeBars, mergeRealtimePayload, REALTIME_UI_FLUSH_MS } from './realtimeUiBuffer.mjs'
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from './realtimeGeneration.mjs'
 
 const timers = []
@@ -43,6 +43,23 @@ assert.equal(reconcileRealtimeVersion('epoch-b', 5, { epoch: 'epoch-b', revision
 assert.equal(isFormulaResponseGenerationSafe('epoch-b', 'epoch-a', 'epoch-a'), false)
 assert.equal(isFormulaResponseGenerationSafe('epoch-a', 'epoch-a', 'epoch-b'), true)
 
+let statusWatermark = { epoch: 'epoch-a', revision: 9, status: 'live' }
+const acceptStatus = payload => {
+  const decision = reconcileRealtimeVersion(statusWatermark.epoch, statusWatermark.revision, payload)
+  if (decision.accepted) {
+    statusWatermark = { epoch: decision.epoch, revision: decision.revision, status: payload.status }
+  }
+  return decision
+}
+assert.equal(acceptStatus({ epoch: 'epoch-a', revision: 10, status: 'reconnecting' }).accepted, true)
+assert.deepEqual(statusWatermark, { epoch: 'epoch-a', revision: 10, status: 'reconnecting' })
+assert.equal(acceptStatus({ epoch: 'epoch-a', revision: 9, status: 'live' }).reason, 'stale_revision')
+assert.deepEqual(statusWatermark, { epoch: 'epoch-a', revision: 10, status: 'reconnecting' })
+assert.equal(acceptStatus({ epoch: 'epoch-a', revision: 11, status: 'live' }).accepted, true)
+assert.deepEqual(statusWatermark, { epoch: 'epoch-a', revision: 11, status: 'live' })
+assert.equal(acceptStatus({ epoch: 'epoch-c', revision: 1, status: 'reconnecting' }).accepted, true)
+assert.deepEqual(statusWatermark, { epoch: 'epoch-c', revision: 1, status: 'reconnecting' })
+
 const boundaryBars = [{ time: 100, close: 100, volume: 900 }]
 const boundaryPayload = {
   last_closed_bar: { time: 100, close: 100.5, volume: 1000 },
@@ -68,6 +85,16 @@ for (let revision = 1; revision <= 50; revision += 1) {
 }
 assert.equal(repeatedFullSeriesUpdates, 1)
 assert.equal(currentBars.at(-1).time, 101)
+
+const historicalTail = mergeHistoricalTail(
+  [{ time: 1, close: 1 }, { time: 90, close: 90 }, { time: 95, close: 95 }, { time: 100, close: 100 }],
+  Array.from({ length: 21 }, (_, index) => ({ time: 90 + index, close: 90 + index + (index === 5 ? 0.5 : 0) })),
+  { bar: { time: 110, close: 111 } },
+)
+assert.equal(historicalTail.changed, true)
+assert.deepEqual(historicalTail.bars.map(bar => bar.time), [1, ...Array.from({ length: 21 }, (_, index) => 90 + index)])
+assert.equal(historicalTail.bars.find(bar => bar.time === 95).close, 95.5)
+assert.equal(historicalTail.bars.at(-1).close, 111)
 
 const staleBufferTimers = []
 const staleFlushes = []

@@ -30,6 +30,25 @@ export function mergeRealtimeBars(loadedBars, payload) {
   return mergeRealtimePayload(loadedBars, payload).bars
 }
 
+export function mergeHistoricalTail(loadedBars, tailBars, realtimePayload = null) {
+  const before = [...(loadedBars || [])].sort((left, right) => Number(left.time) - Number(right.time))
+  const byTime = new Map(before.map(bar => [Number(bar.time), bar]))
+  for (const bar of tailBars || []) {
+    const time = Number(bar?.time)
+    if (Number.isFinite(time)) byTime.set(time, { ...bar, time })
+  }
+  for (const candidate of [realtimePayload?.last_closed_bar, realtimePayload?.bar]) {
+    const time = Number(candidate?.time)
+    if (Number.isFinite(time)) byTime.set(time, { ...(byTime.get(time) || {}), ...candidate, time })
+  }
+  const bars = [...byTime.values()].sort((left, right) => Number(left.time) - Number(right.time))
+  const changed = bars.length !== before.length || bars.some((bar, index) => {
+    const previous = before[index]
+    return !previous || Number(previous.time) !== Number(bar.time) || barFingerprint(previous) !== barFingerprint(bar)
+  })
+  return { bars, changed }
+}
+
 export function createRealtimeUiBuffer({
   flushMs = REALTIME_UI_FLUSH_MS,
   onFlush,

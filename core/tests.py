@@ -1486,12 +1486,16 @@ class WatchlistModelAndApiTests(TestCase):
 class FakeRealtimeProvider:
     provider_name = "test-provider"
 
-    def __init__(self, snapshot=None, error=None):
+    def __init__(self, snapshot=None, error=None, health_started=None, health_release=None):
         self.snapshot = snapshot
         self.error = error
         self.callbacks = {}
         self.subscribe_calls = []
         self.unsubscribe_calls = []
+        self.status = "live"
+        self.health_calls = 0
+        self.health_started = health_started
+        self.health_release = health_release
 
     def subscribe(self, symbol, period, callback):
         self.subscribe_calls.append((symbol, period))
@@ -1509,6 +1513,14 @@ class FakeRealtimeProvider:
 
     def close(self):
         self.callbacks.clear()
+
+    def health_check(self):
+        self.health_calls += 1
+        if self.health_started:
+            self.health_started.set()
+        if self.health_release:
+            self.health_release.wait(timeout=1)
+        return self.status
 
     def emit(self, bar):
         self.callbacks[(bar.symbol.upper(), bar.period)](bar)
@@ -1582,6 +1594,33 @@ class RealtimeCoreContractTests(TestCase):
         self.assertEqual(provider.unsubscribe_calls, [])
         registry.unsubscribe(second)
         time.sleep(0.1)
+
+    def test_registry_health_probe_is_shared_and_throttled(self):
+        started = threading.Event()
+        release = threading.Event()
+        provider = FakeRealtimeProvider(health_started=started, health_release=release)
+        registry = RealtimeRegistry(
+            provider=provider, state_store=RealtimeStateStore(), grace_seconds=0, health_interval_seconds=5,
+        )
+        consumer = registry.subscribe("SH.600519", "1分")
+        results = []
+        first = threading.Thread(target=lambda: results.append(registry.health_check()))
+        second = threading.Thread(target=lambda: results.append(registry.health_check()))
+        first.start()
+        self.assertTrue(started.wait(timeout=1))
+        second.start()
+        second.join(timeout=1)
+        release.set()
+        first.join(timeout=1)
+        self.assertEqual(provider.health_calls, 1)
+        self.assertEqual(results, ["live", "live"])
+        registry.unsubscribe(consumer)
+
+    def test_registry_does_not_probe_without_consumers(self):
+        provider = FakeRealtimeProvider()
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
+        self.assertEqual(registry.health_check(), "live")
+        self.assertEqual(provider.health_calls, 0)
 
     def test_reconnecting_status_is_published_without_fake_bar(self):
         provider = FakeRealtimeProvider()
@@ -1965,6 +2004,81 @@ class RealtimeCoreContractTests(TestCase):
         self.assertEqual(provider.status, "unavailable")
         self.assertEqual(events[-1]["status"], "unavailable")
 
+    def test_context_none_with_active_subscription_retries_after_failure(self):
+        class Context:
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                return None
+
+            def subscribe(self, *args, **kwargs):
+                return RET_OK, ""
+
+        factory_calls = []
+
+        def factory():
+            factory_calls.append(True)
+            if len(factory_calls) == 1:
+                raise RuntimeError("OpenD offline")
+            return Context()
+
+        class RecoveringProvider(FutuRealtimeProvider):
+            def latest_snapshot(self, symbol, period):
+                return self.snapshot
+
+        provider = RecoveringProvider(context_factory=factory)
+        provider.snapshot = self.bar(100)
+        events = []
+        provider._callbacks[("SH.600519", "1分")] = {events.append}
+        self.assertEqual(provider.health_check(), "unavailable")
+        self.assertEqual(provider.status, "unavailable")
+        self.assertEqual(provider.health_check(), "live")
+        self.assertEqual(len(factory_calls), 2)
+        self.assertEqual(provider.status, "live")
+        self.assertTrue(any(event.get("status") == "live" for event in events if isinstance(event, dict)))
+        provider.close()
+
+    def test_stale_health_result_cannot_override_new_connection_generation(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingContext:
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                return None
+
+            def get_global_state(self):
+                started.set()
+                release.wait(timeout=1)
+                return -1, "old context failed"
+
+        class LiveContext(BlockingContext):
+            def get_global_state(self):
+                return RET_OK, ""
+
+        provider = FutuRealtimeProvider(context_factory=LiveContext)
+        old_context = BlockingContext()
+        new_context = LiveContext()
+        provider._context = old_context
+        provider._callbacks[("SH.600519", "1分")] = {lambda event: None}
+        provider._status = "live"
+        with provider._lock:
+            provider._connection_generation = 1
+        worker = threading.Thread(target=provider.health_check)
+        worker.start()
+        self.assertTrue(started.wait(timeout=1))
+        with provider._lock:
+            provider._context = new_context
+            provider._connection_generation = 2
+            provider._status = "live"
+        release.set()
+        worker.join(timeout=1)
+        self.assertEqual(provider.status, "live")
+        provider.close()
+
     def test_futu_connection_generation_ignores_old_frame_and_error(self):
         class Context:
             def set_handler(self, handler):
@@ -2010,6 +2124,8 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("REALTIME_PERIOD_SUBTYPES", source)
         self.assertIn("_connection_generation", source)
         self.assertIn("_handle_response", source)
+        self.assertIn("_reconnect_lock", source)
+        self.assertIn("context is not self._context", source)
         self.assertNotIn("FakeRealtimeProvider", source)
 
     def test_market_chart_updates_in_place_and_cleans_stream(self):
@@ -2020,6 +2136,8 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("visibilitychange", source)
         self.assertIn("realtimeRevision", source)
         self.assertIn("realtimeEpoch", source)
+        self.assertIn("realtimeRevision = decision.revision", source)
+        self.assertIn("realtimeEpoch = decision.epoch", source)
         self.assertIn("last_closed_bar", source)
         self.assertIn("reconcileRealtimeVersion", source)
         self.assertIn("closedChanged", source)
@@ -2028,6 +2146,12 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("flushMs: 300", source)
         self.assertIn("document.hidden", source)
         self.assertIn("rebuildLayer", source)
+        self.assertIn("reconcileHistoryTail", source)
+        self.assertIn("requestHistoryTailReconcile", source)
+        self.assertIn("mergeHistoricalTail", source)
+        self.assertIn("reconcileHistory: true", source)
+        self.assertIn("source.onopen", source)
+        self.assertIn("realtimePayloadSequence", source)
         self.assertNotIn("applyRealtimePayload", source)
         self.assertGreaterEqual(source.count("chart?.remove()"), 2)
 
@@ -2037,8 +2161,17 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("latest = payload", source)
         self.assertIn("mergeRealtimeBars", source)
         self.assertIn("mergeRealtimePayload", source)
+        self.assertIn("mergeHistoricalTail", source)
         self.assertIn("isPaused", source)
         self.assertIn("flushCount", source)
+
+    def test_registry_health_probe_has_shared_throttle_and_no_main_lock_io(self):
+        source = (Path(settings.BASE_DIR) / "core" / "realtime" / "registry.py").read_text(encoding="utf-8")
+        self.assertIn("_health_lock", source)
+        self.assertIn("_health_inflight", source)
+        self.assertIn("health_interval_seconds", source)
+        self.assertIn("time.monotonic", source)
+        self.assertIn("_has_active_consumers", source)
 
     def test_dynamic_formula_primitives_request_redraw(self):
         for filename in ("TongdaxinStickPrimitive.js", "TongdaxinTextPrimitive.js", "TongdaxinFixedTextPrimitive.js"):

@@ -1,5 +1,6 @@
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 
 from .contracts import NormalizedBar
@@ -21,13 +22,17 @@ class RealtimeConsumer:
 
 
 class RealtimeRegistry:
-    def __init__(self, provider, state_store=None, grace_seconds=20):
+    def __init__(self, provider, state_store=None, grace_seconds=20, health_interval_seconds=5.0):
         self.provider = provider
         self.provider_name = str(provider.provider_name)
         self.state_store = state_store or RealtimeStateStore()
         self.grace_seconds = grace_seconds
         self._entries = {}
         self._lock = threading.RLock()
+        self.health_interval_seconds = max(0.1, float(health_interval_seconds))
+        self._health_lock = threading.Lock()
+        self._health_inflight = False
+        self._last_health_check = 0.0
 
     def _key(self, symbol, period):
         return (self.provider_name, str(symbol).upper(), period)
@@ -169,9 +174,35 @@ class RealtimeRegistry:
                     pass
         self.provider.close()
 
+    def _provider_status(self):
+        try:
+            return self.provider.status
+        except AttributeError:
+            return "live"
+
+    def _has_active_consumers(self):
+        with self._lock:
+            return any(entry["consumers"] for entry in self._entries.values())
+
     def health_check(self):
+        if not self._has_active_consumers():
+            return self._provider_status()
         check = getattr(self.provider, "health_check", None)
-        return check() if check else "live"
+        if check is None:
+            return "live"
+        now = time.monotonic()
+        with self._health_lock:
+            if self._health_inflight or now - self._last_health_check < self.health_interval_seconds:
+                return self._provider_status()
+            self._health_inflight = True
+            self._last_health_check = now
+        try:
+            return check()
+        except Exception:
+            return self._provider_status()
+        finally:
+            with self._health_lock:
+                self._health_inflight = False
 
 
 _default_registry = None

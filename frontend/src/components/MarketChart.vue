@@ -5,7 +5,7 @@ import { TongdaxinStickPrimitive } from '../indicators/TongdaxinStickPrimitive'
 import { TongdaxinTextPrimitive } from '../indicators/TongdaxinTextPrimitive'
 import { TongdaxinFixedTextPrimitive } from '../indicators/TongdaxinFixedTextPrimitive'
 import { commonDrawing } from '../indicators/commonIndicators'
-import { createRealtimeUiBuffer, mergeRealtimePayload } from '../realtime/realtimeUiBuffer.mjs'
+import { createRealtimeUiBuffer, mergeHistoricalTail, mergeRealtimePayload } from '../realtime/realtimeUiBuffer.mjs'
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from '../realtime/realtimeGeneration.mjs'
 
 const props = defineProps({
@@ -53,6 +53,11 @@ let formulaInFlight = false
 let formulaPendingRevision = 0
 let formulaRunToken = 0
 let realtimeUiBuffer
+let latestRealtimePayload
+let realtimePayloadSequence = 0
+let historyReconcileInFlight = false
+let historyReconcilePending = false
+let pendingRecoveryLiveStatus = false
 
 const backgroundStick = item => item.layer === 'background'
 const savedSubPaneHeights = () => {
@@ -126,6 +131,8 @@ function acceptRealtimeEpoch(epoch) {
   if (incoming === realtimeEpoch) return true
   realtimeEpoch = incoming
   realtimeRevision = 0
+  latestRealtimePayload = undefined
+  realtimePayloadSequence = 0
   realtimeStatusGeneration += 1
   realtimeUiBuffer?.clear()
   cancelFormulaWork()
@@ -134,6 +141,11 @@ function acceptRealtimeEpoch(epoch) {
 
 function setRealtimeStatus(status) {
   if (!status) return
+  if (status === 'live' && historyReconcileInFlight) {
+    pendingRecoveryLiveStatus = true
+    return
+  }
+  if (status !== 'live') pendingRecoveryLiveStatus = false
   if (status === 'connecting' || status === 'reconnecting' || status === 'unavailable') {
     realtimeStatusGeneration += 1
     realtimeUiBuffer?.clear()
@@ -142,9 +154,13 @@ function setRealtimeStatus(status) {
 }
 
 function acceptRealtimeVersion(payload) {
+  const hadEpoch = Boolean(realtimeEpoch)
   const decision = reconcileRealtimeVersion(realtimeEpoch, realtimeRevision, payload)
   if (!decision.accepted) return decision
   if (decision.changed) acceptRealtimeEpoch(decision.epoch)
+  realtimeEpoch = decision.epoch
+  realtimeRevision = decision.revision
+  if (decision.changed && hadEpoch && chart && !document.hidden) requestHistoryTailReconcile()
   return decision
 }
 
@@ -393,10 +409,7 @@ function processRealtimePayload(payload, payloadGeneration = realtimeStatusGener
     if (version.reason !== 'stale_revision') setRealtimeStatus('unavailable')
     return
   }
-  const revision = Number(payload.revision || 0)
-  if (revision && revision < realtimeRevision) return
-  realtimeRevision = Math.max(realtimeRevision, revision)
-  realtimeStatus.value = payload.status || realtimeStatus.value
+  if (payload.status) setRealtimeStatus(payload.status)
   const hasClosedBar = Number.isFinite(Number(payload.last_closed_bar?.time))
   const hasCurrentBar = Number.isFinite(Number(payload.bar?.time))
   if (!hasClosedBar && !hasCurrentBar) return
@@ -417,22 +430,81 @@ function queueRealtimePayload(payload) {
     if (version.reason !== 'stale_revision') setRealtimeStatus('unavailable')
     return
   }
-  const revision = Number(payload.revision || 0)
-  if (revision && revision < realtimeRevision) return
+  if (payload.bar || payload.last_closed_bar) {
+    latestRealtimePayload = payload
+    realtimePayloadSequence += 1
+  }
   if (payload.type === 'status' || (payload.status && !payload.bar && !payload.last_closed_bar)) {
+    const wasReconnecting = realtimeStatus.value === 'reconnecting'
     setRealtimeStatus(payload.status)
+    if (payload.status === 'live' && wasReconnecting && !historyReconcileInFlight) {
+      requestHistoryTailReconcile()
+    }
     return
   }
   if (realtimeUiBuffer) realtimeUiBuffer.push(payload, realtimeStatusGeneration)
   else processRealtimePayload(payload, realtimeStatusGeneration)
 }
 
-function connectRealtime() {
+async function reconcileHistoryTail(streamGenerationAtStart = streamGeneration) {
+  if (historyReconcileInFlight) {
+    historyReconcilePending = true
+    return
+  }
+  const version = drawVersion
+  const key = chartKey()
+  const sequenceAtStart = realtimePayloadSequence
+  historyReconcileInFlight = true
+  pendingRecoveryLiveStatus = false
+  setRealtimeStatus('reconnecting')
+  try {
+    const query = new URLSearchParams({ period: props.period, count: '100' })
+    const reply = await fetch(`http://127.0.0.1:8003/api/kline/${encodeURIComponent(props.symbol.code)}/?${query}`, { credentials: 'include' })
+    const payload = await reply.json()
+    if (!reply.ok) throw new Error(payload.error || '行情历史不可用')
+    if (version !== drawVersion || key !== chartKey() || streamGenerationAtStart !== streamGeneration) return
+    const latestPayload = realtimePayloadSequence > sequenceAtStart ? latestRealtimePayload : null
+    const merged = mergeHistoricalTail(loadedBars, payload.bars || [], latestPayload)
+    loadedBars = merged.bars
+    if (merged.changed && candleSeries) candleSeries.setData(loadedBars)
+    if (merged.changed) {
+      refreshBuiltInLayers()
+      queueFormulaRefresh(realtimeRevision)
+    }
+  } catch {
+    if (version === drawVersion && key === chartKey() && streamGenerationAtStart === streamGeneration) {
+      setRealtimeStatus('reconnecting')
+    }
+  } finally {
+    historyReconcileInFlight = false
+    if (pendingRecoveryLiveStatus) {
+      pendingRecoveryLiveStatus = false
+      setRealtimeStatus('live')
+    }
+    if (historyReconcilePending) {
+      historyReconcilePending = false
+      if (!document.hidden && props.symbol && chart) {
+        requestHistoryTailReconcile(streamGeneration)
+      }
+    }
+  }
+}
+
+function requestHistoryTailReconcile(streamGenerationAtStart = streamGeneration) {
+  if (historyReconcileInFlight) {
+    historyReconcilePending = true
+    return
+  }
+  void reconcileHistoryTail(streamGenerationAtStart)
+}
+
+function connectRealtime({ reconcileHistory = false } = {}) {
   if (!props.symbol || !props.period || typeof EventSource === 'undefined') {
     setRealtimeStatus('unavailable')
     return
   }
   const generation = ++streamGeneration
+  let needsRecovery = reconcileHistory
   setRealtimeStatus('connecting')
   const url = `http://127.0.0.1:8003/api/realtime/market-stream/${encodeURIComponent(props.symbol.code)}/?period=${encodeURIComponent(props.period)}`
   const source = new EventSource(url, { withCredentials: true })
@@ -445,8 +517,14 @@ function connectRealtime() {
   source.addEventListener('bar', handle)
   source.addEventListener('status', handle)
   source.onmessage = handle
+  source.onopen = () => {
+    if (generation !== streamGeneration || !needsRecovery) return
+    needsRecovery = false
+    requestHistoryTailReconcile(generation)
+  }
   source.onerror = () => {
     if (generation !== streamGeneration) return
+    needsRecovery = true
     setRealtimeStatus(source.readyState === EventSource.CLOSED ? 'unavailable' : 'reconnecting')
   }
 }
@@ -457,6 +535,8 @@ function disconnectRealtime() {
   eventSource = undefined
   realtimeUiBuffer?.clear()
   cancelFormulaWork()
+  latestRealtimePayload = undefined
+  realtimePayloadSequence = 0
 }
 
 function handleVisibilityChange() {
@@ -465,7 +545,7 @@ function handleVisibilityChange() {
     return
   }
   if (props.symbol && chart) {
-    connectRealtime()
+    connectRealtime({ reconcileHistory: true })
   }
 }
 
@@ -477,6 +557,8 @@ async function draw(options = {}) {
   subTitlePositions.value = []
   historyStatus.value = ''
   realtimeRevision = 0
+  latestRealtimePayload = undefined
+  realtimePayloadSequence = 0
   renderedItems = []
   layerRefs = new Map()
   if (panePointerUp) el.value.removeEventListener('pointerup', panePointerUp)
