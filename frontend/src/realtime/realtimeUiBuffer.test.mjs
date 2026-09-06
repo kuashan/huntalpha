@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createRealtimeUiBuffer, mergeRealtimeBars, REALTIME_UI_FLUSH_MS } from './realtimeUiBuffer.mjs'
-import { reconcileRealtimeVersion } from './realtimeGeneration.mjs'
+import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from './realtimeGeneration.mjs'
 
 const timers = []
 const flushed = []
@@ -38,6 +38,8 @@ assert.equal(restarted.accepted, true)
 assert.equal(restarted.epoch, 'epoch-b')
 const staleSameGeneration = reconcileRealtimeVersion('epoch-b', 5, { epoch: 'epoch-b', revision: 4 })
 assert.equal(staleSameGeneration.accepted, false)
+assert.equal(isFormulaResponseGenerationSafe('epoch-b', 'epoch-a', 'epoch-a'), false)
+assert.equal(isFormulaResponseGenerationSafe('epoch-a', 'epoch-a', 'epoch-b'), true)
 
 const boundaryBars = [{ time: 100, close: 100, volume: 900 }]
 const boundaryPayload = {

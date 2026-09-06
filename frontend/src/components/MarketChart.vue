@@ -6,7 +6,7 @@ import { TongdaxinTextPrimitive } from '../indicators/TongdaxinTextPrimitive'
 import { TongdaxinFixedTextPrimitive } from '../indicators/TongdaxinFixedTextPrimitive'
 import { commonDrawing } from '../indicators/commonIndicators'
 import { createRealtimeUiBuffer, mergeRealtimeBars } from '../realtime/realtimeUiBuffer.mjs'
-import { reconcileRealtimeVersion } from '../realtime/realtimeGeneration.mjs'
+import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from '../realtime/realtimeGeneration.mjs'
 
 const props = defineProps({
   symbol: Object,
@@ -94,12 +94,14 @@ async function requestFormulaDrawing(item, bars, revision = 0) {
 
 async function requestDrawings(bars, revision = 0) {
   renderErrors.value = []
+  const requestedEpoch = realtimeEpoch
   const results = (await Promise.all(props.installedIndicators.map(async item => {
     if (item.common) return { item, drawing: commonDrawing(item.code, bars), revision }
     return requestFormulaDrawing(item, bars, revision)
   }))).filter(Boolean)
   const responseEpoch = results.find(result => result.epoch)?.epoch
-  if (responseEpoch && !realtimeEpoch) acceptRealtimeEpoch(responseEpoch)
+  if (responseEpoch && !acceptFormulaResponseEpoch(responseEpoch, requestedEpoch)) return []
+  if (responseEpoch && results.some(result => result.epoch && result.epoch !== responseEpoch)) return []
   return results
 }
 
@@ -144,6 +146,13 @@ function acceptRealtimeVersion(payload) {
   if (!decision.accepted) return false
   if (decision.changed) acceptRealtimeEpoch(decision.epoch)
   return true
+}
+
+function acceptFormulaResponseEpoch(responseEpoch, requestedEpoch) {
+  if (!responseEpoch) return true
+  if (!isFormulaResponseGenerationSafe(realtimeEpoch, requestedEpoch, responseEpoch)) return false
+  if (!realtimeEpoch || responseEpoch !== realtimeEpoch) acceptRealtimeEpoch(responseEpoch)
+  return responseEpoch === realtimeEpoch
 }
 
 async function fetchKlinePage(before = null) {
@@ -351,14 +360,14 @@ async function runFormulaRefresh() {
   const runToken = ++formulaRunToken
   const generation = drawVersion
   const requestRevision = formulaPendingRevision
+  const requestedEpoch = realtimeEpoch
   formulaPendingRevision = 0
   const bars = loadedBars.slice()
   const items = props.installedIndicators.filter(item => !item.common)
   try {
     const results = (await Promise.all(items.map(item => requestFormulaDrawing(item, bars, requestRevision)))).filter(Boolean)
     const responseEpoch = results.find(result => result.epoch)?.epoch
-    if (responseEpoch && !realtimeEpoch) acceptRealtimeEpoch(responseEpoch)
-    if (responseEpoch && responseEpoch !== realtimeEpoch) return
+    if (responseEpoch && !acceptFormulaResponseEpoch(responseEpoch, requestedEpoch)) return
     if (results.some(result => result.epoch && result.epoch !== realtimeEpoch)) return
     const latestResponseRevision = results.reduce((latest, result) => Math.max(latest, result.revision), requestRevision)
     if (runToken !== formulaRunToken || generation !== drawVersion || latestResponseRevision < realtimeRevision) return
