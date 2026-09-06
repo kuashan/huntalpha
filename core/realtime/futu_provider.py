@@ -24,6 +24,8 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
         self._callbacks = {}
         self._status = "unavailable"
         self._connection_generation = 0
+        self._ready_generation = None
+        self._generation_subscriptions = set()
         self._reconnect_lock = threading.Lock()
 
     @property
@@ -36,6 +38,27 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
         with self._lock:
             return self._status
 
+    def _build_context(self, generation):
+        context = self.context_factory()
+        provider = self
+
+        class Handler(CurKlineHandlerBase):
+            def on_recv_rsp(self, rsp_pb):
+                ret, frame = super().on_recv_rsp(rsp_pb)
+                provider._handle_response(generation, ret, frame)
+                return ret, frame
+
+        handler = Handler()
+        try:
+            context.set_handler(handler)
+        except Exception:
+            try:
+                context.close()
+            except Exception:
+                pass
+            raise
+        return context, handler
+
     def _ensure_context(self):
         with self._lock:
             if self._context is not None:
@@ -43,22 +66,15 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
             self._connection_generation += 1
             generation = self._connection_generation
         try:
-            context = self.context_factory()
-            provider = self
-
-            class Handler(CurKlineHandlerBase):
-                def on_recv_rsp(self, rsp_pb):
-                    ret, frame = super().on_recv_rsp(rsp_pb)
-                    provider._handle_response(generation, ret, frame)
-                    return ret, frame
-
-            self._handler = Handler()
-            context.set_handler(self._handler)
+            context, handler = self._build_context(generation)
             with self._lock:
                 if generation != self._connection_generation:
                     context.close()
                     raise RealtimeProviderError("富途 OpenD 连接代际已过期")
                 self._context = context
+                self._handler = handler
+                self._ready_generation = generation
+                self._generation_subscriptions = set()
                 self._status = "live"
             return context
         except Exception as exc:
@@ -66,6 +82,9 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
                 if generation == self._connection_generation:
                     self._status = "unavailable"
                     self._context = None
+                    self._handler = None
+                    self._ready_generation = None
+                    self._generation_subscriptions = set()
             raise RealtimeProviderError(f"富途 OpenD 不可用：{exc}") from exc
 
     def _key(self, symbol, period):
@@ -75,7 +94,7 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
 
     def _handle_response(self, generation, ret, frame):
         with self._lock:
-            if generation != self._connection_generation:
+            if generation != self._connection_generation or generation != self._ready_generation:
                 return
         if ret != RET_OK:
             self._notify_error(str(frame), generation=generation)
@@ -84,7 +103,9 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
 
     def _handle_frame(self, frame, generation=None):
         with self._lock:
-            if generation is not None and generation != self._connection_generation:
+            if generation is not None and (
+                generation != self._connection_generation or generation != self._ready_generation
+            ):
                 return
         received_at = int(time.time())
         for row in frame.itertuples(index=False):
@@ -139,63 +160,79 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
         self._notify_status(status, message, generation=generation)
 
     def subscribe(self, symbol, period, callback):
-        symbol, period = self._key(symbol, period)
-        context = self._ensure_context()
-        key = (symbol, period)
-        with self._lock:
-            first = not self._callbacks.get(key)
-            self._callbacks.setdefault(key, set()).add(callback)
-        if first:
-            try:
-                ret, message = context.subscribe(
-                    [symbol], [getattr(SubType, REALTIME_PERIOD_SUBTYPES[period])],
-                    is_first_push=True, subscribe_push=True,
-                )
-                if ret != RET_OK:
-                    raise RealtimeProviderError(str(message))
-            except Exception as exc:
-                with self._lock:
-                    self._callbacks.get(key, set()).discard(callback)
-                self._status = "unavailable"
-                raise RealtimeProviderError(f"富途 OpenD 订阅 {symbol}/{period} 失败：{exc}") from exc
-        return {"provider": self.provider_name, "mode": "streaming", "period": period}
+        with self._reconnect_lock:
+            symbol, period = self._key(symbol, period)
+            context = self._ensure_context()
+            key = (symbol, period)
+            with self._lock:
+                first = not self._callbacks.get(key)
+                self._callbacks.setdefault(key, set()).add(callback)
+            if first:
+                try:
+                    ret, message = context.subscribe(
+                        [symbol], [getattr(SubType, REALTIME_PERIOD_SUBTYPES[period])],
+                        is_first_push=True, subscribe_push=True,
+                    )
+                    if ret != RET_OK:
+                        raise RealtimeProviderError(str(message))
+                    with self._lock:
+                        if context is self._context and self._ready_generation == self._connection_generation:
+                            self._generation_subscriptions.add(key)
+                except Exception as exc:
+                    with self._lock:
+                        self._callbacks.get(key, set()).discard(callback)
+                        if not self._callbacks.get(key):
+                            self._callbacks.pop(key, None)
+                        self._generation_subscriptions.discard(key)
+                        self._status = "unavailable"
+                    raise RealtimeProviderError(f"富途 OpenD 订阅 {symbol}/{period} 失败：{exc}") from exc
+            return {"provider": self.provider_name, "mode": "streaming", "period": period}
 
     def unsubscribe(self, symbol, period):
-        symbol, period = self._key(symbol, period)
-        with self._lock:
-            self._callbacks.pop((symbol, period), None)
-        if self._context is None:
-            return
-        try:
-            self._context.unsubscribe([symbol], [getattr(SubType, REALTIME_PERIOD_SUBTYPES[period])])
-        except Exception:
-            # OpenD may reject an unsubscribe before its one-minute subscription
-            # window; the process-owned context is still closed on shutdown.
-            pass
+        with self._reconnect_lock:
+            symbol, period = self._key(symbol, period)
+            with self._lock:
+                self._callbacks.pop((symbol, period), None)
+                self._generation_subscriptions.discard((symbol, period))
+                context = self._context
+            if context is None:
+                return
+            try:
+                context.unsubscribe([symbol], [getattr(SubType, REALTIME_PERIOD_SUBTYPES[period])])
+            except Exception:
+                # OpenD may reject an unsubscribe before its one-minute subscription
+                # window; the process-owned context is still closed on shutdown.
+                pass
 
-    def latest_snapshot(self, symbol, period):
-        symbol, period = self._key(symbol, period)
-        context = self._ensure_context()
+    def _latest_snapshot_from_context(self, context, symbol, period):
         ret, payload = context.get_cur_kline(
             symbol, 1, ktype=getattr(KLType, REALTIME_PERIOD_SUBTYPES[period]), autype="qfq"
         )
         if ret != RET_OK or payload is None or payload.empty:
             raise RealtimeProviderError(str(payload))
         row = payload.iloc[-1]
-        return next(
-            (bar for bar in [self._row_to_bar(row, period)] if bar is not None),
-            None,
-        )
+        return self._row_to_bar(row, period)
+
+    def _reconnect_snapshot(self, context, symbol, period):
+        return self._latest_snapshot_from_context(context, symbol, period)
+
+    def latest_snapshot(self, symbol, period):
+        with self._reconnect_lock:
+            symbol, period = self._key(symbol, period)
+            context = self._ensure_context()
+            return self._latest_snapshot_from_context(context, symbol, period)
 
     def health_check(self):
         with self._lock:
             context = self._context
             keys = list(self._callbacks)
             generation = self._connection_generation
+            ready_generation = self._ready_generation
+            generation_subscriptions = set(self._generation_subscriptions)
             status = self._status
         if not keys:
             return status
-        if context is None:
+        if context is None or ready_generation != generation or set(keys) != generation_subscriptions:
             self._notify_error("OpenD context unavailable", status="reconnecting", generation=generation)
             try:
                 self.reconnect()
@@ -209,8 +246,19 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
             with self._lock:
                 if generation != self._connection_generation or context is not self._context:
                     return self._status
-                self._status = "live"
-                return self._status
+                complete = (
+                    self._ready_generation == generation
+                    and set(self._callbacks) == self._generation_subscriptions
+                )
+                if complete:
+                    self._status = "live"
+                    return self._status
+            self._notify_error("OpenD subscriptions incomplete", status="reconnecting", generation=generation)
+            try:
+                self.reconnect()
+            except Exception as reconnect_error:
+                self._notify_error(str(reconnect_error), status="unavailable", generation=self.connection_generation)
+            return self._status
         except Exception as exc:
             with self._lock:
                 if generation != self._connection_generation or context is not self._context:
@@ -227,34 +275,83 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
             with self._lock:
                 old_context = self._context
                 self._context = None
+                self._handler = None
+                self._ready_generation = None
                 # Invalidate callbacks from the old OpenD context before closing
-                # it.  The next context receives a fresh generation in
-                # _ensure_context().
+                # it.  The candidate context is not exposed until all active
+                # subscriptions and authoritative snapshots have succeeded.
                 self._connection_generation += 1
+                generation = self._connection_generation
                 keys = list(self._callbacks)
+                self._generation_subscriptions = set()
                 self._status = "reconnecting"
             if old_context is not None:
                 try:
                     old_context.close()
                 except Exception:
                     pass
-            context = self._ensure_context()
-            for symbol, period in keys:
-                ret, message = context.subscribe(
-                    [symbol], [getattr(SubType, REALTIME_PERIOD_SUBTYPES[period])],
-                    is_first_push=True, subscribe_push=True,
-                )
-                if ret != RET_OK:
-                    raise RealtimeProviderError(str(message))
-                snapshot = self.latest_snapshot(symbol, period)
-                if snapshot is not None:
+            candidate = None
+            try:
+                candidate, candidate_handler = self._build_context(generation)
+                snapshots = []
+                for symbol, period in keys:
+                    ret, message = candidate.subscribe(
+                        [symbol], [getattr(SubType, REALTIME_PERIOD_SUBTYPES[period])],
+                        is_first_push=True, subscribe_push=True,
+                    )
+                    if ret != RET_OK:
+                        raise RealtimeProviderError(str(message))
+                for symbol, period in keys:
+                    snapshot = self._reconnect_snapshot(candidate, symbol, period)
+                    if snapshot is None:
+                        raise RealtimeProviderError(f"富途 OpenD 快照 {symbol}/{period} 为空")
+                    snapshots.append(((symbol, period), snapshot))
+
+                with self._lock:
+                    if generation != self._connection_generation:
+                        raise RealtimeProviderError("富途 OpenD 连接代际已过期")
+                    current_keys = set(self._callbacks)
+                    captured_keys = set(keys)
+                    added_keys = current_keys - captured_keys
+                    if added_keys:
+                        raise RealtimeProviderError("重连期间出现新的实时订阅")
+                    for symbol, period in captured_keys - current_keys:
+                        try:
+                            candidate.unsubscribe(
+                                [symbol], [getattr(SubType, REALTIME_PERIOD_SUBTYPES[period])]
+                            )
+                        except Exception:
+                            pass
+                    self._context = candidate
+                    self._handler = candidate_handler
+                    self._ready_generation = generation
+                    self._generation_subscriptions = set(current_keys)
+                    self._status = "live"
+                    candidate = None
+
+                for (symbol, period), snapshot in snapshots:
                     with self._lock:
                         callbacks = list(self._callbacks.get((symbol, period), set()))
                     for callback in callbacks:
                         callback(snapshot)
-            generation = self.connection_generation
-            self._notify_status("live", None, generation=generation)
-            return True
+                self._notify_status("live", None, generation=generation)
+                return True
+            except Exception as exc:
+                if candidate is not None:
+                    try:
+                        candidate.close()
+                    except Exception:
+                        pass
+                with self._lock:
+                    if generation == self._connection_generation:
+                        self._context = None
+                        self._handler = None
+                        self._ready_generation = None
+                        self._generation_subscriptions = set()
+                        self._status = "unavailable"
+                if isinstance(exc, RealtimeProviderError):
+                    raise
+                raise RealtimeProviderError(f"富途 OpenD 重连失败：{exc}") from exc
 
     def _row_to_bar(self, row, period):
         symbol = str(row.get("code", "")).upper()
@@ -286,6 +383,9 @@ class FutuRealtimeProvider(RealtimeMarketProvider):
         with self._lock:
             self._connection_generation += 1
             context, self._context = self._context, None
+            self._handler = None
+            self._ready_generation = None
+            self._generation_subscriptions = set()
             self._callbacks.clear()
             self._status = "unavailable"
         if context is not None:

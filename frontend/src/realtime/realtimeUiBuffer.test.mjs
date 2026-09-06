@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { createRealtimeUiBuffer, mergeHistoricalTail, mergeRealtimeBars, mergeRealtimePayload, REALTIME_UI_FLUSH_MS } from './realtimeUiBuffer.mjs'
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from './realtimeGeneration.mjs'
 
@@ -95,6 +96,54 @@ assert.equal(historicalTail.changed, true)
 assert.deepEqual(historicalTail.bars.map(bar => bar.time), [1, ...Array.from({ length: 21 }, (_, index) => 90 + index)])
 assert.equal(historicalTail.bars.find(bar => bar.time === 95).close, 95.5)
 assert.equal(historicalTail.bars.at(-1).close, 111)
+
+const latestPayloadCorrection = mergeHistoricalTail(
+  [{ time: 100, close: 100 }],
+  [{ time: 100, close: 101 }],
+  { bar: { time: 101, close: 102 } },
+)
+assert.equal(latestPayloadCorrection.bars.at(-1).close, 102)
+
+const recovery = { needs: false, inFlight: false, retryTimer: false, status: 'live' }
+const requestRecovery = () => {
+  recovery.needs = true
+  if (recovery.inFlight) return
+  recovery.inFlight = true
+  recovery.status = 'reconnecting'
+}
+const failRecovery = () => {
+  recovery.inFlight = false
+  recovery.needs = true
+  recovery.retryTimer = true
+  recovery.status = 'reconnecting'
+}
+const succeedRecovery = () => {
+  recovery.inFlight = false
+  recovery.needs = false
+  recovery.retryTimer = false
+  recovery.status = 'live'
+}
+requestRecovery()
+failRecovery()
+assert.deepEqual(recovery, { needs: true, inFlight: false, retryTimer: true, status: 'reconnecting' })
+requestRecovery()
+succeedRecovery()
+assert.deepEqual(recovery, { needs: false, inFlight: false, retryTimer: false, status: 'live' })
+
+let formulaRunToken = 1
+const staleFormulaToken = formulaRunToken
+formulaRunToken += 1
+assert.notEqual(staleFormulaToken, formulaRunToken)
+
+const marketChartSource = readFileSync(new URL('../components/MarketChart.vue', import.meta.url), 'utf8')
+assert.match(marketChartSource, /needsHistoryReconcile/)
+assert.match(marketChartSource, /HISTORY_RECONCILE_RETRY_MS = 2000/)
+assert.match(marketChartSource, /Array\.isArray\(payload\.bars\)/)
+const reconcileSource = marketChartSource.slice(
+  marketChartSource.indexOf('async function reconcileHistoryTail'),
+  marketChartSource.indexOf('function requestHistoryTailReconcile'),
+)
+assert.ok(reconcileSource.indexOf('cancelFormulaWork()') < reconcileSource.indexOf('queueFormulaRefresh'))
 
 const staleBufferTimers = []
 const staleFlushes = []

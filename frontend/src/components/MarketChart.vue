@@ -54,10 +54,15 @@ let formulaPendingRevision = 0
 let formulaRunToken = 0
 let realtimeUiBuffer
 let latestRealtimePayload
+let latestRealtimePayloadGeneration = 0
 let realtimePayloadSequence = 0
 let historyReconcileInFlight = false
 let historyReconcilePending = false
 let pendingRecoveryLiveStatus = false
+let needsHistoryReconcile = false
+let historyReconcileRetryTimer
+let providerLive = false
+const HISTORY_RECONCILE_RETRY_MS = 2000
 
 const backgroundStick = item => item.layer === 'background'
 const savedSubPaneHeights = () => {
@@ -121,6 +126,31 @@ function cancelFormulaWork() {
   formulaInFlight = false
 }
 
+function clearHistoryReconcileRetry() {
+  if (historyReconcileRetryTimer) window.clearTimeout(historyReconcileRetryTimer)
+  historyReconcileRetryTimer = undefined
+}
+
+function markHistoryReconcileNeeded() {
+  needsHistoryReconcile = true
+  if (providerLive && realtimeStatus.value === 'live') realtimeStatus.value = 'reconnecting'
+}
+
+function cancelHistoryReconcile({ clearLatch = false } = {}) {
+  clearHistoryReconcileRetry()
+  historyReconcilePending = false
+  if (clearLatch) needsHistoryReconcile = false
+}
+
+function scheduleHistoryReconcileRetry(streamGenerationAtStart = streamGeneration) {
+  if (historyReconcileRetryTimer || document.hidden || !needsHistoryReconcile) return
+  historyReconcileRetryTimer = window.setTimeout(() => {
+    historyReconcileRetryTimer = undefined
+    if (document.hidden || streamGenerationAtStart !== streamGeneration || !needsHistoryReconcile || !props.symbol || !chart) return
+    requestHistoryTailReconcile(streamGenerationAtStart)
+  }, HISTORY_RECONCILE_RETRY_MS)
+}
+
 function acceptRealtimeEpoch(epoch) {
   const incoming = String(epoch || '').trim()
   if (!incoming) return false
@@ -132,17 +162,22 @@ function acceptRealtimeEpoch(epoch) {
   realtimeEpoch = incoming
   realtimeRevision = 0
   latestRealtimePayload = undefined
+  latestRealtimePayloadGeneration = 0
   realtimePayloadSequence = 0
   realtimeStatusGeneration += 1
   realtimeUiBuffer?.clear()
   cancelFormulaWork()
+  markHistoryReconcileNeeded()
   return true
 }
 
 function setRealtimeStatus(status) {
   if (!status) return
-  if (status === 'live' && historyReconcileInFlight) {
+  if (status === 'live') providerLive = true
+  else if (status === 'unavailable' || status === 'connecting' || status === 'reconnecting') providerLive = false
+  if (status === 'live' && (needsHistoryReconcile || historyReconcileInFlight)) {
     pendingRecoveryLiveStatus = true
+    realtimeStatus.value = 'reconnecting'
     return
   }
   if (status !== 'live') pendingRecoveryLiveStatus = false
@@ -432,12 +467,14 @@ function queueRealtimePayload(payload) {
   }
   if (payload.bar || payload.last_closed_bar) {
     latestRealtimePayload = payload
+    latestRealtimePayloadGeneration = streamGeneration
     realtimePayloadSequence += 1
   }
   if (payload.type === 'status' || (payload.status && !payload.bar && !payload.last_closed_bar)) {
     const wasReconnecting = realtimeStatus.value === 'reconnecting'
+    if (payload.status === 'live' && (wasReconnecting || needsHistoryReconcile)) markHistoryReconcileNeeded()
     setRealtimeStatus(payload.status)
-    if (payload.status === 'live' && wasReconnecting && !historyReconcileInFlight) {
+    if (payload.status === 'live' && (wasReconnecting || needsHistoryReconcile) && !historyReconcileInFlight) {
       requestHistoryTailReconcile()
     }
     return
@@ -453,44 +490,71 @@ async function reconcileHistoryTail(streamGenerationAtStart = streamGeneration) 
   }
   const version = drawVersion
   const key = chartKey()
-  const sequenceAtStart = realtimePayloadSequence
   historyReconcileInFlight = true
   pendingRecoveryLiveStatus = false
-  setRealtimeStatus('reconnecting')
+  clearHistoryReconcileRetry()
+  realtimeStatus.value = 'reconnecting'
+  let succeeded = false
+  let current = true
   try {
     const query = new URLSearchParams({ period: props.period, count: '100' })
     const reply = await fetch(`http://127.0.0.1:8003/api/kline/${encodeURIComponent(props.symbol.code)}/?${query}`, { credentials: 'include' })
     const payload = await reply.json()
     if (!reply.ok) throw new Error(payload.error || '行情历史不可用')
-    if (version !== drawVersion || key !== chartKey() || streamGenerationAtStart !== streamGeneration) return
-    const latestPayload = realtimePayloadSequence > sequenceAtStart ? latestRealtimePayload : null
-    const merged = mergeHistoricalTail(loadedBars, payload.bars || [], latestPayload)
+    if (version !== drawVersion || key !== chartKey() || streamGenerationAtStart !== streamGeneration) {
+      current = false
+      return
+    }
+    if (!Array.isArray(payload.bars) || (loadedBars.length > 0 && payload.bars.length === 0)) {
+      throw new Error('行情历史返回空尾部，恢复尚未完成')
+    }
+    const latestPayload = latestRealtimePayload
+      && latestRealtimePayloadGeneration === streamGenerationAtStart
+      && latestRealtimePayload.symbol === props.symbol.code.toUpperCase()
+      && latestRealtimePayload.period === props.period
+      && String(latestRealtimePayload.epoch || '') === String(realtimeEpoch || '')
+      ? latestRealtimePayload
+      : null
+    const merged = mergeHistoricalTail(loadedBars, payload.bars, latestPayload)
+    const visibleRange = chart?.timeScale().getVisibleLogicalRange()
     loadedBars = merged.bars
-    if (merged.changed && candleSeries) candleSeries.setData(loadedBars)
     if (merged.changed) {
+      cancelFormulaWork()
+      if (candleSeries) {
+        candleSeries.setData(loadedBars)
+        if (visibleRange) chart?.timeScale().setVisibleLogicalRange(visibleRange)
+      }
       refreshBuiltInLayers()
       queueFormulaRefresh(realtimeRevision)
     }
+    succeeded = true
   } catch {
     if (version === drawVersion && key === chartKey() && streamGenerationAtStart === streamGeneration) {
-      setRealtimeStatus('reconnecting')
+      needsHistoryReconcile = true
+      if (realtimeStatus.value !== 'unavailable') realtimeStatus.value = 'reconnecting'
+      scheduleHistoryReconcileRetry(streamGenerationAtStart)
+    } else {
+      current = false
     }
   } finally {
     historyReconcileInFlight = false
-    if (pendingRecoveryLiveStatus) {
-      pendingRecoveryLiveStatus = false
-      setRealtimeStatus('live')
-    }
+    if (!current) return
     if (historyReconcilePending) {
       historyReconcilePending = false
-      if (!document.hidden && props.symbol && chart) {
-        requestHistoryTailReconcile(streamGeneration)
-      }
+      needsHistoryReconcile = true
+      if (!document.hidden && props.symbol && chart) requestHistoryTailReconcile(streamGeneration)
+      else scheduleHistoryReconcileRetry(streamGeneration)
+    } else if (succeeded) {
+      needsHistoryReconcile = false
+      clearHistoryReconcileRetry()
+      pendingRecoveryLiveStatus = false
+      if (providerLive) realtimeStatus.value = 'live'
     }
   }
 }
 
 function requestHistoryTailReconcile(streamGenerationAtStart = streamGeneration) {
+  markHistoryReconcileNeeded()
   if (historyReconcileInFlight) {
     historyReconcilePending = true
     return
@@ -505,6 +569,7 @@ function connectRealtime({ reconcileHistory = false } = {}) {
   }
   const generation = ++streamGeneration
   let needsRecovery = reconcileHistory
+  if (reconcileHistory) markHistoryReconcileNeeded()
   setRealtimeStatus('connecting')
   const url = `http://127.0.0.1:8003/api/realtime/market-stream/${encodeURIComponent(props.symbol.code)}/?period=${encodeURIComponent(props.period)}`
   const source = new EventSource(url, { withCredentials: true })
@@ -520,22 +585,26 @@ function connectRealtime({ reconcileHistory = false } = {}) {
   source.onopen = () => {
     if (generation !== streamGeneration || !needsRecovery) return
     needsRecovery = false
+    markHistoryReconcileNeeded()
     requestHistoryTailReconcile(generation)
   }
   source.onerror = () => {
     if (generation !== streamGeneration) return
     needsRecovery = true
+    markHistoryReconcileNeeded()
     setRealtimeStatus(source.readyState === EventSource.CLOSED ? 'unavailable' : 'reconnecting')
   }
 }
 
-function disconnectRealtime() {
+function disconnectRealtime({ clearRecovery = false } = {}) {
   streamGeneration += 1
   eventSource?.close()
   eventSource = undefined
   realtimeUiBuffer?.clear()
+  cancelHistoryReconcile({ clearLatch: clearRecovery })
   cancelFormulaWork()
   latestRealtimePayload = undefined
+  latestRealtimePayloadGeneration = 0
   realtimePayloadSequence = 0
 }
 
@@ -545,6 +614,7 @@ function handleVisibilityChange() {
     return
   }
   if (props.symbol && chart) {
+    markHistoryReconcileNeeded()
     connectRealtime({ reconcileHistory: true })
   }
 }
@@ -552,12 +622,13 @@ function handleVisibilityChange() {
 async function draw(options = {}) {
   if (!el.value || !props.symbol) return
   const version = ++drawVersion
-  disconnectRealtime()
+  disconnectRealtime({ clearRecovery: true })
   const key = chartKey()
   subTitlePositions.value = []
   historyStatus.value = ''
   realtimeRevision = 0
   latestRealtimePayload = undefined
+  latestRealtimePayloadGeneration = 0
   realtimePayloadSequence = 0
   renderedItems = []
   layerRefs = new Map()
@@ -684,7 +755,7 @@ onMounted(async () => {
   resize.observe(el.value)
 })
 onBeforeUnmount(() => {
-  disconnectRealtime()
+  disconnectRealtime({ clearRecovery: true })
   if (visibilityHandler) document.removeEventListener('visibilitychange', visibilityHandler)
   if (panePointerUp) el.value?.removeEventListener('pointerup', panePointerUp)
   resize?.disconnect()

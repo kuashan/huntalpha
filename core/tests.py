@@ -36,6 +36,7 @@ from .realtime import (
     NormalizedBar,
     RealtimeRegistry,
     RealtimeStateStore,
+    RealtimeProviderError,
     merge_realtime_bar,
     provider_time_to_timestamp,
 )
@@ -1560,7 +1561,7 @@ class RealtimeCoreContractTests(TestCase):
     def test_failed_initial_subscribe_removes_entry_and_retry_subscribes_again(self):
         provider = FakeRealtimeProvider(error=RuntimeError("first subscription failed"))
         registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=30)
-        with self.assertRaises(Exception):
+        with self.assertRaises(RealtimeProviderError):
             registry.subscribe("SH.600519", "1分")
         self.assertEqual(registry.stats()["active_keys"], 0)
         self.assertEqual(registry.stats()["provider_subscription_count"], 0)
@@ -1815,7 +1816,7 @@ class RealtimeCoreContractTests(TestCase):
     def test_provider_failure_has_no_test_provider_runtime_fallback(self):
         provider = FakeRealtimeProvider(error=RuntimeError("provider unavailable"))
         registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
-        with self.assertRaises(Exception):
+        with self.assertRaises(RealtimeProviderError):
             registry.subscribe("SH.600519", "1分")
         time.sleep(0.03)
         self.assertEqual(registry.stats()["active_keys"], 0)
@@ -2004,6 +2005,159 @@ class RealtimeCoreContractTests(TestCase):
         self.assertEqual(provider.status, "unavailable")
         self.assertEqual(events[-1]["status"], "unavailable")
 
+    def test_provider_reconnect_rolls_back_partial_subscription_and_retries_all_keys(self):
+        class CandidateContext:
+            def __init__(self, fail_symbol=None):
+                self.fail_symbol = fail_symbol
+                self.subscribe_calls = []
+                self.closed = False
+
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                self.closed = True
+
+            def subscribe(self, symbols, subtypes, **kwargs):
+                symbol = symbols[0]
+                self.subscribe_calls.append(symbol)
+                if symbol == self.fail_symbol:
+                    return -1, "subscribe failed"
+                return RET_OK, ""
+
+            def unsubscribe(self, symbols, subtypes):
+                return RET_OK, ""
+
+            def get_global_state(self):
+                return RET_OK, ""
+
+        failed_candidate = CandidateContext(fail_symbol="US.AAPL")
+        recovered_candidate = CandidateContext()
+        candidates = [failed_candidate, recovered_candidate]
+        snapshot = self.bar(100, close=12)
+
+        class RecoveringProvider(FutuRealtimeProvider):
+            def _reconnect_snapshot(self, context, symbol, period):
+                return snapshot
+
+        provider = RecoveringProvider(context_factory=lambda: candidates.pop(0))
+        old_context = CandidateContext()
+        events = []
+        with provider._lock:
+            provider._context = old_context
+            provider._connection_generation = 1
+            provider._ready_generation = 1
+            provider._generation_subscriptions = {("SH.600519", "1分"), ("US.AAPL", "1分")}
+            provider._callbacks = {
+                ("SH.600519", "1分"): {events.append},
+                ("US.AAPL", "1分"): {events.append},
+            }
+            provider._status = "live"
+
+        with self.assertRaises(Exception):
+            provider.reconnect()
+        self.assertEqual(provider.status, "unavailable")
+        self.assertIsNone(provider._context)
+        self.assertTrue(failed_candidate.closed)
+        self.assertEqual(events, [])
+
+        self.assertEqual(provider.health_check(), "live")
+        self.assertEqual(recovered_candidate.subscribe_calls, ["SH.600519", "US.AAPL"])
+        self.assertEqual(provider._generation_subscriptions, set(provider._callbacks))
+        self.assertTrue(any(not isinstance(event, dict) for event in events))
+        provider.close()
+
+    def test_provider_reconnect_snapshot_failure_publishes_nothing_and_closes_candidate(self):
+        class CandidateContext:
+            def __init__(self):
+                self.closed = False
+                self.subscribe_calls = []
+
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                self.closed = True
+
+            def subscribe(self, symbols, subtypes, **kwargs):
+                self.subscribe_calls.append(symbols[0])
+                return RET_OK, ""
+
+            def get_global_state(self):
+                return RET_OK, ""
+
+        candidate = CandidateContext()
+        snapshot = self.bar(100)
+
+        class SnapshotFailingProvider(FutuRealtimeProvider):
+            def _reconnect_snapshot(self, context, symbol, period):
+                if symbol == "US.AAPL":
+                    raise RuntimeError("snapshot failed")
+                return snapshot
+
+        provider = SnapshotFailingProvider(context_factory=lambda: candidate)
+        events = []
+        with provider._lock:
+            provider._context = CandidateContext()
+            provider._connection_generation = 1
+            provider._ready_generation = 1
+            provider._generation_subscriptions = {("SH.600519", "1分"), ("US.AAPL", "1分")}
+            provider._callbacks = {
+                ("SH.600519", "1分"): {events.append},
+                ("US.AAPL", "1分"): {events.append},
+            }
+            provider._status = "live"
+
+        with self.assertRaises(Exception):
+            provider.reconnect()
+        self.assertEqual(provider.status, "unavailable")
+        self.assertIsNone(provider._context)
+        self.assertTrue(candidate.closed)
+        self.assertEqual(events, [])
+
+    def test_health_does_not_promote_incomplete_generation_to_live(self):
+        class Context:
+            def __init__(self, fail_symbol=None):
+                self.fail_symbol = fail_symbol
+                self.closed = False
+
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                self.closed = True
+
+            def get_global_state(self):
+                return RET_OK, ""
+
+            def subscribe(self, symbols, subtypes, **kwargs):
+                if symbols[0] == self.fail_symbol:
+                    return -1, "subscribe failed"
+                return RET_OK, ""
+
+        candidate = Context(fail_symbol="US.AAPL")
+        snapshot = self.bar(100)
+
+        class Provider(FutuRealtimeProvider):
+            def _reconnect_snapshot(self, context, symbol, period):
+                return snapshot
+
+        provider = Provider(context_factory=lambda: candidate)
+        with provider._lock:
+            provider._context = Context()
+            provider._connection_generation = 1
+            provider._ready_generation = 1
+            provider._generation_subscriptions = {("SH.600519", "1分")}
+            provider._callbacks = {
+                ("SH.600519", "1分"): {lambda event: None},
+                ("US.AAPL", "1分"): {lambda event: None},
+            }
+            provider._status = "live"
+
+        self.assertEqual(provider.health_check(), "unavailable")
+        self.assertNotEqual(provider.status, "live")
+        self.assertTrue(candidate.closed)
+
     def test_context_none_with_active_subscription_retries_after_failure(self):
         class Context:
             def set_handler(self, handler):
@@ -2024,7 +2178,7 @@ class RealtimeCoreContractTests(TestCase):
             return Context()
 
         class RecoveringProvider(FutuRealtimeProvider):
-            def latest_snapshot(self, symbol, period):
+            def _reconnect_snapshot(self, context, symbol, period):
                 return self.snapshot
 
         provider = RecoveringProvider(context_factory=factory)
@@ -2067,12 +2221,16 @@ class RealtimeCoreContractTests(TestCase):
         provider._status = "live"
         with provider._lock:
             provider._connection_generation = 1
+            provider._ready_generation = 1
+            provider._generation_subscriptions = {('SH.600519', '1分')}
         worker = threading.Thread(target=provider.health_check)
         worker.start()
         self.assertTrue(started.wait(timeout=1))
         with provider._lock:
             provider._context = new_context
             provider._connection_generation = 2
+            provider._ready_generation = 2
+            provider._generation_subscriptions = {('SH.600519', '1分')}
             provider._status = "live"
         release.set()
         worker.join(timeout=1)
@@ -2102,6 +2260,8 @@ class RealtimeCoreContractTests(TestCase):
         provider._callbacks[("SH.600519", "1分")] = {events.append}
         with provider._lock:
             provider._connection_generation += 1
+            provider._ready_generation = provider._connection_generation
+            provider._generation_subscriptions = {('SH.600519', '1分')}
         current_generation = provider.connection_generation
         provider._handle_frame(Frame(), generation=old_generation)
         provider._handle_response(old_generation, -1, "late old error")
@@ -2126,6 +2286,11 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("_handle_response", source)
         self.assertIn("_reconnect_lock", source)
         self.assertIn("context is not self._context", source)
+        self.assertIn("_generation_subscriptions", source)
+        self.assertIn("_ready_generation", source)
+        self.assertIn("candidate", source)
+        self.assertIn("snapshots = []", source)
+        self.assertIn("_reconnect_snapshot", source)
         self.assertNotIn("FakeRealtimeProvider", source)
 
     def test_market_chart_updates_in_place_and_cleans_stream(self):
@@ -2152,6 +2317,13 @@ class RealtimeSourceContractTests(SimpleTestCase):
         self.assertIn("reconcileHistory: true", source)
         self.assertIn("source.onopen", source)
         self.assertIn("realtimePayloadSequence", source)
+        self.assertIn("needsHistoryReconcile", source)
+        self.assertIn("historyReconcileRetryTimer", source)
+        self.assertIn("HISTORY_RECONCILE_RETRY_MS = 2000", source)
+        self.assertIn("Array.isArray(payload.bars)", source)
+        self.assertIn("getVisibleLogicalRange", source)
+        self.assertIn("latestRealtimePayloadGeneration", source)
+        self.assertIn("cancelFormulaWork()", source)
         self.assertNotIn("applyRealtimePayload", source)
         self.assertGreaterEqual(source.count("chart?.remove()"), 2)
 
