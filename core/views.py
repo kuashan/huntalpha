@@ -22,6 +22,7 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from futu import AuType, KLType, OpenQuoteContext, RET_OK
 from formula_editor.models import Formula
 from .models import AccountProfile, MarketSymbol, WatchlistEntry
+from .crypto_provider import CoinbasePublicClient, crypto_quote, fetch_crypto_historical_bars
 from .account import (
     AvatarValidationError, account_avatar_url, account_display_name, account_preferences as account_preferences_data,
     delete_avatar, save_avatar,
@@ -38,7 +39,7 @@ from .realtime import (
 )
 from .realtime.formula_scheduler import FormulaRunRegistry, calculation_input_fingerprint
 from .realtime.provider import REALTIME_PERIOD_SUBTYPES
-from .symbol_catalog import FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
+from .symbol_catalog import COINBASE_PROVIDER, FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 from .watchlist import account_tier_payload, watchlist_limit_for_user
 
 PERIODS = {"1分": KLType.K_1M, "5分": KLType.K_5M, "15分": KLType.K_15M, "30分": KLType.K_30M, "60分": KLType.K_60M, "2小时": KLType.K_120M, "4小时": KLType.K_240M, "日线": KLType.K_DAY, "周线": KLType.K_WEEK, "月线": KLType.K_MON}
@@ -372,15 +373,6 @@ def _watchlist_get(request):
             "error": "登录或注册后使用自选功能",
             **totals,
         })
-    if market == "crypto":
-        return json({
-            "items": [],
-            "market": market,
-            "mode": "watchlist",
-            "status": "unavailable",
-            "error": "真实数据源尚未接入",
-            **totals,
-        })
     entries = WatchlistEntry.objects.select_related("symbol").filter(user=request.user)
     if market:
         entries = entries.filter(symbol__market=market)
@@ -405,8 +397,8 @@ def _watchlist_create(request):
         return _watchlist_error("未找到真实证券", "symbol_not_found", request, 404)
     if not symbol.active:
         return _watchlist_error("该证券当前不可用", "symbol_inactive", request, 409)
-    if symbol.security_type != "STOCK":
-        return _watchlist_error("仅支持普通股票", "symbol_unavailable", request, 409)
+    if symbol.security_type not in {"STOCK", "CRYPTO_SPOT"}:
+        return _watchlist_error("该证券类型暂不支持自选", "symbol_unavailable", request, 409)
     try:
         with transaction.atomic():
             locked_user = get_user_model().objects.select_for_update().get(pk=request.user.pk)
@@ -599,6 +591,16 @@ def merge_calculation_snapshot_rows(rows, calculation_snapshot):
 @require_GET
 @api_terminal_required
 def quote(request, code):
+    normalized_code = code.upper()
+    if normalized_code.startswith("CC."):
+        symbol = MarketSymbol.objects.filter(code__iexact=normalized_code, active=True, market="crypto").first()
+        if symbol is None or symbol.provider != COINBASE_PROVIDER:
+            return json({"error": "未找到真实加密资产目录", "source": COINBASE_PROVIDER, "status": "unavailable"}, 404)
+        try:
+            payload = crypto_quote(symbol.provider_symbol, client=CoinbasePublicClient(), name=symbol.name)
+            return json(payload)
+        except Exception as exc:
+            return json({"error": f"Coinbase 不可用：{exc}", "source": COINBASE_PROVIDER, "status": "unavailable"}, 503)
     client = None
     try:
         client = context()
@@ -636,6 +638,26 @@ def kline(request, code):
         before = int(request.GET["before"]) if request.GET.get("before") else None
     except ValueError:
         return json({"error": "before 必须是 Unix 时间戳"}, 400)
+    normalized_code = code.upper()
+    if normalized_code.startswith("CC."):
+        symbol = MarketSymbol.objects.filter(code__iexact=normalized_code, active=True, market="crypto").first()
+        if symbol is None or symbol.provider != COINBASE_PROVIDER:
+            return json({"error": "未找到真实加密资产目录", "source": COINBASE_PROVIDER}, 404)
+        if period == "分时":
+            return json({"error": "Coinbase 加密资产暂不支持分时接口", "code": "period_unavailable", "source": COINBASE_PROVIDER}, 422)
+        try:
+            bars = fetch_crypto_historical_bars(
+                symbol.provider_symbol, period, count=count, before=before, client=CoinbasePublicClient(),
+            )
+            registry = get_realtime_registry()
+            if before is None:
+                bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)))
+            return json({
+                "code": normalized_code, "period": period, "bars": bars, "source": COINBASE_PROVIDER,
+                "adjustment": "UTC", "has_more": len(bars) >= count,
+            })
+        except Exception as exc:
+            return json({"error": f"Coinbase 不可用：{exc}", "source": COINBASE_PROVIDER, "status": "unavailable"}, 503)
     client = None
     try:
         client = context()
@@ -683,7 +705,7 @@ def realtime_market_stream(request, code):
         consumer = registry.subscribe(code.upper(), period)
     except RealtimeProviderError as exc:
         return json({
-            "error": str(exc), "code": "realtime_unavailable", "source": registry.provider_name, "mode": "unavailable",
+            "error": str(exc), "code": "realtime_unavailable", "source": registry.provider_name_for(code), "mode": "unavailable",
         }, 503)
 
     def events():
@@ -722,6 +744,19 @@ def live_float_shares(client, code):
 
 def history_bars(code, period, calculation_snapshot=None):
     """Load the complete bounded OpenD window used for one formula run."""
+    if str(code).upper().startswith("CC."):
+        symbol = MarketSymbol.objects.filter(code__iexact=str(code).upper(), active=True, market="crypto").first()
+        if symbol is None or symbol.provider != COINBASE_PROVIDER:
+            return None, None, "未找到真实加密资产目录"
+        if period == "分时":
+            return None, None, "自定义公式暂不支持分时；请选择 K 线周期"
+        try:
+            bars = fetch_crypto_historical_bars(
+                symbol.provider_symbol, period, count=KLINE_PAGE_SIZE, client=CoinbasePublicClient(),
+            )
+            return merge_calculation_snapshot_rows(bars, calculation_snapshot), None, None
+        except Exception as exc:
+            return None, None, f"Coinbase 不可用：{exc}"
     client = context()
     try:
         if period == "分时":
@@ -804,10 +839,25 @@ def watchlist_item_data(entry):
 
 
 def _market_catalog_queryset(market):
-    return MarketSymbol.objects.filter(market=market, active=True, security_type="STOCK")
+    security_type = "CRYPTO_SPOT" if market == "crypto" else "STOCK"
+    return MarketSymbol.objects.filter(market=market, active=True, security_type=security_type)
 
 
 def _catalog_status(market, leaders_available=None):
+    if market == "crypto":
+        queryset = _market_catalog_queryset(market)
+        latest = queryset.order_by("-catalog_updated_at").first()
+        available = queryset.exists()
+        return {
+            "market": market,
+            "name": "加密资产",
+            "provider": COINBASE_PROVIDER,
+            "catalog_available": available,
+            "leaders_available": False,
+            "status": "ok" if available else "unavailable",
+            "error": None if available else "真实加密资产目录尚未同步",
+            "updated_at": latest.catalog_updated_at.isoformat() if latest else None,
+        }
     definition = MARKET_DEFINITIONS.get(market)
     if definition is None:
         return {
@@ -843,7 +893,7 @@ def _catalog_status(market, leaders_available=None):
 @require_GET
 @api_terminal_required
 def markets(request):
-    return json({"markets": [_catalog_status(market) for market in SUPPORTED_MARKETS] + [_catalog_status("crypto")]})
+    return json({"markets": [_catalog_status(market) for market in SUPPORTED_MARKETS]})
 
 
 @require_GET
@@ -895,7 +945,7 @@ def _catalog_response(request, market, items, query="", page=1, limit=5, total=N
 @api_terminal_required
 def market_leaders(request, market):
     if market not in MARKET_DEFINITIONS:
-        return _catalog_response(request, market, [], mode="leaders", error="真实数据源未接入") if market == "crypto" else json({"error": "不支持的市场"}, 400)
+        return _catalog_response(request, market, [], mode="leaders", error="加密资产不提供市值榜单") if market == "crypto" else json({"error": "不支持的市场"}, 400)
     metric = request.GET.get("metric", "market_cap").strip() or "market_cap"
     leader_metrics = {"market_cap": "-market_cap"}
     if metric not in leader_metrics:
@@ -907,12 +957,12 @@ def market_leaders(request, market):
 @require_GET
 @api_terminal_required
 def symbols(request, market):
-    if market not in MARKET_DEFINITIONS:
-        return _catalog_response(request, market, [], mode="unavailable", error="真实数据源未接入") if market == "crypto" else json({"error": "不支持的市场"}, 400)
+    if market not in SUPPORTED_MARKETS:
+        return json({"error": "不支持的市场"}, 400)
     query = request.GET.get("q", "").strip()
     if len(query) > 80:
         return json({"error": "搜索内容过长"}, 400)
-    if not query:
+    if not query and market != "crypto":
         return market_leaders(request, market)
     limit, page, error = _parse_catalog_paging(request)
     if error:
@@ -986,7 +1036,7 @@ def indicator_render(request, code, symbol):
         formula_version = 1 if builtin_chanlun else item.version
         input_hash = calculation_input_fingerprint(calculation_bars, float_shares)
         formula_key = (
-            registry.provider_name, symbol.upper(), period, formula_id, formula_version,
+            registry.provider_name_for(symbol), symbol.upper(), period, formula_id, formula_version,
             calculation_snapshot.epoch, calculation_snapshot.revision, input_hash,
         )
 
@@ -1083,4 +1133,4 @@ def indicator_render(request, code, symbol):
             if isinstance(row, dict)
         ],
     }
-    return json({"code": "CHANLUN" if builtin_chanlun else item.code, "name": "缠论结构" if builtin_chanlun else item.name, "placement": "main" if builtin_chanlun else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "epoch": calculation_snapshot.epoch, "revision": calculation_snapshot.revision, "engine": formula.get("engine", "tongdaxin"), "source": registry.provider_name, "adjustment": "前复权"})
+    return json({"code": "CHANLUN" if builtin_chanlun else item.code, "name": "缠论结构" if builtin_chanlun else item.name, "placement": "main" if builtin_chanlun else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "epoch": calculation_snapshot.epoch, "revision": calculation_snapshot.revision, "engine": formula.get("engine", "tongdaxin"), "source": registry.provider_name_for(symbol), "adjustment": "UTC" if str(symbol).upper().startswith("CC.") else "前复权"})

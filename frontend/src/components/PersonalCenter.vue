@@ -18,6 +18,7 @@ const marketOptions = [
   { value: 'cn', label: '沪深 A 股' },
   { value: 'hk', label: '港股' },
   { value: 'us', label: '美股' },
+  { value: 'crypto', label: '加密资产' },
 ]
 const periodOptions = ['1分', '5分', '15分', '30分', '60分', '2小时', '4小时', '日线', '周线', '月线']
 const props = defineProps({

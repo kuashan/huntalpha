@@ -383,7 +383,7 @@ class AccountProfileApiTests(TestCase):
         self.client.force_login(self.user)
         self.assertEqual(self.patch_json('/api/account/preferences/', {'default_market': 'us'}).status_code, 403)
         headers = self.csrf_headers()
-        invalid = self.patch_json('/api/account/preferences/', {'default_market': 'crypto'}, headers)
+        invalid = self.patch_json('/api/account/preferences/', {'default_market': 'jp'}, headers)
         self.assertEqual(invalid.status_code, 400)
         non_string = self.patch_json('/api/account/preferences/', {'default_market': ['us']}, headers)
         self.assertEqual(non_string.status_code, 400)
@@ -772,31 +772,17 @@ class RealMarketDataApiTests(TestCase):
 
     def test_quote_reports_missing_real_data_instead_of_zero(self):
         self.client.force_login(self.make_user())
-
-        class Frame:
-            empty = False
-
-            def __init__(self):
-                self.iloc = self
-
-            def __getitem__(self, index):
-                return {
-                    'code': 'CC.BTCUSD', 'name': 'Bitcoin / USD', 'last_price': None,
-                    'prev_close_price': None, 'open_price': None, 'high_price': None,
-                    'low_price': None, 'update_time': '',
-                }
-
-        class Client:
-            def get_market_snapshot(self, codes):
-                return RET_OK, Frame()
-
-            def close(self):
-                pass
-
-        with patch('core.views.context', return_value=Client()):
-            response = self.client.get('/api/quote/CC.BTCUSD/')
-        self.assertEqual(response.status_code, 502)
-        self.assertIn('有效最新价', response.json()['error'])
+        MarketSymbol.objects.create(
+            code='CC.BTC-USD', name='Bitcoin', market='crypto',
+            security_type='CRYPTO_SPOT', provider='coinbase',
+            provider_symbol='BTC-USD', active=True,
+        )
+        with patch('core.views.crypto_quote', side_effect=Exception('Coinbase unavailable')):
+            response = self.client.get('/api/quote/CC.BTC-USD/')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['source'], 'coinbase')
+        self.assertEqual(response.json()['status'], 'unavailable')
+        self.assertNotIn('price', response.json())
 
     def test_kline_error_does_not_return_generated_bars(self):
         self.client.force_login(self.make_user())
@@ -1154,24 +1140,26 @@ class MarketIndexSnapshotTests(SimpleTestCase):
         self.assertTrue(all(item["price"] is None for item in items))
         self.assertTrue(all(item["change_percent"] is None for item in items))
 
-    def test_frontend_header_keeps_index_data_and_uses_crypto_preview_without_quotes(self):
+    def test_frontend_header_keeps_index_data_and_uses_backend_crypto_quotes(self):
         app_source = (Path(settings.BASE_DIR) / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
         self.assertIn("const visibleMarkets = computed(() => markets)", app_source)
         self.assertIn('v-for="item in visibleMarkets"', app_source)
         self.assertIn("/api/market-index-snapshots/", app_source)
         self.assertIn("displayIndexPrice(index.price)", app_source)
         self.assertIn("index.status === 'loading'", app_source)
-        self.assertIn("const cryptoPreviewRows = [{ name: 'BTC' }, { name: 'ETH' }]", app_source)
-        self.assertIn("item.code === 'crypto' ? '待接入真实数据源' : 'futu-opend'", app_source)
-        self.assertIn("provider_status: 'not_connected'", app_source)
+        self.assertIn("const cryptoOverviewRows = [{ code: 'CC.BTC-USD', name: 'BTC' }, { code: 'CC.ETH-USD', name: 'ETH' }]", app_source)
+        self.assertIn("item.code === 'crypto' ? 'Coinbase' : '富途 OpenD'", app_source)
+        self.assertIn("/api/quote/${encodeURIComponent(item.code)}/", app_source)
+        self.assertIn("provider_status: quote?.status === 'ready' ? 'connected' : 'unavailable'", app_source)
         self.assertIn(":title=\"indexTitle(index)\"", app_source)
         self.assertNotIn("v-for=\"item in markets\"", app_source)
         self.assertNotIn("/api/kline/", app_source)
         self.assertNotIn("/api/indicator-render/", app_source)
-        self.assertNotIn("/api/quote/CC.", app_source)
+        self.assertNotIn("https://api.exchange.coinbase.com", app_source)
         self.assertIn(".markets{grid-template-columns:repeat(4,minmax(0,1fr));min-height:100px}", app_source)
         self.assertIn("@media(max-width:800px){.markets{grid-template-columns:repeat(2,minmax(0,1fr))}", app_source)
         self.assertIn("index.updated_at ? `更新时间：${index.updated_at}` : status", app_source)
+        self.assertIn("const providerLabel = provider =>", app_source)
 
 
 class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
@@ -1256,6 +1244,13 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertNotIn("next_reset_at", combined)
         self.assertNotIn("每月重置", combined)
 
+    def test_crypto_default_market_and_provider_aware_quote_copy(self):
+        self.assertIn("{ value: 'crypto', label: '加密资产' }", self.center_source)
+        self.assertIn("providerLabel(quoteData.value?.source || selected.value?.provider)", self.app_source)
+        self.assertIn("const providerLabel = provider => ({ coinbase: 'Coinbase', 'futu-opend': '富途 OpenD' }", self.app_source)
+        self.assertNotIn("quoteLoading:'正在获取富途 OpenD 真实行情", (self.base_dir / "frontend" / "src" / "i18n.js").read_text(encoding="utf-8"))
+        self.assertIn("页面仅展示真实数据提供方返回的市场数据", (self.base_dir / "frontend" / "src" / "i18n.js").read_text(encoding="utf-8"))
+
     def test_account_summary_retry_only_caches_success(self):
         success_index = self.popover_source.index('summary.value = payload')
         loaded_index = self.popover_source.index('summaryLoaded.value = true')
@@ -1297,7 +1292,7 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         task_005_1_3 = next(index for index, line in enumerate(task_lines) if line.startswith('### Task 005.1.3'))
         task_005_1_4 = next(index for index, line in enumerate(task_lines) if line.startswith('### Task 005.1.4'))
         self.assertIn('状态：`IN_PROGRESS`', '\n'.join(task_lines[task_005_1_3:task_005_1_4]))
-        self.assertIn('状态：`PLANNED`', '\n'.join(task_lines[task_005_1_4:]))
+        self.assertIn('状态：`IN_PROGRESS`', '\n'.join(task_lines[task_005_1_4:]))
         self.assertIn('Provider-neutral realtime architecture', '\n'.join(task_lines[task_005_1_3:task_005_1_4]))
 
 

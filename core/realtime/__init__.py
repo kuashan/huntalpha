@@ -11,12 +11,14 @@ from .contracts import (
     timestamp_to_market_datetime,
 )
 from .futu_provider import FutuRealtimeProvider
+from .router import MarketDataProviderRouter
 from .provider import RealtimeProviderError
 from .registry import RealtimeConsumer, RealtimeRegistry, get_realtime_registry
 from .state import RealtimeStateStore
 
 __all__ = [
     "FutuRealtimeProvider",
+    "MarketDataProviderRouter",
     "MARKET_TIMEZONES",
     "MergeResult",
     "NormalizedBar",

@@ -20,7 +20,7 @@ const routeFromLocation = () => {
   return { page: path === '/account' ? 'account' : 'terminal', section: accountSections.includes(section) ? section : 'overview' }
 }
 const initialRoute = routeFromLocation(); const route = ref(initialRoute.page); const accountSection = ref(initialRoute.section)
-const indexSnapshots = ref([]); const indexLoading = ref(false); const indexError = ref(''); let indexRequestVersion = 0; let indexRefreshTimer
+const indexSnapshots = ref([]); const cryptoOverviewQuotes = ref({}); const indexLoading = ref(false); const indexError = ref(''); let indexRequestVersion = 0; let cryptoOverviewRequestVersion = 0; let indexRefreshTimer
 const catalogLoading = ref(false); const catalogError = ref(''); let symbolRequestVersion = 0; let quoteRequestVersion = 0; let searchTimer
 const watchlistTotal = ref(null); const watchlistLimit = ref(null); const watchlistRemaining = ref(null); const watchlistError = ref('')
 const analysisCode = new URLSearchParams(window.location.search).get('analysis')
@@ -29,12 +29,15 @@ const analysisMarket = new URLSearchParams(window.location.search).get('market')
 const installedIndicators = computed(() => [...mainInstalled.value, ...subInstalled.value])
 const visibleMarkets = computed(() => markets)
 const indexMarketLayout = { cn: ['上证指数', '深证成指'], hk: ['恒生指数', '恒生科技指数'], us: ['标普500', '纳斯达克综合指数', '道琼斯工业平均指数'] }
-const cryptoPreviewRows = [{ name: 'BTC' }, { name: 'ETH' }]
+const cryptoOverviewRows = [{ code: 'CC.BTC-USD', name: 'BTC' }, { code: 'CC.ETH-USD', name: 'ETH' }]
 const displayIndexNames = { 上证指数: '上证', 深证成指: '深证', 恒生指数: '恒指', 恒生科技指数: '恒生科技', 标普500: '标普500', 标普500指数: '标普500', 纳斯达克综合指数: '纳斯达克', 道琼斯工业平均指数: '道琼斯', 道琼斯指数: '道琼斯' }
 const displayIndexName = name => displayIndexNames[name] || name
 const isFiniteNumber = value => typeof value === 'number' && Number.isFinite(value)
 const indexRowsForMarket = code => {
-  if (code === 'crypto') return cryptoPreviewRows.map(item => ({ ...item, status: 'unavailable', provider_status: 'not_connected' }))
+  if (code === 'crypto') return cryptoOverviewRows.map(item => {
+    const quote = cryptoOverviewQuotes.value[item.code]
+    return { ...item, price: quote?.data?.price, change_percent: quote?.data?.change, updated_at: quote?.data?.updated_at, status: quote?.status === 'ready' ? 'ready' : 'unavailable', provider_status: quote?.status === 'ready' ? 'connected' : 'unavailable' }
+  })
   const items = indexSnapshots.value.filter(item => item.market === code)
   return items.length ? items : (indexMarketLayout[code] || []).map(name => ({ name, status: indexLoading.value ? 'loading' : 'unavailable' }))
 }
@@ -45,8 +48,9 @@ const indexTitle = index => {
 const list = computed(() => symbols.value)
 const selectedQuote = computed(() => quotes.value[selected.value?.code] || { status: 'idle' })
 const quoteData = computed(() => selectedQuote.value.status === 'ready' ? selectedQuote.value.data : null)
+const providerLabel = provider => ({ coinbase: 'Coinbase', 'futu-opend': '富途 OpenD' }[provider] || provider || '—')
 const quoteStatusText = computed(() => {
-  if (selectedQuote.value.status === 'ready') return t('quoteSource')
+  if (selectedQuote.value.status === 'ready') return `${t('quoteSource')}${providerLabel(quoteData.value?.source || selected.value?.provider)}`
   if (selectedQuote.value.status === 'loading' || selectedQuote.value.status === 'idle') return t('quoteLoading')
   return `${t('quoteUnavailable')}：${selectedQuote.value.error}`
 })
@@ -64,7 +68,7 @@ const marketChangeStyle = value => {
   return { color: value > 0 ? marketColorTokens.value.up : marketColorTokens.value.down }
 }
 const catalogStatusText = computed(() => catalogError.value || (catalogLoading.value ? t('catalogLoading') : query.value.trim() && !list.value.length ? t('noSymbol') : ''))
-const emptyWatchlistText = computed(() => market.value.code === 'crypto' ? t('watchlistUnavailable') : t('watchlistEmpty'))
+const emptyWatchlistText = computed(() => t('watchlistEmpty'))
 function updateWatchlistSummary(payload) {
   if (payload?.mode === 'watchlist') {
     watchlistTotal.value = payload.total ?? 0
@@ -96,7 +100,7 @@ function removeIndicator(item) { if (item.placement === 'main') mainInstalled.va
 function applyInitialPreferences(currentUser) {
   if (initialPreferencesApplied || !currentUser?.preferences) return
   const preferences = currentUser.preferences
-  if (['cn', 'hk', 'us'].includes(preferences.default_market)) market.value = markets.find(item => item.code === preferences.default_market) || markets[0]
+  if (['cn', 'hk', 'us', 'crypto'].includes(preferences.default_market)) market.value = markets.find(item => item.code === preferences.default_market) || markets[0]
   if (['1分', '5分', '15分', '30分', '60分', '2小时', '4小时', '日线', '周线', '月线'].includes(preferences.default_period)) period.value = preferences.default_period
   if (['cn', 'international'].includes(preferences.price_color_mode)) priceColorMode.value = preferences.price_color_mode
   initialPreferencesApplied = true
@@ -178,6 +182,23 @@ async function loadMarketIndexes() {
   } finally {
     if (version === indexRequestVersion) indexLoading.value = false
   }
+  loadCryptoOverview()
+}
+async function loadCryptoOverview() {
+  const version = ++cryptoOverviewRequestVersion
+  const next = Object.fromEntries(cryptoOverviewRows.map(item => [item.code, { status: 'loading' }]))
+  cryptoOverviewQuotes.value = next
+  await Promise.all(cryptoOverviewRows.map(async item => {
+    try {
+      const reply = await fetch(`${API_BASE}/api/quote/${encodeURIComponent(item.code)}/`, { credentials: 'include' })
+      const payload = await reply.json()
+      if (!reply.ok) throw new Error(payload.error || 'Coinbase unavailable')
+      next[item.code] = { status: 'ready', data: payload }
+    } catch (error) {
+      next[item.code] = { status: 'error', error: error.message || 'Coinbase unavailable' }
+    }
+  }))
+  if (version === cryptoOverviewRequestVersion) cryptoOverviewQuotes.value = { ...next }
 }
 function stopMarketIndexRefresh() { window.clearInterval(indexRefreshTimer); indexRefreshTimer = undefined }
 function startMarketIndexRefresh() {
@@ -235,8 +256,8 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); stopMarketIndexRefresh
   <AiAnalysis v-else-if="analysisCode" :code="analysisCode" :name="analysisName" :market="analysisMarket" @back="backToTerminal" />
   <main v-else class="terminal" :style="{ '--market-up': marketColorTokens.up, '--market-down': marketColorTokens.down }">
      <header><div class="brand"><HuntAlphaLogo class="brand-logo" /><span class="brand-name">HuntAlpha</span><small class="brand-hub">HUB</small></div><nav><a class="active">{{ t('market') }}</a><a>{{ t('watchlist') }}</a><a>{{ t('strategy') }}</a><a>{{ t('news') }}</a></nav><div class="header-account-controls"><div v-if="visitor" class="visitor-account"><div class="feed"><span class="feed-dot">●</span><span>{{ t('visitor') }}</span></div><button class="visitor-logout" @click="signOut">{{ t('logout') }}</button></div><AccountPopover v-else :user="user" :watchlist-total="watchlistTotal" :watchlist-limit="watchlistLimit" :watchlist-remaining="watchlistRemaining" @navigate="navigateToAccount" @logout="signOut" /><select class="terminal-language" :value="locale" @change="setLocale($event.target.value)"><option v-for="item in languages" :key="item.code" :value="item.code">{{ item.label }}</option></select></div></header>
-    <section class="markets" aria-label="市场概览"><button v-for="item in visibleMarkets" :key="item.code" class="market-card" :class="{active: market.code === item.code}" @click="switchMarket(item)"><div class="market-card-title"><strong>{{ item.name }}</strong><small>{{ item.code === 'crypto' ? '待接入真实数据源' : 'futu-opend' }}</small></div><div v-for="index in indexRowsForMarket(item.code)" :key="index.code || index.name" class="market-index" :title="indexTitle(index)" :aria-label="indexTitle(index)"><span class="market-index-name">{{ displayIndexName(index.name) }}</span><span class="market-index-values"><b :class="{unavailable: !isFiniteNumber(index.price)}">{{ displayIndexPrice(index.price) }}</b><em :style="marketChangeStyle(index.change_percent)" :class="{down: index.change_percent < 0, unavailable: !isFiniteNumber(index.change_percent)}">{{ displayIndexChange(index.change_percent) }}</em></span></div></button></section>
-    <div class="workspace"><aside><div class="aside-title" :title="watchlistRemaining == null ? '' : `${watchlistRemaining} ${t('watchlistRemaining')}`"><span>{{ t('watchlistList') }}</span><b>{{ watchlistTotal == null ? '—' : watchlistTotal }} / {{ watchlistLimit == null ? '—' : watchlistLimit }}</b></div><label class="search">⌕ <input v-model="query" :placeholder="t('search')" /></label><div class="heads"><span>{{ t('nameCode') }}</span><span>{{ t('latest') }}</span><span>{{ t('change') }}</span><span aria-label="收藏">☆</span></div><div v-for="item in list" :key="item.code" class="symbol" :class="{selected: selected?.code === item.code}" :title="symbolTitle(item)" :aria-label="symbolTitle(item)" role="button" tabindex="0" @click="selected = item" @keydown.enter="selected = item"><span class="symbol-name"><strong>{{ item.name }}</strong><small>{{ item.code }}</small></span><b :style="marketChangeStyle(itemQuote(item)?.change)">{{ displayPrice(itemQuote(item)?.price) }}</b><em :style="marketChangeStyle(itemQuote(item)?.change)" :class="{down:itemQuote(item)?.change < 0}">{{ displayChange(itemQuote(item)?.change) }}</em><button type="button" class="star" :class="{active:item.watchlisted}" :aria-label="item.watchlisted ? t('watchlistUnstar') : t('watchlistStar')" :aria-pressed="item.watchlisted" @click.stop="toggleWatchlist(item)">{{ item.watchlisted ? '★' : '☆' }}</button></div><p v-if="catalogStatusText">{{ catalogStatusText }}</p><p v-if="!catalogLoading && !list.length && !catalogStatusText" class="watchlist-empty">{{ emptyWatchlistText }}<small v-if="!query.trim() && market.code !== 'crypto'">{{ t('watchlistSearchHint') }}</small></p><p v-if="watchlistError" class="watchlist-message">{{ watchlistError }}</p></aside>
+    <section class="markets" aria-label="市场概览"><button v-for="item in visibleMarkets" :key="item.code" class="market-card" :class="{active: market.code === item.code}" @click="switchMarket(item)"><div class="market-card-title"><strong>{{ item.name }}</strong><small>{{ item.code === 'crypto' ? 'Coinbase' : '富途 OpenD' }}</small></div><div v-for="index in indexRowsForMarket(item.code)" :key="index.code || index.name" class="market-index" :title="indexTitle(index)" :aria-label="indexTitle(index)"><span class="market-index-name">{{ displayIndexName(index.name) }}</span><span class="market-index-values"><b :class="{unavailable: !isFiniteNumber(index.price)}">{{ displayIndexPrice(index.price) }}</b><em :style="marketChangeStyle(index.change_percent)" :class="{down: index.change_percent < 0, unavailable: !isFiniteNumber(index.change_percent)}">{{ displayIndexChange(index.change_percent) }}</em></span></div></button></section>
+    <div class="workspace"><aside><div class="aside-title" :title="watchlistRemaining == null ? '' : `${watchlistRemaining} ${t('watchlistRemaining')}`"><span>{{ t('watchlistList') }}</span><b>{{ watchlistTotal == null ? '—' : watchlistTotal }} / {{ watchlistLimit == null ? '—' : watchlistLimit }}</b></div><label class="search">⌕ <input v-model="query" :placeholder="t('search')" /></label><div class="heads"><span>{{ t('nameCode') }}</span><span>{{ t('latest') }}</span><span>{{ t('change') }}</span><span aria-label="收藏">☆</span></div><div v-for="item in list" :key="item.code" class="symbol" :class="{selected: selected?.code === item.code}" :title="symbolTitle(item)" :aria-label="symbolTitle(item)" role="button" tabindex="0" @click="selected = item" @keydown.enter="selected = item"><span class="symbol-name"><strong>{{ item.name }}</strong><small>{{ item.code }}</small></span><b :style="marketChangeStyle(itemQuote(item)?.change)">{{ displayPrice(itemQuote(item)?.price) }}</b><em :style="marketChangeStyle(itemQuote(item)?.change)" :class="{down:itemQuote(item)?.change < 0}">{{ displayChange(itemQuote(item)?.change) }}</em><button type="button" class="star" :class="{active:item.watchlisted}" :aria-label="item.watchlisted ? t('watchlistUnstar') : t('watchlistStar')" :aria-pressed="item.watchlisted" @click.stop="toggleWatchlist(item)">{{ item.watchlisted ? '★' : '☆' }}</button></div><p v-if="catalogStatusText">{{ catalogStatusText }}</p><p v-if="!catalogLoading && !list.length && !catalogStatusText" class="watchlist-empty">{{ emptyWatchlistText }}<small v-if="!query.trim()">{{ market.code === 'crypto' ? '搜索 BTC 或 ETH 并点击 ☆ 添加' : t('watchlistSearchHint') }}</small></p><p v-if="watchlistError" class="watchlist-message">{{ watchlistError }}</p></aside>
       <section class="content"><div class="security"><div><p>{{ market.name }} · {{ quoteStatusText }}</p><h1>{{ selected?.name || '—' }} <small>{{ selected?.code || '' }}</small><button v-if="selected && !selected.code.startsWith('CC.')" class="ai-button" @click="requestAiAccess">AI 分析</button></h1></div><div class="price"><strong :style="marketChangeStyle(quoteData?.change)">{{ displayPrice(quoteData?.price) }}</strong><span :style="marketChangeStyle(quoteData?.change)" :class="{down:quoteData?.change < 0}">{{ displayChange(quoteData?.change) }}</span></div><dl><div><dt>{{ t('open') }}</dt><dd>{{ displayPrice(quoteData?.open) }}</dd></div><div><dt>{{ t('high') }}</dt><dd>{{ displayPrice(quoteData?.high) }}</dd></div><div><dt>{{ t('low') }}</dt><dd>{{ displayPrice(quoteData?.low) }}</dd></div></dl></div>
         <div class="toolbar"><div><button v-for="item in ['分时','1分','5分','15分','30分','60分','2小时','4小时','日线','周线','月线']" :key="item" :class="{active:period === item}" @click="period=item">{{ item }}</button></div><div class="common-tools"><button v-for="item in commonIndicators" :key="item.code" :class="{on:installedIndicators.some(current=>current.code===item.code)}" @click="toggleCommon(item)">{{item.name}}</button><button @click="manager.open()">{{ t('manager') }}</button></div></div>
         <div class="labels"><span>{{ t('main') }}{{ mainInstalled.map(item => item.name).join(' · ') || t('candle') }}</span></div><MarketChart v-if="selected" :symbol="selected" :period="period" :installed-indicators="installedIndicators" :market-color-tokens="marketColorTokens" /><div v-else class="catalog-empty">{{ catalogStatusText }}</div><footer>{{ t('disclaimer') }}</footer>

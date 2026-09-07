@@ -55,6 +55,7 @@ class MarketSymbol(models.Model):
         CN = "cn", "沪深 A 股"
         HK = "hk", "港股"
         US = "us", "美股"
+        CRYPTO = "crypto", "加密资产"
 
     code = models.CharField("统一证券代码", max_length=32, unique=True)
     name = models.CharField("证券名称", max_length=160)
@@ -132,6 +133,7 @@ class AccountProfile(models.Model):
         CN = "cn", "沪深 A 股"
         HK = "hk", "港股"
         US = "us", "美股"
+        CRYPTO = "crypto", "加密资产"
 
     PERIOD_CHOICES = (
         ("1分", "1 分钟"), ("5分", "5 分钟"), ("15分", "15 分钟"),
