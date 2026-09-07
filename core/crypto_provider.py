@@ -283,16 +283,20 @@ def crypto_quote(product_id, client=None, name=None):
     if price is None:
         raise CoinbaseApiError("Coinbase ticker has no valid price")
     stats = stats if isinstance(stats, dict) else {}
+    open_price = _finite(stats.get("open"), positive=True)
+    change = None
+    if open_price is not None:
+        change = (price - open_price) / open_price * 100
     return {
         "code": internal_symbol_for(product_id),
         "name": name or product_id,
         "price": price,
-        "change": None,
+        "change": change,
         "previous_close": None,
         "best_bid": _finite(ticker.get("bid"), positive=True),
         "best_ask": _finite(ticker.get("ask"), positive=True),
-        "volume": _finite(ticker.get("volume_24h")),
-        "open": _finite(stats.get("open")),
+        "volume": _finite(ticker.get("volume")),
+        "open": open_price,
         "high": _finite(stats.get("high")),
         "low": _finite(stats.get("low")),
         "updated_at": ticker.get("time"),
@@ -309,6 +313,7 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
     """One public Coinbase WebSocket shared by all crypto products/periods."""
 
     provider_name = COINBASE_PROVIDER
+    HEARTBEAT_TIMEOUT_SECONDS = 5.0
 
     def __init__(self, client=None, websocket_factory=None, reconnect_delay=1.0):
         self.client = client or CoinbasePublicClient()
@@ -320,14 +325,21 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
         self._products = set()
         self._bars = {}
         self._seen_ids = defaultdict(set)
-        self._seen_order = defaultdict(lambda: deque(maxlen=MAX_SEEN_TRADE_IDS))
-        self._trade_log = defaultdict(lambda: deque(maxlen=MAX_SEEN_TRADE_IDS))
-        self._last_sequence = None
+        self._seen_order = defaultdict(deque)
+        self._last_sequence_by_product = {}
+        self._observed_sequences = set()
+        self._observed_sequence_order = deque()
+        self._last_heartbeat_monotonic = None
+        self._last_heartbeat_counter = None
+        self._reconcile_in_progress = set()
+        self._connection_generation = 0
+        self._connection_products = set()
+        self._ready_generation = None
+        self._reconnect_requested_generation = None
         self._ws = None
         self._thread = None
         self._stop = threading.Event()
         self._status = "unavailable"
-        self._has_connected = False
 
     @property
     def status(self):
@@ -348,6 +360,10 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
     def _send(self, payload):
         with self._lock:
             connection = self._ws
+            return self._send_locked(payload, connection)
+
+    @staticmethod
+    def _send_locked(payload, connection):
         if connection is None:
             return False
         try:
@@ -361,6 +377,47 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
 
     def _unsubscribe(self, product_ids):
         return {"type": "unsubscribe", "product_ids": sorted(product_ids), "channel": "market_trades"}
+
+    def _sync_subscriptions_locked(self, connection=None):
+        connection = connection or self._ws
+        desired = set(self._products)
+        additions = desired - self._connection_products
+        removals = self._connection_products - desired
+        if additions and not self._send_locked(self._subscription(additions), connection):
+            raise CoinbaseApiError("Coinbase subscription send failed")
+        if removals and not self._send_locked(self._unsubscribe(removals), connection):
+            raise CoinbaseApiError("Coinbase unsubscription send failed")
+        self._connection_products.update(additions)
+        self._connection_products.difference_update(removals)
+
+    def _sync_subscriptions(self):
+        connection = None
+        generation = None
+        try:
+            with self._lock:
+                connection = self._ws
+                generation = self._connection_generation
+                if connection is None:
+                    return
+                self._sync_subscriptions_locked(connection)
+        except Exception as exc:
+            self._request_reconnect(connection, generation, exc)
+
+    def _request_reconnect(self, connection, generation, error):
+        should_close = False
+        with self._lock:
+            if connection is None or self._ws is not connection or generation != self._connection_generation:
+                return
+            if self._reconnect_requested_generation == generation:
+                return
+            self._reconnect_requested_generation = generation
+            should_close = True
+        self._emit_status("reconnecting", error)
+        if should_close:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     def _ensure_thread_locked(self):
         if self._thread and self._thread.is_alive():
@@ -384,7 +441,7 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
                 first_product = False
             self._ensure_thread_locked()
         if first_product:
-            self._send(self._subscription([product]))
+            self._sync_subscriptions()
 
     def unsubscribe(self, symbol, period):
         internal, product, normalized_period = self._key(symbol, period)
@@ -397,7 +454,6 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
             if self._product_refs[product] <= 0:
                 self._product_refs.pop(product, None)
                 self._products.discard(product)
-                self._send(self._unsubscribe([product]))
             stop = not self._products
             if stop:
                 self._stop.set()
@@ -409,18 +465,43 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
                 connection.close()
             except Exception:
                 pass
+        else:
+            self._sync_subscriptions()
 
-    def _reconcile_snapshot(self, product, normalized_period):
-        started_at = int(time.time())
+    def _remember_trade_id(self, product, trade_id):
+        """Keep one bounded, internally consistent FIFO dedup structure."""
+        with self._lock:
+            seen = self._seen_ids[product]
+            order = self._seen_order[product]
+            if trade_id in seen:
+                return False
+            if len(order) >= MAX_SEEN_TRADE_IDS:
+                evicted = order.popleft()
+                seen.discard(evicted)
+            order.append(trade_id)
+            seen.add(trade_id)
+            return True
+
+    def _remember_connection_sequence(self, sequence):
+        if sequence is None:
+            return
+        with self._lock:
+            if sequence in self._observed_sequences:
+                return
+            if len(self._observed_sequence_order) >= MAX_SEEN_TRADE_IDS:
+                self._observed_sequences.discard(self._observed_sequence_order.popleft())
+            self._observed_sequence_order.append(sequence)
+            self._observed_sequences.add(sequence)
+
+    def _build_reconcile_snapshot(self, product, normalized_period):
         bars = fetch_crypto_historical_bars(product, normalized_period, count=2, client=self.client)
         if not bars:
             raise CoinbaseApiError(f"Coinbase returned no historical bars for {product}")
         source = bars[-1]
-        internal = internal_symbol_for(product)
-        authoritative = NormalizedBar(
+        return NormalizedBar(
             provider=COINBASE_PROVIDER,
             market="crypto",
-            symbol=internal,
+            symbol=internal_symbol_for(product),
             period=normalized_period,
             time=source["time"],
             open=source["open"], high=source["high"], low=source["low"], close=source["close"],
@@ -428,22 +509,43 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
             is_closed=False, provider_timestamp=int(time.time()), sequence=None,
             mode="streaming", event_kind="reconcile",
         )
+
+    def _fetch_reconcile_snapshot(self, product, normalized_period):
+        key = (product, normalized_period)
+        with self._lock:
+            self._reconcile_in_progress.add(key)
+        try:
+            return self._build_reconcile_snapshot(product, normalized_period)
+        finally:
+            with self._lock:
+                self._reconcile_in_progress.discard(key)
+
+    def _reconcile_snapshot(self, product, normalized_period):
+        authoritative = self._fetch_reconcile_snapshot(product, normalized_period)
         with self._lock:
             self._bars[(product, normalized_period)] = authoritative
-            replay = [trade for trade in self._trade_log[product] if trade[0] >= started_at]
-        # Trades received while REST was in flight are newer than the
-        # authoritative snapshot and must be replayed once, otherwise the
-        # bootstrap/reconnect window would silently lose them.
-        for _received_at, timestamp, price, size, sequence in replay:
-            self._aggregate_trade(product, internal, normalized_period, timestamp, price, size, sequence)
-        with self._lock:
-            return self._bars[(product, normalized_period)]
+        return authoritative
 
     def _reconcile_active(self):
         with self._lock:
             keys = list(self._callbacks)
-        for internal, period in keys:
-            self._reconcile_snapshot(provider_symbol_for(internal), period)
+            held_keys = {(provider_symbol_for(internal), period) for internal, period in keys}
+            self._reconcile_in_progress.update(held_keys)
+        staged = []
+        try:
+            for internal, period in keys:
+                staged.append(((internal, period), self._build_reconcile_snapshot(provider_symbol_for(internal), period)))
+            with self._lock:
+                for (internal, period), bar in staged:
+                    self._bars[(provider_symbol_for(internal), period)] = bar
+        finally:
+            with self._lock:
+                self._reconcile_in_progress.difference_update(held_keys)
+        for (internal, period), bar in staged:
+            with self._lock:
+                callbacks = list(self._callbacks.get((internal, period), set()))
+            for callback in callbacks:
+                callback(bar)
 
     def latest_snapshot(self, symbol, period):
         internal, product, normalized_period = self._key(symbol, period)
@@ -460,6 +562,18 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
             for callback in listeners:
                 callback(payload)
 
+    def _maybe_promote_live(self, generation):
+        with self._lock:
+            if generation != self._connection_generation or self._ready_generation != generation:
+                return
+            if self._last_heartbeat_monotonic is None:
+                return
+            if self._connection_products != set(self._products):
+                return
+            should_emit = self._status != "live"
+        if should_emit:
+            self._emit_status("live")
+
     def _run(self):
         delay = self.reconnect_delay
         while not self._stop.is_set():
@@ -475,18 +589,29 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
                         connection.close()
                         break
                     self._ws = connection
-                    self._last_sequence = None
-                connection.send(json.dumps(self._subscription(products)))
-                connection.send(json.dumps({"type": "subscribe", "channel": "heartbeats"}))
+                    self._connection_generation += 1
+                    generation = self._connection_generation
+                    self._connection_products = set()
+                    self._last_sequence_by_product = {}
+                    self._observed_sequences = set()
+                    self._observed_sequence_order = deque()
+                    self._last_heartbeat_monotonic = None
+                    self._last_heartbeat_counter = None
+                    self._ready_generation = None
+                    self._reconnect_requested_generation = None
                 with self._lock:
-                    reconnect = self._has_connected
-                if reconnect:
-                    self._reconcile_active()
+                    if not self._send_locked({"type": "subscribe", "channel": "heartbeats"}, connection):
+                        raise CoinbaseApiError("Coinbase heartbeat subscription send failed")
+                    self._sync_subscriptions_locked(connection)
+                self._reconcile_active()
                 with self._lock:
-                    self._has_connected = True
-                self._emit_status("live")
+                    if generation == self._connection_generation:
+                        self._ready_generation = generation
+                self._maybe_promote_live(generation)
                 delay = self.reconnect_delay
                 while not self._stop.is_set():
+                    with self._lock:
+                        self._sync_subscriptions_locked(connection)
                     try:
                         raw = connection.recv()
                     except Exception as exc:
@@ -505,6 +630,8 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
                 with self._lock:
                     if self._ws is connection:
                         self._ws = None
+                        self._connection_products = set()
+                        self._ready_generation = None
                 if connection is not None:
                     try:
                         connection.close()
@@ -517,33 +644,72 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
         except (TypeError, ValueError):
             return
         channel = payload.get("channel") if isinstance(payload, dict) else None
-        sequence = payload.get("sequence_num")
-        if sequence is not None:
-            try:
-                sequence = int(sequence)
-            except (TypeError, ValueError):
-                sequence = None
-        if sequence is not None:
-            with self._lock:
-                previous = self._last_sequence
-                if previous is not None and sequence <= previous:
-                    return
-                self._last_sequence = sequence
-            if previous is not None and sequence > previous + 1:
-                self._emit_status("reconnecting", "Coinbase market-trades sequence gap")
-                try:
-                    if connection is not None:
-                        connection.close()
-                except Exception:
-                    pass
+        sequence = payload.get("sequence_num") if isinstance(payload, dict) else None
+        try:
+            sequence = int(sequence) if sequence is not None else None
+        except (TypeError, ValueError):
+            sequence = None
+        with self._lock:
+            if self._ws is not None and connection is not None and connection is not self._ws:
                 return
+        self._remember_connection_sequence(sequence)
         if channel == "heartbeats":
+            heartbeat_counter = None
+            for event in payload.get("events", []):
+                heartbeat = event.get("heartbeat", {}) if isinstance(event, dict) else {}
+                if isinstance(heartbeat, dict):
+                    heartbeat_counter = heartbeat.get("heartbeat_counter", heartbeat_counter)
+            with self._lock:
+                self._last_heartbeat_monotonic = time.monotonic()
+                self._last_heartbeat_counter = heartbeat_counter
+                generation = self._connection_generation
+            self._maybe_promote_live(generation)
             return
         if channel != "market_trades":
             return
         for event in payload.get("events", []):
+            event_type = str(event.get("type") or "update").lower()
+            trades = event.get("trades", [])
+            products = {_product_id(trade.get("product_id")) for trade in trades if isinstance(trade, dict)}
+            products.discard(None)
+            accepted_products = set()
+            for product in products:
+                if self._accept_product_sequence(product, sequence, connection):
+                    accepted_products.add(product)
+            if event_type == "snapshot":
+                for trade in trades:
+                    product = _product_id(trade.get("product_id")) if isinstance(trade, dict) else None
+                    trade_id = str(trade.get("trade_id") or "").strip() if isinstance(trade, dict) else ""
+                    if product in accepted_products and trade_id:
+                        self._remember_trade_id(product, trade_id)
+                continue
             for trade in event.get("trades", []):
-                self._handle_trade(trade, sequence)
+                product = _product_id(trade.get("product_id")) if isinstance(trade, dict) else None
+                if product in accepted_products:
+                    self._handle_trade(trade, sequence)
+
+    def _accept_product_sequence(self, product, sequence, connection):
+        if sequence is None:
+            return True
+        with self._lock:
+            if self._ws is not None and connection is not None and connection is not self._ws:
+                return False
+            previous = self._last_sequence_by_product.get(product)
+            if previous is not None and sequence <= previous:
+                return False
+            if previous is not None and sequence > previous + 1:
+                missing = sequence - previous - 1
+                if missing <= MAX_SEEN_TRADE_IDS and all(
+                    value in self._observed_sequences for value in range(previous + 1, sequence)
+                ):
+                    self._last_sequence_by_product[product] = sequence
+                    return True
+                generation = self._connection_generation
+            else:
+                self._last_sequence_by_product[product] = sequence
+                return True
+        self._request_reconnect(connection, generation, f"Coinbase market-trades sequence gap for {product}")
+        return False
 
     def _handle_trade(self, trade, sequence):
         product = _product_id(trade.get("product_id"))
@@ -553,14 +719,9 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
         timestamp = _timestamp(trade.get("time"))
         if not product or not trade_id or price is None or size is None or timestamp is None:
             return
+        if not self._remember_trade_id(product, trade_id):
+            return
         with self._lock:
-            if trade_id in self._seen_ids[product]:
-                return
-            self._seen_ids[product].add(trade_id)
-            self._seen_order[product].append(trade_id)
-            self._trade_log[product].append((int(time.time()), timestamp, price, size, sequence))
-            while len(self._seen_ids[product]) > len(self._seen_order[product]):
-                self._seen_ids[product].discard(self._seen_order[product][0])
             keys = [key for key in self._callbacks if key[0] == internal_symbol_for(product)]
         for internal, period in keys:
             self._aggregate_trade(product, internal, period, timestamp, price, size, sequence)
@@ -569,6 +730,8 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
         bucket = _bucket_start(timestamp, period)
         key = (product, period)
         with self._lock:
+            if key in self._reconcile_in_progress:
+                return
             existing = self._bars.get(key)
             if existing is not None and bucket < existing.time:
                 return
@@ -598,7 +761,22 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
             if not self._products:
                 return self._status
             alive = self._thread is not None and self._thread.is_alive() and self._ws is not None
-        return "live" if alive else "reconnecting"
+            connection = self._ws
+            generation = self._connection_generation
+            heartbeat_age = None if self._last_heartbeat_monotonic is None else time.monotonic() - self._last_heartbeat_monotonic
+            stale = alive and (heartbeat_age is None or heartbeat_age > self.HEARTBEAT_TIMEOUT_SECONDS)
+            needs_thread = self._thread is None or not self._thread.is_alive()
+        if needs_thread:
+            with self._lock:
+                self._ensure_thread_locked()
+            return "reconnecting"
+        if stale:
+            self._request_reconnect(connection, generation, "Coinbase heartbeat timeout")
+            return "reconnecting"
+        if not alive:
+            return "reconnecting"
+        with self._lock:
+            return self._status
 
     def close(self):
         self._stop.set()
@@ -608,6 +786,8 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
             self._callbacks.clear()
             self._products.clear()
             self._product_refs.clear()
+            self._connection_products.clear()
+            self._ready_generation = None
             self._status = "unavailable"
         if connection is not None:
             try:

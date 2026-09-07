@@ -14,9 +14,12 @@ from .crypto_provider import (
     CoinbaseRealtimeProvider,
     aggregate_crypto_bars,
     fetch_crypto_historical_bars,
+    MAX_SEEN_TRADE_IDS,
 )
 from .models import MarketSymbol, WatchlistEntry
 from .realtime.router import MarketDataProviderRouter
+from .realtime.registry import RealtimeRegistry
+from .realtime.contracts import NormalizedBar
 from .symbol_catalog import (
     COINBASE_PROVIDER,
     ProviderCatalogSnapshot,
@@ -106,12 +109,12 @@ class CryptoProviderContractTests(SimpleTestCase):
         month = aggregate_crypto_bars([{**rows[0], "time": month_timestamp}], "月线")
         self.assertEqual(month[0]["time"], int(datetime(2026, 2, 1, tzinfo=timezone.utc).timestamp()))
 
-    def test_quote_does_not_invent_previous_close_change_or_missing_fields(self):
+    def test_quote_uses_real_coinbase_volume_and_24h_change_without_previous_close(self):
         from .crypto_provider import crypto_quote
 
         class Client:
             def ticker(self, product_id):
-                return {"price": "60000.25", "bid": "60000", "ask": "60001", "volume_24h": "12.5", "time": "2026-09-06T00:00:00Z"}
+                return {"price": "60000.25", "bid": "60000", "ask": "60001", "volume": "12.5", "time": "2026-09-06T00:00:00Z"}
 
             def stats(self, product_id):
                 return {"open": "59900", "high": "60100", "low": "59000"}
@@ -119,8 +122,9 @@ class CryptoProviderContractTests(SimpleTestCase):
         payload = crypto_quote("BTC-USD", client=Client(), name="Bitcoin")
         self.assertEqual(payload["code"], "CC.BTC-USD")
         self.assertEqual(payload["price"], 60000.25)
-        self.assertIsNone(payload["change"])
+        self.assertAlmostEqual(payload["change"], (60000.25 - 59900) / 59900 * 100)
         self.assertIsNone(payload["previous_close"])
+        self.assertEqual(payload["volume"], 12.5)
         self.assertEqual(payload["source"], COINBASE_PROVIDER)
 
     def test_realtime_trade_aggregation_deduplicates_and_respects_boundaries(self):
@@ -146,23 +150,36 @@ class CryptoProviderContractTests(SimpleTestCase):
         self.assertEqual(provider._bars[("BTC-USD", "1分")].close, 110)
         self.assertEqual(len(received), 3)
 
-    def test_heartbeat_is_not_a_kline_event_and_sequence_gap_is_reconnecting(self):
+    def test_sequence_is_isolated_per_product_and_heartbeat_does_not_poison_it(self):
         provider = CoinbaseRealtimeProvider(client=object())
-        statuses = []
-        provider._callbacks[("CC.BTC-USD", "1分")].add(lambda event: statuses.append(event) if isinstance(event, dict) else None)
         connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
-        provider._handle_message(json.dumps({"channel": "heartbeats", "sequence_num": 0, "events": [{"heartbeat": {}}]}), connection)
-        self.assertEqual(statuses, [])
-        provider._handle_message(json.dumps({"channel": "subscriptions", "sequence_num": 1, "events": []}), connection)
-        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 2, "events": []}), connection)
-        provider._handle_message(json.dumps({"channel": "heartbeats", "sequence_num": 3, "events": [{"heartbeat": {}}]}), connection)
-        self.assertEqual(statuses, [])
-        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 5, "events": []}), connection)
-        self.assertTrue(connection.closed)
-        self.assertEqual(statuses[-1]["status"], "reconnecting")
-        self.assertIn("sequence gap", statuses[-1]["error"])
+        provider._ws = connection
+        provider._connection_generation = 1
+        trade = lambda product, trade_id, timestamp: {"product_id": product, "trade_id": trade_id, "price": "100", "size": "1", "time": timestamp}
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 10, "events": [{"type": "update", "trades": [trade("BTC-USD", "btc-10", 1000)]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 1, "events": [{"type": "update", "trades": [trade("ETH-USD", "eth-1", 1000)]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "heartbeats", "sequence_num": 999, "events": [{"heartbeat": {"heartbeat_counter": "1"}}]}), connection)
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 11, "events": [{"type": "update", "trades": [trade("BTC-USD", "btc-11", 1060)]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 2, "events": [{"type": "update", "trades": [trade("ETH-USD", "eth-2", 1060)]}]}), connection)
+        self.assertEqual(provider._last_sequence_by_product, {"BTC-USD": 11, "ETH-USD": 2})
+        self.assertEqual(provider._last_heartbeat_counter, "1")
+        self.assertFalse(connection.closed)
 
-    def test_reconcile_replays_real_trades_received_during_rest(self):
+    def test_same_product_gap_reconnects_and_stale_sequence_is_ignored(self):
+        provider = CoinbaseRealtimeProvider(client=object())
+        connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+        provider._ws = connection
+        provider._connection_generation = 1
+        trade = lambda trade_id: {"product_id": "BTC-USD", "trade_id": trade_id, "price": "100", "size": "1", "time": 1000}
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 10, "events": [{"type": "update", "trades": [trade("a")]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 9, "events": [{"type": "update", "trades": [trade("stale")]}]}), connection)
+        self.assertEqual(provider._last_sequence_by_product["BTC-USD"], 10)
+        self.assertFalse(provider._seen_ids["BTC-USD"].__contains__("stale"))
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 12, "events": [{"type": "update", "trades": [trade("gap")]}]}), connection)
+        self.assertTrue(connection.closed)
+        self.assertEqual(provider.status, "reconnecting")
+
+    def test_reconcile_prefers_authoritative_volume_for_overlapping_trades(self):
         provider = None
         bucket = 960
 
@@ -179,17 +196,17 @@ class CryptoProviderContractTests(SimpleTestCase):
         with patch("core.crypto_provider.time.time", return_value=1000):
             result = provider.latest_snapshot("CC.BTC-USD", "1分")
         self.assertEqual(result.time, bucket)
-        self.assertEqual(result.close, 102)
-        self.assertEqual(result.volume, 12)
+        self.assertEqual(result.close, 100.5)
+        self.assertEqual(result.volume, 10)
 
     def test_product_subscription_refcount_is_shared_across_periods(self):
         provider = CoinbaseRealtimeProvider(client=object())
-        with patch.object(provider, "_ensure_thread_locked"), patch.object(provider, "_send") as send:
+        with patch.object(provider, "_ensure_thread_locked"):
             provider.subscribe("CC.BTC-USD", "1分", lambda event: None)
             provider.subscribe("CC.BTC-USD", "5分", lambda event: None)
             self.assertEqual(provider._product_refs["BTC-USD"], 2)
             self.assertEqual(provider._products, {"BTC-USD"})
-            self.assertEqual(send.call_count, 1)
+            self.assertEqual(provider._products, {"BTC-USD"})
             provider.unsubscribe("CC.BTC-USD", "1分")
             self.assertEqual(provider._product_refs["BTC-USD"], 1)
             provider.unsubscribe("CC.BTC-USD", "5分")
@@ -199,7 +216,125 @@ class CryptoProviderContractTests(SimpleTestCase):
         source = inspect.getsource(CoinbaseRealtimeProvider)
         self.assertNotIn("MarketSymbol.objects", source)
         self.assertNotIn("WatchlistEntry.objects", source)
-        self.assertIn("_trade_log", source)
+        self.assertIn("_seen_order", source)
+
+    def test_snapshot_seeds_trade_ids_without_changing_ohlcv(self):
+        provider = CoinbaseRealtimeProvider(client=object())
+        provider._callbacks[("CC.BTC-USD", "1分")].add(lambda event: None)
+        from .realtime.contracts import NormalizedBar
+        provider._bars[("BTC-USD", "1分")] = NormalizedBar(
+            provider=COINBASE_PROVIDER, market="crypto", symbol="CC.BTC-USD", period="1分", time=960,
+            open=100, high=101, low=99, close=100, volume=10, sequence=10, event_kind="reconcile",
+        )
+        snapshot = {"channel": "market_trades", "sequence_num": 10, "events": [{"type": "snapshot", "trades": [{"product_id": "BTC-USD", "trade_id": "seed", "price": "100", "size": "4", "time": 1000}]}]}
+        provider._handle_message(json.dumps(snapshot))
+        self.assertEqual(provider._bars[("BTC-USD", "1分")].volume, 10)
+        self.assertIn("seed", provider._seen_ids["BTC-USD"])
+
+    def test_update_drives_ohlcv_after_snapshot(self):
+        provider = CoinbaseRealtimeProvider(client=object())
+        provider._callbacks[("CC.BTC-USD", "1分")].add(lambda event: None)
+        from .realtime.contracts import NormalizedBar
+        provider._bars[("BTC-USD", "1分")] = NormalizedBar(
+            provider=COINBASE_PROVIDER, market="crypto", symbol="CC.BTC-USD", period="1分", time=960,
+            open=100, high=101, low=99, close=100, volume=10, event_kind="reconcile",
+        )
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 10, "events": [{"type": "snapshot", "trades": [{"product_id": "BTC-USD", "trade_id": "seed", "price": "100", "size": "4", "time": 1000}]}]}))
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 11, "events": [{"type": "update", "trades": [{"product_id": "BTC-USD", "trade_id": "live", "price": "102", "size": "2", "time": 1010}]}]}))
+        self.assertEqual(provider._bars[("BTC-USD", "1分")].close, 102)
+        self.assertEqual(provider._bars[("BTC-USD", "1分")].volume, 12)
+
+    def test_bounded_trade_ids_evict_the_oldest_consistently(self):
+        provider = CoinbaseRealtimeProvider(client=object())
+        for index in range(MAX_SEEN_TRADE_IDS + 100):
+            provider._remember_trade_id("BTC-USD", f"trade-{index}")
+        self.assertEqual(len(provider._seen_ids["BTC-USD"]), MAX_SEEN_TRADE_IDS)
+        self.assertEqual(len(provider._seen_order["BTC-USD"]), MAX_SEEN_TRADE_IDS)
+        self.assertEqual(provider._seen_ids["BTC-USD"], set(provider._seen_order["BTC-USD"]))
+        self.assertNotIn("trade-0", provider._seen_ids["BTC-USD"])
+        self.assertFalse(provider._remember_trade_id("BTC-USD", f"trade-{MAX_SEEN_TRADE_IDS + 99}"))
+        self.assertTrue(provider._remember_trade_id("BTC-USD", "trade-0"))
+
+    def test_heartbeat_timeout_closes_stale_connection_once(self):
+        provider = CoinbaseRealtimeProvider(client=object())
+        connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+        provider._products.add("BTC-USD")
+        provider._ws = connection
+        provider._thread = __import__("threading").current_thread()
+        provider._connection_generation = 3
+        provider._last_heartbeat_monotonic = time.monotonic() - provider.HEARTBEAT_TIMEOUT_SECONDS - 1
+        self.assertEqual(provider.health_check(), "reconnecting")
+        self.assertTrue(connection.closed)
+        self.assertEqual(provider.health_check(), "reconnecting")
+
+    def test_dynamic_subscription_sync_reaches_the_current_connection(self):
+        class Connection:
+            def __init__(self):
+                self.messages = []
+                self.closed = False
+
+            def send(self, message):
+                self.messages.append(json.loads(message))
+
+            def close(self):
+                self.closed = True
+
+        provider = CoinbaseRealtimeProvider(client=object())
+        connection = Connection()
+        provider._ws = connection
+        provider._connection_generation = 1
+        provider._products = {"BTC-USD"}
+        provider._sync_subscriptions()
+        provider._products.add("ETH-USD")
+        provider._sync_subscriptions()
+        self.assertEqual([message["product_ids"] for message in connection.messages], [["BTC-USD"], ["ETH-USD"]])
+        self.assertEqual(provider._connection_products, {"BTC-USD", "ETH-USD"})
+
+    def test_subscription_send_failure_is_not_marked_successful(self):
+        class Connection:
+            closed = False
+
+            def send(self, message):
+                raise OSError("socket closed")
+
+            def close(self):
+                self.closed = True
+
+        provider = CoinbaseRealtimeProvider(client=object())
+        connection = Connection()
+        provider._ws = connection
+        provider._connection_generation = 4
+        provider._products = {"BTC-USD"}
+        provider._sync_subscriptions()
+        self.assertEqual(provider._connection_products, set())
+        self.assertTrue(connection.closed)
+        self.assertEqual(provider.status, "reconnecting")
+
+    def test_authoritative_reconcile_is_published_through_registry_state_store(self):
+        class Client:
+            def __init__(self):
+                self.volume = 10
+
+            def candles(self, *args, **kwargs):
+                return [candle(960, 100, 101, 99, 100.5, self.volume)]
+
+        client = Client()
+        provider = CoinbaseRealtimeProvider(client=client)
+        registry = RealtimeRegistry(provider, grace_seconds=0.01)
+        with patch.object(provider, "_ensure_thread_locked"):
+            consumer = registry.subscribe("CC.BTC-USD", "1分")
+        key = registry.key_for("CC.BTC-USD", "1分")
+        self.assertEqual(registry.state_store.capture(key).current_bar.volume, 10)
+        client.volume = 18
+        provider._reconcile_active()
+        corrected = registry.state_store.capture(key).current_bar
+        self.assertEqual(corrected.volume, 18)
+        self.assertEqual(corrected.event_kind, "reconcile")
+        events = []
+        while not consumer.events.empty():
+            events.append(consumer.events.get())
+        self.assertTrue(any(event.get("bar", {}).get("volume") == 18 for event in events))
+        registry.close()
 
 
 class CryptoCatalogAndApiTests(TestCase):

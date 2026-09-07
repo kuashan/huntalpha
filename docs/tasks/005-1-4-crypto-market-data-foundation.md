@@ -1,6 +1,6 @@
 # Task 005.1.4 — Crypto Market Data Foundation
 
-Status: `IMPLEMENTED`
+Status: `IN_PROGRESS`
 
 ## Scope
 
@@ -34,6 +34,21 @@ Crypto 使用 `MarketSymbol`、`WatchlistEntry`、统一 Quote/Kline API、内�
 
 真实验收包括 Coinbase product/catalog、BTC/ETH quote、历史 K 线、2–5 分钟 BTC 1 分钟实时成交跨分钟边界、内置指标、一个现有私有 Formula、双消费者/跨周期共享及断线恢复。任何 provider 限制都必须显示 unavailable，不以测试数字替代真实数据。
 
+## First Review Fixes — in progress
+
+本轮修复范围：
+
+- Coinbase `market_trades` sequence 按 product 隔离；heartbeat sequence 不参与 product sequence。
+- heartbeat 使用 monotonic freshness 参与 liveness；超时会主动关闭当前连接并触发重连，且按 connection generation 防止重复 close。
+- desired products 与当前 connection 已实际订阅 products 分离，连接建立竞态和动态加入 BTC/ETH 通过同步差集处理。
+- `snapshot` 只建立 sequence/dedup baseline，不作为增量成交；只有 `update` 驱动 OHLCV。
+- REST authoritative reconciliation 不再按本机 receive time 盲目 replay；重连校准完成后通过 provider callback 发布到 Registry/StateStore。
+- trade-id bounded FIFO eviction 保持 set/deque 一致。
+- Coinbase Exchange quote 使用 `ticker.volume`，24h change 使用真实 `ticker.price` 与 `stats.open`，缺失时保持 `null`。
+- Crypto 默认市场选项和 provider-aware UI 文案已更新；通用 disclaimer 不再错误声明所有行情来自 Futu OpenD。
+
+本轮未新增 migration、未写入正式数据库，Task 与 Worklog 保持 `IN_PROGRESS`，等待 review 和浏览器验收。
+
 ## Completion Report
 
 - Branch: `codex/005-1-4-crypto-market-data-foundation`，stacked on PR #25 head `92e009e033485e4bc3a6f2f26d92df11ec40a97d`。
@@ -41,10 +56,10 @@ Crypto 使用 `MarketSymbol`、`WatchlistEntry`、统一 Quote/Kline API、内�
 - Real quote verification returned HTTP 200 through the Django view with `source=coinbase`; real 1-minute history returned 50 ascending bars with `source=coinbase` and `adjustment=UTC`。
 - Real built-in indicator verification used 60 Coinbase BTC 1-minute bars: MA, MACD and RSI all produced drawing points through the existing frontend indicator implementation。
 - One existing enabled private Formula was run against 1000 real Coinbase daily bars through the existing server Formula path; the response reported `engine=tdx-server-v2`, `source=coinbase`, and drawing data. Formula source was not printed, exported, or returned by the validation harness。
-- A 130-second public Coinbase WebSocket soak subscribed to BTC 1-minute, BTC 5-minute and ETH 1-minute through one provider. It stayed `live`, crossed multiple UTC buckets, and reported product refcounts `BTC-USD=2`, `ETH-USD=1`。Heartbeat sequence messages are tracked for liveness but never become bars；sequence gaps enter reconnecting and trigger REST reconciliation。
+- A prior 130-second public Coinbase WebSocket soak subscribed to BTC 1-minute, BTC 5-minute and ETH 1-minute through one provider. First Review Fixes added a further 150-second active multi-product soak: dynamic ETH/BTC-period subscription stayed on one connection generation, heartbeat age remained sub-second at the final sample, no sequence-gap or heartbeat-timeout status occurred, and an intentional socket close recovered through a new generation, REST reconciliation, and `live` promotion with both products subscribed。
 - Migration: `core/migrations/0010_alter_accountprofile_default_market_and_more.py`。
 - Migration safety backup: `C:\Users\Administrator\huntalpha-db-backups\huntalpha-local-db-20260906-112723-902738.sqlite3`; SHA-256 `44575d0f1b9c64b7e0c7981622c00333813887d02c029d01577a2822ee34aed9`; `integrity_check: ok`。
 - Formal database migration and the real `sync_symbol_catalog --market crypto` completed without deleting or rebuilding data. Formula count remained 4。
-- Validation: `python manage.py check` passed with the repository's existing auto-primary-key warnings; `python manage.py test core` passed 145/145; `python manage.py makemigrations --check` reported no changes; frontend realtime and indicator tests passed; `npm run build` passed; `git diff --check` passed。
+- Validation before this review round: `python manage.py check` passed with the repository's existing auto-primary-key warnings; `python manage.py test core` passed 145/145; `python manage.py makemigrations --check` reported no changes; frontend realtime and indicator tests passed; `npm run build` passed; `git diff --check` passed。First Review Fixes added deterministic state-machine and provider-aware UI coverage; the final core suite passed 154/154, with no migration changes。
 - The local HTTP services returned 200 for the frontend root and Django Admin login page. The desktop browser automation helper was unavailable, so no screenshot/DOM claim is made here；the real provider/API and automated UI contract checks were completed instead。
 - Known risks: Coinbase public REST/WebSocket rate limits and availability are external dependencies；production deployment still needs the existing task's SPA history fallback and process lifecycle configuration. No credential, tick, or realtime bar is persisted。

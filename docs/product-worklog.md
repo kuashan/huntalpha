@@ -32,6 +32,12 @@
 
 明确不包含：2FA、登录设备、account session management、邮箱安全、支付和 Notification；这些属于未来各自任务。
 
+### Task 005.1.4 — Crypto Market Data Foundation
+
+状态：`IN_PROGRESS`
+
+Task 005.1.3 的 stacked implementation branch 已开始接入 Coinbase 第一批真实加密资产（BTC-USD / ETH-USD）。本任务沿用统一 MarketSymbol、Watchlist、Kline、Indicator、Formula 和 RealtimeRegistry 管线，不创建第二套 Crypto runtime；当前仍保留 Task 005.1.3 的 `IN_PROGRESS` 状态，等待本任务完成 review 与浏览器验收。
+
 ---
 
 ## 已批准、待实现
@@ -129,22 +135,6 @@
 
 每个市场独立排名，不跨币种直接比较市值。
 
-### Crypto 真实数据接入
-
-状态：`DEFERRED`
-
-当前：
-- 主页面已经恢复 Crypto preview，显示 BTC / ETH 身份。
-- 当前没有真实 crypto provider，因此价格、涨跌幅仍为 `—`，搜索/目录/收藏不可伪造。
-
-未来接入真实 provider 后再实现：
-- Crypto MarketSymbol/交易对目录
-- 实时报价
-- K 线
-- 自选
-- 指数/基准（如确有真实来源）
-- 权限、刷新与 provider 失败处理
-
 ### 美股三大指数真实数据源
 
 状态：`DEFERRED / PROVIDER_LIMITATION`
@@ -172,12 +162,6 @@
 - 其他付费权益
 
 要求：所有权益必须由真实后端 entitlement 决定；没有真实 entitlement 时不能伪造 PRO 状态。
-
-### Task 005.1.4 — Crypto Market Data Foundation
-
-状态：`IN_PROGRESS`
-
-Task 005.1.3 的 stacked implementation branch 已开始接入 Coinbase 第一批真实加密资产（BTC-USD / ETH-USD）。本任务沿用统一 MarketSymbol、Watchlist、Kline、Indicator、Formula 和 RealtimeRegistry 管线，不创建第二套 Crypto runtime；当前仍保留 Task 005.1.3 的 `IN_PROGRESS` 状态，等待其 Futu 真实交易时段最终验证。
 
 ---
 
