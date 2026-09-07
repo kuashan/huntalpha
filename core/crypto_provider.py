@@ -326,9 +326,7 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
         self._bars = {}
         self._seen_ids = defaultdict(set)
         self._seen_order = defaultdict(deque)
-        self._last_sequence_by_product = {}
-        self._observed_sequences = set()
-        self._observed_sequence_order = deque()
+        self._last_sequence = None
         self._last_heartbeat_monotonic = None
         self._last_heartbeat_counter = None
         self._reconcile_in_progress = set()
@@ -482,17 +480,6 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
             seen.add(trade_id)
             return True
 
-    def _remember_connection_sequence(self, sequence):
-        if sequence is None:
-            return
-        with self._lock:
-            if sequence in self._observed_sequences:
-                return
-            if len(self._observed_sequence_order) >= MAX_SEEN_TRADE_IDS:
-                self._observed_sequences.discard(self._observed_sequence_order.popleft())
-            self._observed_sequence_order.append(sequence)
-            self._observed_sequences.add(sequence)
-
     def _build_reconcile_snapshot(self, product, normalized_period):
         bars = fetch_crypto_historical_bars(product, normalized_period, count=2, client=self.client)
         if not bars:
@@ -510,21 +497,18 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
             mode="streaming", event_kind="reconcile",
         )
 
-    def _fetch_reconcile_snapshot(self, product, normalized_period):
+    def _reconcile_snapshot(self, product, normalized_period):
         key = (product, normalized_period)
         with self._lock:
             self._reconcile_in_progress.add(key)
         try:
-            return self._build_reconcile_snapshot(product, normalized_period)
+            authoritative = self._build_reconcile_snapshot(product, normalized_period)
+            with self._lock:
+                self._bars[key] = authoritative
+            return authoritative
         finally:
             with self._lock:
                 self._reconcile_in_progress.discard(key)
-
-    def _reconcile_snapshot(self, product, normalized_period):
-        authoritative = self._fetch_reconcile_snapshot(product, normalized_period)
-        with self._lock:
-            self._bars[(product, normalized_period)] = authoritative
-        return authoritative
 
     def _reconcile_active(self):
         with self._lock:
@@ -592,9 +576,7 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
                     self._connection_generation += 1
                     generation = self._connection_generation
                     self._connection_products = set()
-                    self._last_sequence_by_product = {}
-                    self._observed_sequences = set()
-                    self._observed_sequence_order = deque()
+                    self._last_sequence = None
                     self._last_heartbeat_monotonic = None
                     self._last_heartbeat_counter = None
                     self._ready_generation = None
@@ -652,7 +634,8 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
         with self._lock:
             if self._ws is not None and connection is not None and connection is not self._ws:
                 return
-        self._remember_connection_sequence(sequence)
+        if not self._accept_connection_sequence(sequence, connection):
+            return
         if channel == "heartbeats":
             heartbeat_counter = None
             for event in payload.get("events", []):
@@ -672,43 +655,33 @@ class CoinbaseRealtimeProvider(RealtimeMarketProvider):
             trades = event.get("trades", [])
             products = {_product_id(trade.get("product_id")) for trade in trades if isinstance(trade, dict)}
             products.discard(None)
-            accepted_products = set()
-            for product in products:
-                if self._accept_product_sequence(product, sequence, connection):
-                    accepted_products.add(product)
             if event_type == "snapshot":
                 for trade in trades:
                     product = _product_id(trade.get("product_id")) if isinstance(trade, dict) else None
                     trade_id = str(trade.get("trade_id") or "").strip() if isinstance(trade, dict) else ""
-                    if product in accepted_products and trade_id:
+                    if product in products and trade_id:
                         self._remember_trade_id(product, trade_id)
                 continue
             for trade in event.get("trades", []):
                 product = _product_id(trade.get("product_id")) if isinstance(trade, dict) else None
-                if product in accepted_products:
+                if product in products:
                     self._handle_trade(trade, sequence)
 
-    def _accept_product_sequence(self, product, sequence, connection):
+    def _accept_connection_sequence(self, sequence, connection):
         if sequence is None:
             return True
         with self._lock:
             if self._ws is not None and connection is not None and connection is not self._ws:
                 return False
-            previous = self._last_sequence_by_product.get(product)
+            previous = self._last_sequence
             if previous is not None and sequence <= previous:
                 return False
             if previous is not None and sequence > previous + 1:
-                missing = sequence - previous - 1
-                if missing <= MAX_SEEN_TRADE_IDS and all(
-                    value in self._observed_sequences for value in range(previous + 1, sequence)
-                ):
-                    self._last_sequence_by_product[product] = sequence
-                    return True
                 generation = self._connection_generation
             else:
-                self._last_sequence_by_product[product] = sequence
+                self._last_sequence = sequence
                 return True
-        self._request_reconnect(connection, generation, f"Coinbase market-trades sequence gap for {product}")
+        self._request_reconnect(connection, generation, "Coinbase connection sequence gap")
         return False
 
     def _handle_trade(self, trade, sequence):

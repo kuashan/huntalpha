@@ -150,34 +150,84 @@ class CryptoProviderContractTests(SimpleTestCase):
         self.assertEqual(provider._bars[("BTC-USD", "1分")].close, 110)
         self.assertEqual(len(received), 3)
 
-    def test_sequence_is_isolated_per_product_and_heartbeat_does_not_poison_it(self):
+    def test_connection_sequence_accepts_heartbeat_interleaving(self):
         provider = CoinbaseRealtimeProvider(client=object())
         connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
         provider._ws = connection
         provider._connection_generation = 1
-        trade = lambda product, trade_id, timestamp: {"product_id": product, "trade_id": trade_id, "price": "100", "size": "1", "time": timestamp}
-        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 10, "events": [{"type": "update", "trades": [trade("BTC-USD", "btc-10", 1000)]}]}), connection)
-        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 1, "events": [{"type": "update", "trades": [trade("ETH-USD", "eth-1", 1000)]}]}), connection)
-        provider._handle_message(json.dumps({"channel": "heartbeats", "sequence_num": 999, "events": [{"heartbeat": {"heartbeat_counter": "1"}}]}), connection)
-        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 11, "events": [{"type": "update", "trades": [trade("BTC-USD", "btc-11", 1060)]}]}), connection)
-        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 2, "events": [{"type": "update", "trades": [trade("ETH-USD", "eth-2", 1060)]}]}), connection)
-        self.assertEqual(provider._last_sequence_by_product, {"BTC-USD": 11, "ETH-USD": 2})
+        trade = lambda product, trade_id: {"product_id": product, "trade_id": trade_id, "price": "100", "size": "1", "time": 1000}
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 4, "events": [{"type": "update", "trades": [trade("BTC-USD", "btc-4")]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "heartbeats", "sequence_num": 5, "events": [{"heartbeat": {"heartbeat_counter": "1"}}]}), connection)
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 6, "events": [{"type": "update", "trades": [trade("BTC-USD", "btc-6")]}]}), connection)
+        self.assertEqual(provider._last_sequence, 6)
         self.assertEqual(provider._last_heartbeat_counter, "1")
         self.assertFalse(connection.closed)
 
-    def test_same_product_gap_reconnects_and_stale_sequence_is_ignored(self):
+    def test_connection_sequence_accepts_interleaved_products_and_heartbeat(self):
+        provider = CoinbaseRealtimeProvider(client=object())
+        connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+        provider._ws = connection
+        provider._connection_generation = 1
+        trade = lambda product, trade_id: {"product_id": product, "trade_id": trade_id, "price": "100", "size": "1", "time": 1000}
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 10, "events": [{"type": "update", "trades": [trade("BTC-USD", "btc-10")]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 11, "events": [{"type": "update", "trades": [trade("ETH-USD", "eth-11")]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "heartbeats", "sequence_num": 12, "events": [{"heartbeat": {"heartbeat_counter": "2"}}]}), connection)
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 13, "events": [{"type": "update", "trades": [trade("BTC-USD", "btc-13")]}]}), connection)
+        self.assertEqual(provider._last_sequence, 13)
+        self.assertEqual(provider._last_heartbeat_counter, "2")
+        self.assertFalse(connection.closed)
+
+    def test_connection_sequence_gap_reconnects(self):
         provider = CoinbaseRealtimeProvider(client=object())
         connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
         provider._ws = connection
         provider._connection_generation = 1
         trade = lambda trade_id: {"product_id": "BTC-USD", "trade_id": trade_id, "price": "100", "size": "1", "time": 1000}
-        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 10, "events": [{"type": "update", "trades": [trade("a")]}]}), connection)
-        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 9, "events": [{"type": "update", "trades": [trade("stale")]}]}), connection)
-        self.assertEqual(provider._last_sequence_by_product["BTC-USD"], 10)
-        self.assertFalse(provider._seen_ids["BTC-USD"].__contains__("stale"))
-        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 12, "events": [{"type": "update", "trades": [trade("gap")]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 4, "events": [{"type": "update", "trades": [trade("a")]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 7, "events": [{"type": "update", "trades": [trade("gap")]}]}), connection)
         self.assertTrue(connection.closed)
         self.assertEqual(provider.status, "reconnecting")
+        self.assertNotIn("gap", provider._seen_ids["BTC-USD"])
+
+    def test_stale_and_duplicate_connection_sequences_are_ignored(self):
+        provider = CoinbaseRealtimeProvider(client=object())
+        connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+        provider._ws = connection
+        provider._connection_generation = 1
+        trade = lambda trade_id: {"product_id": "BTC-USD", "trade_id": trade_id, "price": "100", "size": "1", "time": 1000}
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 5, "events": [{"type": "update", "trades": [trade("a")]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 5, "events": [{"type": "update", "trades": [trade("duplicate")]}]}), connection)
+        provider._handle_message(json.dumps({"channel": "heartbeats", "sequence_num": 4, "events": [{"heartbeat": {"heartbeat_counter": "1"}}]}), connection)
+        self.assertEqual(provider._last_sequence, 5)
+        self.assertFalse(connection.closed)
+        self.assertNotIn("duplicate", provider._seen_ids["BTC-USD"])
+
+    def test_new_connection_generation_resets_sequence_baseline(self):
+        provider = CoinbaseRealtimeProvider(client=object())
+        old_connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+        new_connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+        provider._ws = old_connection
+        provider._connection_generation = 1
+        provider._handle_message(json.dumps({"channel": "heartbeats", "sequence_num": 99, "events": [{"heartbeat": {"heartbeat_counter": "1"}}]}), old_connection)
+        provider._ws = new_connection
+        provider._connection_generation = 2
+        provider._last_sequence = None
+        provider._handle_message(json.dumps({"channel": "heartbeats", "sequence_num": 1, "events": [{"heartbeat": {"heartbeat_counter": "2"}}]}), new_connection)
+        self.assertEqual(provider._last_sequence, 1)
+        self.assertFalse(new_connection.closed)
+
+    def test_old_generation_message_cannot_change_current_sequence(self):
+        provider = CoinbaseRealtimeProvider(client=object())
+        old_connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+        new_connection = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+        provider._ws = new_connection
+        provider._connection_generation = 2
+        provider._last_sequence = 1
+        trade = {"product_id": "BTC-USD", "trade_id": "old", "price": "100", "size": "1", "time": 1000}
+        provider._handle_message(json.dumps({"channel": "market_trades", "sequence_num": 2, "events": [{"type": "update", "trades": [trade]}]}), old_connection)
+        self.assertEqual(provider._last_sequence, 1)
+        self.assertNotIn("old", provider._seen_ids["BTC-USD"])
+        self.assertFalse(new_connection.closed)
 
     def test_reconcile_prefers_authoritative_volume_for_overlapping_trades(self):
         provider = None
@@ -198,6 +248,49 @@ class CryptoProviderContractTests(SimpleTestCase):
         self.assertEqual(result.time, bucket)
         self.assertEqual(result.close, 100.5)
         self.assertEqual(result.volume, 10)
+
+    def test_reconcile_gate_stays_held_through_authoritative_commit(self):
+        gate_seen_during_commit = []
+
+        class Client:
+            def candles(self, *args, **kwargs):
+                return [candle(960, 100, 101, 99, 100.5, 10)]
+
+        provider = CoinbaseRealtimeProvider(client=Client())
+
+        class ObservingBars(dict):
+            def __setitem__(self, key, value):
+                gate_seen_during_commit.append(key in provider._reconcile_in_progress)
+                return super().__setitem__(key, value)
+
+        provider._bars = ObservingBars()
+        provider.latest_snapshot("CC.BTC-USD", "1分")
+        self.assertEqual(gate_seen_during_commit, [True])
+        self.assertNotIn(("BTC-USD", "1分"), provider._reconcile_in_progress)
+
+    def test_trade_cannot_slip_into_single_key_reconcile_commit(self):
+        gate_seen_during_commit = []
+
+        class Client:
+            def candles(self, *args, **kwargs):
+                return [candle(960, 100, 101, 99, 100.5, 10)]
+
+        provider = CoinbaseRealtimeProvider(client=Client())
+
+        class ObservingBars(dict):
+            def __setitem__(self, key, value):
+                gate_seen_during_commit.append(key in provider._reconcile_in_progress)
+                provider._handle_trade({
+                    "product_id": "BTC-USD", "trade_id": "during-commit", "price": "102", "size": "2",
+                    "time": 1001,
+                }, 1)
+                return super().__setitem__(key, value)
+
+        provider._bars = ObservingBars()
+        provider.latest_snapshot("CC.BTC-USD", "1分")
+        self.assertEqual(gate_seen_during_commit, [True])
+        self.assertEqual(provider._bars[("BTC-USD", "1分")].close, 100.5)
+        self.assertNotIn(("BTC-USD", "1分"), provider._reconcile_in_progress)
 
     def test_product_subscription_refcount_is_shared_across_periods(self):
         provider = CoinbaseRealtimeProvider(client=object())
