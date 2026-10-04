@@ -62,9 +62,9 @@ class UnifiedRealtimeBoundaryTests(TestCase):
 
     def test_default_realtime_router_is_provider_neutral(self):
         router = build_realtime_provider()
-        self.assertEqual(router.provider_name_for("SH.600519"), "tushare")
-        self.assertEqual(router.provider_name_for("HK.00700"), "longbridge")
-        self.assertEqual(router.provider_name_for("US.AAPL"), "longbridge")
+        self.assertEqual(router.provider_name_for("SH.600519"), "public-market")
+        self.assertEqual(router.provider_name_for("HK.00700"), "public-market")
+        self.assertEqual(router.provider_name_for("US.AAPL"), "public-market")
         self.assertEqual(router.provider_name_for("CC.BTC-USD"), "coinbase")
         self.assertNotIn("futu-opend", router.provider_names)
 

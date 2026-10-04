@@ -302,6 +302,7 @@ def crypto_quote(product_id, client=None, name=None):
         "updated_at": ticker.get("time"),
         "source": COINBASE_PROVIDER,
         "status": "ready",
+        "data_status": "realtime",
     }
 
 

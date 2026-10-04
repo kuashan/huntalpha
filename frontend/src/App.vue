@@ -51,12 +51,18 @@ const quoteData = computed(() => selectedQuote.value.status === 'ready' ? select
 // Labels are presentation-only; routing and data fetching remain server-side.
 const providerLabel = provider => ({
   coinbase: 'Coinbase',
+  'yahoo-finance': 'Yahoo Finance',
+  'tencent-public': '腾讯财经',
+  'public-market': '公开行情',
   longbridge: 'Longbridge',
   tushare: 'Tushare',
   'futu-opend': '统一行情源',
 }[provider] || provider || '—')
 const quoteStatusText = computed(() => {
-  if (selectedQuote.value.status === 'ready') return `${t('quoteSource')}${providerLabel(quoteData.value?.source || selected.value?.provider)}`
+  if (selectedQuote.value.status === 'ready') {
+    const dataStatus = quoteData.value?.data_status === 'delayed' ? '延迟行情' : quoteData.value?.data_status === 'historical' ? '历史行情' : '实时行情'
+    return `${dataStatus} · ${t('quoteSource')}${providerLabel(quoteData.value?.source || selected.value?.provider)}`
+  }
   if (selectedQuote.value.status === 'loading' || selectedQuote.value.status === 'idle') return t('quoteLoading')
   return `${t('quoteUnavailable')}：${selectedQuote.value.error}`
 })

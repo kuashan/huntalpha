@@ -15,6 +15,7 @@ class RealtimeState:
     status: str = "connecting"
     mode: str = "streaming"
     source: str | None = None
+    data_status: str = "realtime"
     error: str | None = None
 
     def to_dict(self):
@@ -35,6 +36,7 @@ class RealtimeState:
             "status": self.status,
             "mode": self.mode,
             "source": self.source,
+            "data_status": self.data_status,
             "error": self.error,
         }
 
@@ -85,6 +87,7 @@ class RealtimeStateStore:
             state.status = status
             state.mode = mode
             state.source = source or result.bar.provider
+            state.data_status = getattr(result.bar, "data_status", "realtime") or "realtime"
             state.error = None
             self._condition.notify_all()
             return RealtimeState(**state.__dict__), result

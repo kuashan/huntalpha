@@ -7,6 +7,8 @@ from .profiles import CN_A_SHARE, CRYPTO_24_7, HK_EQUITY, US_EQUITY
 from .providers.coinbase import CoinbaseMarketDataProvider
 from .providers.longbridge import LongbridgeMarketDataProvider
 from .providers.tushare import TushareMarketDataProvider
+from .providers.tencent import TencentPublicMarketDataProvider
+from .providers.yahoo import YahooFinanceMarketDataProvider
 from .router import MarketDataRouter
 
 
@@ -32,17 +34,21 @@ def legacy_fetch_crypto_historical_bars(*args, **kwargs):
 def build_realtime_provider():
     """Compose the provider-neutral realtime router.
 
-    A-shares use Tushare's explicit polling seam, HK/US use Longbridge's
-    candlestick push seam, and crypto keeps the public Coinbase stream. Futu
-    remains importable only as an explicit legacy adapter and is never part of
-    the default runtime composition.
+    Stock markets use a public polling adapter backed by the same MarketData
+    Router as history and quotes. Optional private adapters remain after the
+    public path; crypto keeps the public Coinbase stream. Futu remains
+    importable only as an explicit legacy adapter and is never part of the
+    default runtime composition.
     """
     from ..crypto_provider import CoinbaseRealtimeProvider
     from ..realtime.longbridge_provider import LongbridgeRealtimeProvider
+    from ..realtime.public_provider import PublicMarketRealtimeProvider
     from ..realtime.router import MarketDataProviderRouter
     from ..realtime.tushare_provider import TushareRealtimeProvider
 
+    market_router = build_market_data_router()
     return MarketDataProviderRouter(
+        PublicMarketRealtimeProvider(market_router),
         LongbridgeRealtimeProvider(),
         TushareRealtimeProvider(),
         CoinbaseRealtimeProvider(),
@@ -50,15 +56,26 @@ def build_realtime_provider():
 
 
 def market_id_for_symbol(symbol: str) -> str:
-    prefix = str(symbol or "").strip().upper().split(".", 1)[0]
+    parts = str(symbol or "").strip().upper().split(".")
+    prefix = parts[0] if parts else ""
+    if prefix not in {"SH", "SZ", "HK", "US", "CC"} and len(parts) > 1 and parts[1] in {"SH", "SZ", "HK", "US", "CC"}:
+        prefix = parts[1]
     return {"SH": CN_A_SHARE.market_id, "SZ": CN_A_SHARE.market_id, "HK": HK_EQUITY.market_id, "US": US_EQUITY.market_id, "CC": CRYPTO_24_7.market_id}.get(prefix, US_EQUITY.market_id)
 
 
 def build_market_data_router() -> MarketDataRouter:
     router = MarketDataRouter()
+    # Public sources are always first. Optional private providers remain
+    # available as whole-request fallbacks, but are never prerequisites.
+    router.register(YahooFinanceMarketDataProvider(CN_A_SHARE))
+    router.register(TencentPublicMarketDataProvider(CN_A_SHARE))
     router.register(TushareMarketDataProvider())
     router.register(LongbridgeMarketDataProvider(market=CN_A_SHARE))
+    router.register(YahooFinanceMarketDataProvider(HK_EQUITY))
+    router.register(TencentPublicMarketDataProvider(HK_EQUITY))
     router.register(LongbridgeMarketDataProvider(market=HK_EQUITY))
+    router.register(YahooFinanceMarketDataProvider(US_EQUITY))
+    router.register(TencentPublicMarketDataProvider(US_EQUITY))
     router.register(LongbridgeMarketDataProvider(market=US_EQUITY))
     router.register(CoinbaseMarketDataProvider())
     return router
@@ -72,11 +89,7 @@ class MarketDataService:
         return self.router.provider_for(market_id_for_symbol(symbol))
 
     def quote_for_symbol(self, symbol: str) -> dict:
-        provider = self.provider_for_symbol(symbol)
-        quote = getattr(provider, "quote", None)
-        if not callable(quote):
-            raise RuntimeError(f"{provider.provider_id} 不支持报价")
-        return dict(quote(symbol))
+        return self.router.quote(market_id_for_symbol(symbol), symbol)
 
     def window_for_symbol(self, symbol: str, timeframe: str, **kwargs: Any) -> MarketDataFetch:
         return self.router.fetch_window(market_id_for_symbol(symbol), symbol, timeframe, **kwargs)

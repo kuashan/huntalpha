@@ -721,7 +721,7 @@ def realtime_market_stream(request, code):
             "code": "realtime_not_configured" if status == "not_configured" else "realtime_unavailable",
             "source": registry.provider_name_for(code),
             "status": status,
-            "mode": "polling" if registry.provider_name_for(code) == "tushare" else "streaming",
+            "mode": "polling" if registry.provider_name_for(code) in {"tushare", "public-market"} else "streaming",
         }, 503)
 
     def events():

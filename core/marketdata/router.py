@@ -78,6 +78,32 @@ class MarketDataRouter:
         status = "not_configured" if errors and all(":not_configured:" in item for item in errors) else "unavailable"
         raise MarketDataProviderError("；".join(errors) or f"{market}: 行情获取失败", status=status)
 
+    def quote(self, market_id: str, symbol: str) -> dict[str, Any]:
+        """Return one complete quote from the first healthy provider.
+
+        Quote failover follows the same provider boundary as historical
+        windows: a provider either supplies the whole quote or the next
+        provider is tried.  No fields are merged across providers.
+        """
+        market = normalize_market_id(market_id)
+        providers = self._providers.get(market) or []
+        if not providers:
+            raise MarketDataProviderError(f"没有可用行情供应商：{market}", status="not_configured")
+        errors: list[str] = []
+        for provider in providers:
+            try:
+                quote = getattr(provider, "quote", None)
+                if not callable(quote):
+                    raise MarketDataProviderError("provider does not support quote")
+                payload = quote(symbol)
+                if not isinstance(payload, dict) or payload.get("price") is None:
+                    raise MarketDataProviderError("provider returned an incomplete quote")
+                return dict(payload)
+            except Exception as exc:
+                errors.append(f"{provider.provider_id}:{getattr(exc, 'status', 'unavailable')}:{type(exc).__name__}:{exc}")
+        status = "not_configured" if errors and all(":not_configured:" in item for item in errors) else "unavailable"
+        raise MarketDataProviderError("；".join(errors) or f"{market}: 报价获取失败", status=status)
+
     def capabilities(self, market_id: str, provider_id: str | None = None) -> dict[str, Any]:
         provider = self._provider(market_id, provider_id)
         method = getattr(provider, "capabilities", None)

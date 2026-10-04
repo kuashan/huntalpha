@@ -1,0 +1,92 @@
+import json
+from datetime import datetime, timezone
+from unittest import TestCase, mock
+
+from .marketdata.profiles import CN_A_SHARE, HK_EQUITY, US_EQUITY
+from .marketdata.providers.yahoo import YahooFinanceMarketDataProvider, yahoo_symbol_for
+from .marketdata.providers.tencent import TencentPublicMarketDataProvider, tencent_symbol_for
+from .marketdata.service import build_market_data_router
+from .realtime.public_provider import PublicMarketRealtimeProvider
+
+
+class PublicMarketDataProviderTests(TestCase):
+    def test_public_symbol_mapping_covers_required_markets(self):
+        self.assertEqual(yahoo_symbol_for("SH.600519"), "600519.SS")
+        self.assertEqual(yahoo_symbol_for("SZ.000001"), "000001.SZ")
+        self.assertEqual(yahoo_symbol_for("HK.00700"), "0700.HK")
+        self.assertEqual(yahoo_symbol_for("US.AAPL"), "AAPL")
+        self.assertEqual(tencent_symbol_for("SH.600519"), "sh600519")
+        self.assertEqual(tencent_symbol_for("SZ.000001"), "sz000001")
+        self.assertEqual(tencent_symbol_for("HK.700"), "hk00700")
+
+    def test_yahoo_provider_keeps_completed_and_forming_separate(self):
+        payload = {
+            "chart": {
+                "result": [{
+                    "meta": {
+                        "exchangeTimezoneName": "Asia/Shanghai",
+                        "exchangeDataDelayedBy": 15,
+                        "currentTradingPeriod": {"regular": {"start": 1000, "end": 2000}},
+                    },
+                    "timestamp": [100, 1500],
+                    "indicators": {"quote": [{
+                        "open": [10, 11], "high": [12, 13], "low": [9, 10],
+                        "close": [11, 12], "volume": [100, 200],
+                    }]},
+                }],
+                "error": None,
+            }
+        }
+        provider = YahooFinanceMarketDataProvider(CN_A_SHARE, minimum_completed_bars=1)
+        with mock.patch.object(provider, "_request_chart", return_value=payload):
+            result = provider.fetch_window("SH.600519", "日线", now_ts=1600)
+        self.assertEqual(len(result["completed"]), 1)
+        self.assertEqual(result["completed"][0]["time"], 100)
+        self.assertEqual(result["forming"]["close"], 12.0)
+        self.assertEqual(result["meta"]["data_status"], "delayed")
+        self.assertEqual(result["meta"]["delay_seconds"], 15)
+
+    def test_tencent_daily_payload_is_normalized_without_credentials(self):
+        provider = TencentPublicMarketDataProvider(CN_A_SHARE)
+        payload = {"code": 0, "data": {"sh600519": {"qfqday": [["2026-10-01", "10", "11", "12", "9", "100"]]}}}
+        with mock.patch.object(provider, "_request_json", return_value=payload):
+            result = provider.fetch_window("SH.600519", "日线", minimum_completed_bars=1)
+        self.assertEqual(result["completed"][0]["open"], 10.0)
+        self.assertEqual(result["completed"][0]["close"], 11.0)
+        self.assertEqual(result["meta"]["data_status"], "delayed")
+
+    def test_default_router_prioritizes_public_sources_and_keeps_private_optional(self):
+        router = build_market_data_router()
+        self.assertEqual(router.provider_ids("CN_A_SHARE")[:2], ("yahoo-finance", "tencent-public"))
+        self.assertEqual(router.provider_ids("HK_EQUITY")[:2], ("yahoo-finance", "tencent-public"))
+        self.assertEqual(router.provider_ids("US_EQUITY")[0], "yahoo-finance")
+        self.assertNotIn("futu-opend", router.provider_ids("CN_A_SHARE"))
+
+    def test_router_quote_fails_over_whole_quote_without_merging(self):
+        router = build_market_data_router()
+        first = mock.Mock()
+        first.provider_id = "first-public"
+        first.quote.side_effect = RuntimeError("temporary")
+        second = mock.Mock()
+        second.provider_id = "second-public"
+        second.quote.return_value = {"price": 99.0, "source": "second-public", "data_status": "delayed"}
+        first.profile = CN_A_SHARE
+        second.profile = CN_A_SHARE
+        router._providers[CN_A_SHARE.market_id] = [first, second]
+        result = router.quote(CN_A_SHARE.market_id, "SH.600519")
+        self.assertEqual(result["source"], "second-public")
+        self.assertEqual(result["price"], 99.0)
+
+    def test_public_realtime_event_preserves_delayed_metadata(self):
+        class FakeRouter:
+            def quote(self, market, symbol):
+                return {"price": 10, "open": 9, "high": 11, "low": 8, "volume": 20,
+                        "updated_at": 1_700_000_001, "source": "yahoo-finance", "data_status": "delayed"}
+
+        provider = PublicMarketRealtimeProvider(FakeRouter(), poll_interval=60)
+        event = []
+        provider._callbacks[("SH.600519", "1分")].add(event.append)
+        provider.poll_once()
+        self.assertEqual(event[0].provider, "yahoo-finance")
+        self.assertEqual(event[0].data_status, "delayed")
+        self.assertEqual(event[0].mode, "polling")

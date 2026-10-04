@@ -23,14 +23,18 @@ const subTitlePositions = ref([])
 const renderErrors = ref([])
 const historyStatus = ref('')
 const realtimeStatus = ref('connecting')
-const realtimeStatusText = computed(() => ({
+const realtimeDataStatus = ref('')
+const realtimeStatusText = computed(() => {
+  if (realtimeDataStatus.value === 'delayed' && ['live', 'polling'].includes(realtimeStatus.value)) return '● 延迟行情'
+  return ({
   connecting: '连接实时行情…',
   live: '● 实时',
   polling: '轮询中',
   reconnecting: '重连中',
   not_configured: '未配置实时行情源',
   unavailable: '行情暂不可用',
-}[realtimeStatus.value] || '实时状态未知'))
+  }[realtimeStatus.value] || '实时状态未知')
+})
 
 let chart
 let candleSeries
@@ -462,6 +466,7 @@ function processRealtimePayload(payload, payloadGeneration = realtimeStatusGener
     return
   }
   if (payload.status) setRealtimeStatus(payload.status)
+  if (payload.data_status || payload.bar?.data_status) realtimeDataStatus.value = payload.data_status || payload.bar.data_status
   const hasClosedBar = Number.isFinite(Number(payload.last_closed_bar?.time))
   const hasCurrentBar = Number.isFinite(Number(payload.bar?.time))
   if (!hasClosedBar && !hasCurrentBar) return
@@ -491,6 +496,7 @@ function queueRealtimePayload(payload) {
     const wasReconnecting = realtimeStatus.value === 'reconnecting'
     if (payload.status === 'live' && (wasReconnecting || needsHistoryReconcile)) markHistoryReconcileNeeded()
     setRealtimeStatus(payload.status)
+    if (payload.data_status) realtimeDataStatus.value = payload.data_status
     if (payload.status === 'live' && (wasReconnecting || needsHistoryReconcile) && !historyReconcileInFlight) {
       requestHistoryTailReconcile()
     }

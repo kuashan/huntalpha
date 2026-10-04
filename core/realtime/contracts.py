@@ -13,7 +13,10 @@ MARKET_TIMEZONES = {
 
 
 def market_for_symbol(symbol):
-    prefix = str(symbol or "").upper().split(".", 1)[0]
+    parts = str(symbol or "").upper().split(".")
+    prefix = parts[0] if parts else ""
+    if prefix not in {"SH", "SZ", "HK", "US", "CC"} and len(parts) > 1 and parts[1] in {"SH", "SZ", "HK", "US", "CC"}:
+        prefix = parts[1]
     return {
         "SH": "cn", "SZ": "cn", "HK": "hk", "US": "us", "CC": "crypto",
     }.get(prefix)
@@ -86,6 +89,7 @@ class NormalizedBar:
     revision: int = 0
     mode: str = "streaming"
     event_kind: str = "live"
+    data_status: str = "realtime"
 
     def to_dict(self):
         return {
@@ -107,6 +111,7 @@ class NormalizedBar:
             "revision": self.revision,
             "mode": self.mode,
             "event_kind": self.event_kind,
+            "data_status": self.data_status,
         }
 
 
