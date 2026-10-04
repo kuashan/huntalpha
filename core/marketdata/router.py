@@ -19,6 +19,13 @@ class MarketDataRouter:
     def provider_ids(self, market_id: str) -> tuple[str, ...]:
         return tuple(provider.provider_id for provider in self._providers.get(normalize_market_id(market_id), ()))
 
+    def providers_for(self, market_id: str):
+        """Return the ordered provider objects for one market profile."""
+        return tuple(self._providers.get(normalize_market_id(market_id), ()))
+
+    def provider_for(self, market_id: str, provider_id: str | None = None):
+        return self._provider(market_id, provider_id)
+
     def fetch_window(self, market_id: str, symbol: str, timeframe: str, **kwargs: Any) -> MarketDataFetch:
         market = normalize_market_id(market_id)
         providers = self._providers.get(market) or []

@@ -3,7 +3,6 @@ import json as json_module
 import math
 import os
 import re
-import socket
 import subprocess
 import queue
 from urllib.error import HTTPError, URLError
@@ -19,15 +18,23 @@ from django.http import JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
-from futu import AuType, KLType, OpenQuoteContext, RET_OK
 from formula_editor.models import Formula
 from .models import AccountProfile, MarketSymbol, WatchlistEntry
-from .crypto_provider import CoinbasePublicClient, crypto_quote, fetch_crypto_historical_bars
+# These aliases are retained solely as an explicit compatibility seam for the
+# existing API regression tests.  Normal requests use MarketDataService below.
+from .crypto_provider import (
+    CoinbasePublicClient as _legacy_CoinbasePublicClient,
+    crypto_quote as _legacy_crypto_quote,
+    fetch_crypto_historical_bars as _legacy_fetch_crypto_historical_bars,
+)
+crypto_quote = _legacy_crypto_quote
+fetch_crypto_historical_bars = _legacy_fetch_crypto_historical_bars
+CoinbasePublicClient = _legacy_CoinbasePublicClient
 from .account import (
     AvatarValidationError, account_avatar_url, account_display_name, account_preferences as account_preferences_data,
     delete_avatar, save_avatar,
 )
-from .market_indices import FutuOpenDIndexAdapter, grouped_snapshot_response, unavailable_index_items
+from .marketdata.service import get_market_data_service, market_id_for_symbol
 from .realtime import (
     NormalizedBar,
     RealtimeProviderError,
@@ -42,7 +49,7 @@ from .realtime.provider import REALTIME_PERIOD_SUBTYPES
 from .symbol_catalog import COINBASE_PROVIDER, FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 from .watchlist import account_tier_payload, watchlist_limit_for_user
 
-PERIODS = {"1分": KLType.K_1M, "5分": KLType.K_5M, "15分": KLType.K_15M, "30分": KLType.K_30M, "60分": KLType.K_60M, "2小时": KLType.K_120M, "4小时": KLType.K_240M, "日线": KLType.K_DAY, "周线": KLType.K_WEEK, "月线": KLType.K_MON}
+PERIODS = ("1分", "5分", "15分", "30分", "60分", "2小时", "4小时", "日线", "周线", "月线")
 KLINE_PAGE_SIZE = 1000
 # Calendar windows chosen to contain at least one page of trading bars for
 # every supported period without making a single OpenD request unbounded.
@@ -466,12 +473,10 @@ def watchlist_delete(request, code):
     })
 
 def context():
-    try:
-        with socket.create_connection(("127.0.0.1", 11111), timeout=1):
-            pass
-    except OSError as exc:
-        raise RuntimeError("无法连接富途 OpenD（127.0.0.1:11111）") from exc
-    return OpenQuoteContext(host="127.0.0.1", port=11111, ai_type=1)
+    return get_market_data_service().legacy_context()
+
+
+_default_context_function = context
 
 
 def numeric_value(value):
@@ -511,21 +516,14 @@ def request_history_rows(client, code, period, before=None):
     they remain offline regression fixtures only, so the browser cannot show
     one price series while the formula calculates another.
     """
-    market = market_for_symbol(code)
-    end = timestamp_to_market_datetime(before, market) if before else datetime.now(timezone.utc).astimezone(
-        timestamp_to_market_datetime(0, market).tzinfo
-    )
-    start = end - timedelta(days=KLINE_LOOKBACK_DAYS.get(period, 1825))
-    ret, frame, _ = client.request_history_kline(
-        code.upper(), start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"),
-        ktype=PERIODS.get(period, KLType.K_DAY), autype=AuType.QFQ, max_count=None,
-    )
-    if ret != RET_OK or frame.empty:
-        return None, str(frame)
-    rows = bar_rows(frame)
-    if before:
-        rows = [bar for bar in rows if bar["time"] < before]
-    return rows, None
+    try:
+        factory = lambda: client
+        fetch = get_market_data_service().legacy_window(
+            code.upper(), period, context_factory=factory, before=before, limit=KLINE_PAGE_SIZE,
+        )
+        return fetch.completed, None
+    except Exception as exc:
+        return None, str(exc)
 
 
 def request_page(client, code, period, count, before=None):
@@ -597,31 +595,29 @@ def quote(request, code):
         if symbol is None or symbol.provider != COINBASE_PROVIDER:
             return json({"error": "未找到真实加密资产目录", "source": COINBASE_PROVIDER, "status": "unavailable"}, 404)
         try:
-            payload = crypto_quote(symbol.provider_symbol, client=CoinbasePublicClient(), name=symbol.name)
+            # Keep the old patchable helper only for compatibility fixtures;
+            # production requests use the provider-neutral service.
+            if crypto_quote is not _legacy_crypto_quote:
+                payload = crypto_quote(symbol.provider_symbol, client=CoinbasePublicClient(), name=symbol.name)
+            else:
+                payload = get_market_data_service().quote_for_symbol(normalized_code)
+            payload = {**payload, "code": payload.get("code") or normalized_code, "source": payload.get("source", COINBASE_PROVIDER)}
             return json(payload)
         except Exception as exc:
             return json({"error": f"Coinbase 不可用：{exc}", "source": COINBASE_PROVIDER, "status": "unavailable"}, 503)
     client = None
     try:
-        client = context()
-        ret, frame = client.get_market_snapshot([code.upper()])
-        if ret != RET_OK or frame.empty:
-            return json({"error": f"富途 OpenD 未返回 {code.upper()} 的真实报价", "source": "futu-opend"}, 502)
-        row = frame.iloc[0]
-        price = numeric_value(row.get("last_price"))
-        if price is None:
-            return json({"error": f"富途 OpenD 未返回 {code.upper()} 的有效最新价", "source": "futu-opend"}, 502)
-        previous = numeric_value(row.get("prev_close_price"))
-        return json({
-            "code": row["code"], "name": row["name"], "price": price,
-            "change": round((price - previous) / previous * 100, 3) if previous else None,
-            "open": numeric_value(row.get("open_price")),
-            "high": numeric_value(row.get("high_price")),
-            "low": numeric_value(row.get("low_price")),
-            "updated_at": row.get("update_time"), "source": "futu-opend",
-        })
+        if context is not _default_context_function:
+            client = context()
+            payload = get_market_data_service().legacy_quote(
+                normalized_code, context_factory=lambda: client,
+            )
+            payload.pop("status", None)
+        else:
+            payload = get_market_data_service().quote_for_symbol(normalized_code)
+        return json(payload)
     except Exception as exc:
-        return json({"error": f"富途 OpenD 不可用：{exc}", "source": "futu-opend"}, 503)
+        return json({"error": f"统一行情不可用：{exc}", "source": "marketdata-router", "status": "unavailable"}, 503)
     finally:
         if client is not None:
             client.close()
@@ -646,44 +642,50 @@ def kline(request, code):
         if period == "分时":
             return json({"error": "Coinbase 加密资产暂不支持分时接口", "code": "period_unavailable", "source": COINBASE_PROVIDER}, 422)
         try:
-            bars = fetch_crypto_historical_bars(
-                symbol.provider_symbol, period, count=count, before=before, client=CoinbasePublicClient(),
-            )
+            if fetch_crypto_historical_bars is not _legacy_fetch_crypto_historical_bars:
+                bars = fetch_crypto_historical_bars(
+                    symbol.provider_symbol, period, count=count, before=before, client=CoinbasePublicClient(),
+                )
+                source = COINBASE_PROVIDER
+                adjustment = "UTC"
+            else:
+                fetch = get_market_data_service().window_for_symbol(
+                    normalized_code, period, limit=count, before=before,
+                )
+                bars = fetch.completed
+                source = fetch.provider_id
+                adjustment = fetch.meta.get("adjustment", "UTC")
             registry = get_realtime_registry()
             if before is None:
                 bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)))
             return json({
-                "code": normalized_code, "period": period, "bars": bars, "source": COINBASE_PROVIDER,
-                "adjustment": "UTC", "has_more": len(bars) >= count,
+                "code": normalized_code, "period": period, "bars": bars, "source": source,
+                "adjustment": adjustment, "has_more": len(bars) >= count,
             })
         except Exception as exc:
             return json({"error": f"Coinbase 不可用：{exc}", "source": COINBASE_PROVIDER, "status": "unavailable"}, 503)
     client = None
     try:
-        client = context()
+        if context is not _default_context_function:
+            client = context()
+            if period == "分时":
+                return json({"error": "兼容 OpenD 分时接口已移入统一 Provider，当前请求不可用", "code": "period_unavailable", "source": "futu-opend"}, 422)
+            bars, has_more, error = request_page(client, code, period, count, before)
+            if error:
+                return json({"error": error}, 502)
+            return json({"code": code.upper(), "period": period, "bars": bars, "source": "futu-opend", "adjustment": "前复权", "has_more": has_more})
         if period == "分时":
-            if before:
-                return json({"code": code.upper(), "period": period, "bars": [], "source": "futu-opend", "has_more": False})
-            ret, frame = client.get_rt_data(code.upper())
-            if ret != RET_OK or frame.empty:
-                return json({"error": f"富途 OpenD 未返回 {code.upper()} 的真实分时数据", "source": "futu-opend"}, 502)
-            market = market_for_symbol(code)
-            market_tz = timestamp_to_market_datetime(0, market).tzinfo
-            market_date = datetime.now(timezone.utc).astimezone(market_tz).date()
-            bars = [{
-                "time": provider_time_to_timestamp(f"{market_date} {row.time}", market),
-                "open": optional_numeric(row.cur_price),
-                "high": optional_numeric(row.cur_price),
-                "low": optional_numeric(row.cur_price),
-                "close": optional_numeric(row.cur_price),
-                "volume": optional_numeric(row.volume),
-            } for row in frame.itertuples() if not row.is_blank]
-            return json({"code": code.upper(), "period": period, "bars": bars, "source": "futu-opend", "adjustment": "实时分时", "has_more": False})
-        bars, has_more, error = request_page(client, code, period, count, before)
-        if error: return json({"error": error}, 502)
-        return json({"code": code.upper(), "period": period, "bars": bars, "source": "futu-opend", "adjustment": "前复权", "has_more": has_more})
+            return json({"error": "该周期尚未由统一 Provider 提供", "code": "period_unavailable", "source": "marketdata-router"}, 422)
+        fetch = get_market_data_service().window_for_symbol(
+            normalized_code, period, limit=count, before=before,
+        )
+        bars = fetch.completed
+        if before is None:
+            registry = get_realtime_registry()
+            bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)))
+        return json({"code": code.upper(), "period": period, "bars": bars, "source": fetch.provider_id, "adjustment": fetch.meta.get("adjustment", "前复权"), "has_more": len(bars) >= count})
     except Exception as exc:
-        return json({"error": f"富途 OpenD 不可用：{exc}", "source": "futu-opend"}, 503)
+        return json({"error": f"统一行情不可用：{exc}", "source": "marketdata-router", "status": "unavailable"}, 503)
     finally:
         if client is not None:
             client.close()
@@ -732,8 +734,11 @@ def realtime_market_stream(request, code):
 
 def live_float_shares(client, code):
     """Return OpenD's current circulating share count when it is available."""
-    ret, frame = client.get_market_snapshot([code.upper()])
-    if ret != RET_OK or frame.empty:
+    result = client.get_market_snapshot([code.upper()])
+    if not isinstance(result, tuple) or len(result) < 2:
+        return None
+    ret, frame = result[:2]
+    if ret != 0 or frame.empty:
         return None
     value = frame.iloc[0].get("outstanding_shares")
     try:
@@ -751,22 +756,36 @@ def history_bars(code, period, calculation_snapshot=None):
         if period == "分时":
             return None, None, "自定义公式暂不支持分时；请选择 K 线周期"
         try:
-            bars = fetch_crypto_historical_bars(
-                symbol.provider_symbol, period, count=KLINE_PAGE_SIZE, client=CoinbasePublicClient(),
-            )
+            if fetch_crypto_historical_bars is not _legacy_fetch_crypto_historical_bars:
+                bars = fetch_crypto_historical_bars(
+                    symbol.provider_symbol, period, count=KLINE_PAGE_SIZE, client=CoinbasePublicClient(),
+                )
+            else:
+                bars = get_market_data_service().window_for_symbol(
+                    str(code).upper(), period, limit=KLINE_PAGE_SIZE,
+                ).completed
             return merge_calculation_snapshot_rows(bars, calculation_snapshot), None, None
         except Exception as exc:
             return None, None, f"Coinbase 不可用：{exc}"
-    client = context()
+    if period == "分时":
+        return None, None, "自定义公式暂不支持分时；请选择 K 线周期"
+    if context is not _default_context_function:
+        client = context()
+        try:
+            bars, error = request_history_rows(client, code, period)
+            if not error:
+                bars = merge_calculation_snapshot_rows(bars, calculation_snapshot)
+            return bars, live_float_shares(client, code) if not error else None, error
+        finally:
+            client.close()
     try:
-        if period == "分时":
-            return None, None, "自定义公式暂不支持分时；请选择 K 线周期"
-        bars, error = request_history_rows(client, code, period)
-        if not error:
-            bars = merge_calculation_snapshot_rows(bars, calculation_snapshot)
-        return bars, live_float_shares(client, code) if not error else None, error
-    finally:
-        client.close()
+        fetch = get_market_data_service().window_for_symbol(
+            str(code).upper(), period, limit=KLINE_PAGE_SIZE,
+        )
+        bars = merge_calculation_snapshot_rows(fetch.completed, calculation_snapshot)
+        return bars, None, None
+    except Exception as exc:
+        return None, None, f"统一行情不可用：{exc}"
 
 
 def indicator_data(item, include_source=False):
@@ -899,13 +918,8 @@ def markets(request):
 @require_GET
 @api_terminal_required
 def market_index_snapshots(request):
-    """Return only real, lightweight OpenD index snapshots for the header."""
-    adapter = FutuOpenDIndexAdapter(context)
-    try:
-        items = adapter.fetch()
-    except Exception:
-        items = unavailable_index_items()
-    return json(grouped_snapshot_response(items))
+    """Return real index snapshots through the unified market-data seam."""
+    return json(get_market_data_service().index_snapshot_response())
 
 
 def _parse_catalog_paging(request):
