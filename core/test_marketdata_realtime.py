@@ -1,9 +1,17 @@
-from unittest import TestCase
+import os
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest import TestCase, mock
 from pathlib import Path
 
+from .marketdata.service import build_realtime_provider
+from .marketdata.service import MarketDataService
+from .realtime.longbridge_provider import LongbridgeRealtimeProvider
 from .realtime.contracts import NormalizedBar
 from .realtime.registry import RealtimeRegistry
 from .realtime.state import RealtimeStateStore
+from .realtime.provider import RealtimeProviderError
+from .realtime.tushare_provider import TushareRealtimeProvider
 
 
 class FakeRealtimeProvider:
@@ -51,3 +59,93 @@ class UnifiedRealtimeBoundaryTests(TestCase):
         self.assertEqual(snapshot["symbol"], "CC.BTC-USD")
         self.assertEqual(snapshot["market"], "crypto")
         registry.unsubscribe(consumer)
+
+    def test_default_realtime_router_is_provider_neutral(self):
+        router = build_realtime_provider()
+        self.assertEqual(router.provider_name_for("SH.600519"), "tushare")
+        self.assertEqual(router.provider_name_for("HK.00700"), "longbridge")
+        self.assertEqual(router.provider_name_for("US.AAPL"), "longbridge")
+        self.assertEqual(router.provider_name_for("CC.BTC-USD"), "coinbase")
+        self.assertNotIn("futu-opend", router.provider_names)
+
+    def test_index_status_does_not_open_opend_when_unconfigured(self):
+        payload = MarketDataService().index_snapshot_response()
+        self.assertEqual(payload["source"], "marketdata-router")
+        self.assertNotIn("futu-opend", {item["source"] for group in payload["markets"] for item in group["items"]})
+
+    def test_longbridge_stream_normalizes_forming_and_confirmed_candlesticks(self):
+        class Context:
+            def __init__(self):
+                self.callback = None
+                self.subscriptions = []
+
+            def set_on_candlestick(self, callback):
+                self.callback = callback
+
+            def subscribe_candlesticks(self, symbol, period):
+                self.subscriptions.append((symbol, period))
+                return []
+
+            def unsubscribe_candlesticks(self, symbol, period):
+                return None
+
+            def realtime_candlesticks(self, symbol, period, count):
+                return []
+
+            def close(self):
+                return None
+
+        context = Context()
+        provider = LongbridgeRealtimeProvider(token="test-token", context=context)
+        events = []
+        provider.subscribe("HK.00700", "1分", events.append)
+        context.callback("700.HK", SimpleNamespace(
+            period=SimpleNamespace(name="Min_1"),
+            is_confirmed=False,
+            candlestick=SimpleNamespace(
+                timestamp=datetime(2026, 10, 4, 1, 0, tzinfo=timezone.utc),
+                open=10, high=11, low=9, close=10.5, volume=100, turnover=1050,
+            ),
+        ))
+        self.assertEqual(context.subscriptions[0][0], "700.HK")
+        self.assertEqual(events[-1].provider, "longbridge")
+        self.assertEqual(events[-1].market, "hk")
+        self.assertEqual(events[-1].symbol, "HK.00700")
+        self.assertFalse(events[-1].is_closed)
+        context.callback("700.HK", SimpleNamespace(
+            period=SimpleNamespace(name="Min_1"),
+            is_confirmed=True,
+            candlestick=SimpleNamespace(
+                timestamp=datetime(2026, 10, 4, 1, 1, tzinfo=timezone.utc),
+                open=10.5, high=12, low=10, close=11.5, volume=200, turnover=2250,
+            ),
+        ))
+        self.assertTrue(events[-1].is_closed)
+        self.assertEqual(events[-1].sequence, 2)
+        provider.close()
+
+    def test_longbridge_without_credentials_is_not_configured(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            provider = LongbridgeRealtimeProvider()
+        self.assertEqual(provider.status, "not_configured")
+        with self.assertRaises(RealtimeProviderError) as raised:
+            provider.subscribe("HK.00700", "1分", lambda event: None)
+        self.assertEqual(raised.exception.status, "not_configured")
+
+    def test_tushare_polling_emits_real_provider_contract(self):
+        class Client:
+            def realtime_quote(self, symbol, period):
+                return {"ts_code": symbol, "trade_time": "2026-10-04 09:31:00", "open": 10, "high": 11, "low": 9, "close": 10.5, "vol": 100, "amount": 1050}
+
+        provider = TushareRealtimeProvider(token="test-token", client=Client())
+        events = []
+        provider.subscribe("SH.600519", "1分", events.append)
+        provider.poll_once()
+        bar = next(event for event in events if isinstance(event, NormalizedBar))
+        self.assertEqual(bar.provider, "tushare")
+        self.assertEqual(bar.market, "cn")
+        self.assertEqual(bar.mode, "polling")
+        self.assertFalse(bar.is_closed)
+        self.assertEqual(bar.close, 10.5)
+        self.assertGreaterEqual(bar.sequence, 1)
+        provider.close()

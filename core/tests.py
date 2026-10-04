@@ -1148,7 +1148,8 @@ class MarketIndexSnapshotTests(SimpleTestCase):
         self.assertIn("displayIndexPrice(index.price)", app_source)
         self.assertIn("index.status === 'loading'", app_source)
         self.assertIn("const cryptoOverviewRows = [{ code: 'CC.BTC-USD', name: 'BTC' }, { code: 'CC.ETH-USD', name: 'ETH' }]", app_source)
-        self.assertIn("item.code === 'crypto' ? 'Coinbase' : '富途 OpenD'", app_source)
+        self.assertIn("item.code === 'crypto' ? 'Coinbase' : '统一行情源'", app_source)
+        self.assertNotIn("富途 OpenD", app_source)
         self.assertIn("/api/quote/${encodeURIComponent(item.code)}/", app_source)
         self.assertIn("provider_status: quote?.status === 'ready' ? 'connected' : 'unavailable'", app_source)
         self.assertIn(":title=\"indexTitle(index)\"", app_source)
@@ -1247,7 +1248,9 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
     def test_crypto_default_market_and_provider_aware_quote_copy(self):
         self.assertIn("{ value: 'crypto', label: '加密资产' }", self.center_source)
         self.assertIn("providerLabel(quoteData.value?.source || selected.value?.provider)", self.app_source)
-        self.assertIn("const providerLabel = provider => ({ coinbase: 'Coinbase', 'futu-opend': '富途 OpenD' }", self.app_source)
+        self.assertIn("longbridge: 'Longbridge'", self.app_source)
+        self.assertIn("tushare: 'Tushare'", self.app_source)
+        self.assertNotIn("'富途 OpenD'", self.app_source)
         self.assertNotIn("quoteLoading:'正在获取富途 OpenD 真实行情", (self.base_dir / "frontend" / "src" / "i18n.js").read_text(encoding="utf-8"))
         self.assertIn("页面仅展示真实数据提供方返回的市场数据", (self.base_dir / "frontend" / "src" / "i18n.js").read_text(encoding="utf-8"))
 

@@ -18,7 +18,8 @@ SLTD 当前的 Yahoo 只是 Provider 实现，不是本网站必须复制的供�
 - `core/marketdata/` 统一契约、Profile、Router、四维 process-local cache 和同 Provider stale 回退。
 - Tushare、Longbridge、Coinbase Provider 适配器；依赖和凭据均为惰性加载/环境变量读取。
 - `MarketDataService` 接管报价、历史窗口、公式输入、目录同步和指数兼容入口。
-- 旧 Futu OpenD 仅保留在显式 legacy 适配器和实时兼容桥中，未注册为历史/报价默认 Provider。
+- 旧 Futu OpenD 仅保留在显式 legacy 适配器和回归测试中，未注册为历史、报价、指数或实时默认 Provider。
+- 默认实时组合为 Longbridge（港股/美股 K 线订阅，可由 `LONGBRIDGE_MARKETS` 扩展 A 股）、Tushare（A 股轮询）和 Coinbase（加密 WebSocket）。实时 Registry/SSE 只消费统一 `NormalizedBar`，不识别底层 SDK。
 - 实时 Registry/StateStore/SSE 仍为单实例共享路径，状态键升级为 `provider + market + symbol + period`。
 - Vue 图表错误提示不再按供应商分支；保留历史兼容的来源展示文字，但不参与路由或计算。
 - 不加入任何策略、交易、仓位、BUY/SELL、C2 或自动交易逻辑。
@@ -44,6 +45,6 @@ Tushare、Longbridge 仅从本地 `.env` 或服务器环境读取；当前没有
 ## 已知边界
 
 - Tushare 分钟权限、Longbridge SDK/权限和订阅能力需要由部署者配置并按 Provider 实际能力验证；未配置时不显示为实时。
-- Futu legacy 适配器保留是为了迁移期间的 OpenD 回归和旧测试兼容，下一阶段应在 Longbridge/Tushare 实时能力落地后再评估移除。
+- Futu legacy 适配器保留是为了显式回滚和旧测试兼容；默认运行路径不依赖 OpenD。Longbridge/Tushare 未配置时返回 `not_configured`，不生成假行情。
 - 当前 cache 为进程内缓存，生产多进程部署前应接入受控共享缓存，但必须保留四维隔离和同 Provider stale 语义。
 - 真实行情授权、再分发许可、港股交易日/临时休市、生产 HTTPS/CORS/数据库仍需上线前专项审查。

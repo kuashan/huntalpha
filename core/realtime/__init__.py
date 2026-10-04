@@ -10,14 +10,17 @@ from .contracts import (
     provider_time_to_timestamp,
     timestamp_to_market_datetime,
 )
-from .futu_provider import FutuRealtimeProvider
+from .longbridge_provider import LongbridgeRealtimeProvider
 from .router import MarketDataProviderRouter
 from .provider import RealtimeProviderError
 from .registry import RealtimeConsumer, RealtimeRegistry, get_realtime_registry
 from .state import RealtimeStateStore
+from .tushare_provider import TushareRealtimeProvider
 
 __all__ = [
     "FutuRealtimeProvider",
+    "LongbridgeRealtimeProvider",
+    "TushareRealtimeProvider",
     "MarketDataProviderRouter",
     "MARKET_TIMEZONES",
     "MergeResult",
@@ -33,3 +36,12 @@ __all__ = [
     "timestamp_to_market_datetime",
     "RealtimeProviderError",
 ]
+
+
+def __getattr__(name):
+    """Load the legacy Futu adapter only when an explicit caller asks for it."""
+    if name == "FutuRealtimeProvider":
+        from .futu_provider import FutuRealtimeProvider
+
+        return FutuRealtimeProvider
+    raise AttributeError(name)

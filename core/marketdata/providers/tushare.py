@@ -16,6 +16,8 @@ _PERIODS = {
     "15分": "15min",
     "30分": "30min",
     "60分": "60min",
+    "2小时": "120min",
+    "4小时": "240min",
     "日线": "D",
     "周线": "W",
     "月线": "M",
@@ -72,6 +74,16 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def provider_symbol_for(symbol: str) -> str:
+    normalized = str(symbol or "").strip().upper()
+    prefix, separator, body = normalized.partition(".")
+    if separator and prefix in {"SH", "SZ"}:
+        return f"{body}.{prefix}"
+    if separator and body in {"SH", "SZ"}:
+        return normalized
+    return normalized
+
+
 class TushareMarketDataProvider:
     provider_id = TUSHARE_PROVIDER
     provider_label_zh = "Tushare"
@@ -85,11 +97,11 @@ class TushareMarketDataProvider:
         if self._client is not None:
             return self._client
         if not self.token:
-            raise MarketDataProviderError("Tushare token 未配置")
+            raise MarketDataProviderError("Tushare token 未配置", status="not_configured")
         try:
             import tushare as ts
         except ImportError as exc:
-            raise MarketDataProviderError("Tushare SDK 未安装") from exc
+            raise MarketDataProviderError("Tushare SDK 未安装", status="unavailable") from exc
         ts.set_token(self.token)
         self._client = ts.pro_api(self.token)
         return self._client
@@ -123,14 +135,14 @@ class TushareMarketDataProvider:
         try:
             frame = self._call_pro_bar(
                 client,
-                ts_code=str(symbol).upper(),
+                ts_code=provider_symbol_for(symbol),
                 freq=freq,
                 start_date=kwargs.get("start_date"),
                 end_date=kwargs.get("end_date"),
                 adj=kwargs.get("adj", "qfq"),
             )
         except Exception as exc:
-            raise MarketDataProviderError(f"Tushare 行情获取失败：{type(exc).__name__}") from exc
+            raise MarketDataProviderError(f"Tushare 行情获取失败：{type(exc).__name__}", status="unavailable") from exc
         completed = []
         for row in _records(frame):
             stamp = _timestamp(row.get("trade_time") or row.get("trade_date"))
@@ -162,7 +174,38 @@ class TushareMarketDataProvider:
         return self.fetch_window(symbol, timeframe, **kwargs)
 
     def quote(self, symbol: str) -> dict:
-        raise MarketDataProviderError("Tushare 实时报价需要已授权的实时分钟接口")
+        client = self._client_or_raise()
+        provider_symbol = provider_symbol_for(symbol)
+        rows = []
+        realtime = getattr(client, "realtime_quote", None)
+        if callable(realtime):
+            try:
+                rows = _records(realtime(provider_symbol))
+            except TypeError:
+                rows = _records(realtime([provider_symbol]))
+        if not rows:
+            pro_bar = getattr(client, "pro_bar", None)
+            if callable(pro_bar):
+                try:
+                    rows = _records(pro_bar(ts_code=provider_symbol, freq="D", adj="qfq"))
+                except Exception as exc:
+                    raise MarketDataProviderError(f"Tushare 报价获取失败：{type(exc).__name__}", status="unavailable") from exc
+        if not rows:
+            raise MarketDataProviderError("Tushare 未返回真实报价", status="unavailable")
+        row = max(rows, key=lambda item: str(item.get("trade_time") or item.get("timestamp") or item.get("trade_date") or ""))
+        price = _number(row.get("last") or row.get("last_done") or row.get("price") or row.get("close"))
+        if price is None:
+            raise MarketDataProviderError("Tushare 报价缺少最新价", status="unavailable")
+        previous = _number(row.get("pre_close") or row.get("prev_close"))
+        change = ((price - previous) / previous * 100) if previous else None
+        return {
+            "code": str(symbol).upper(), "price": price, "change": round(change, 3) if change is not None else None,
+            "previous_close": previous, "open": _number(row.get("open")), "high": _number(row.get("high")),
+            "low": _number(row.get("low")), "volume": _number(row.get("vol") or row.get("volume")),
+            "amount": _number(row.get("amount") or row.get("turnover")),
+            "updated_at": row.get("trade_time") or row.get("timestamp") or row.get("trade_date"),
+            "source": self.provider_id, "status": "ready",
+        }
 
     def list_securities(self, market_id: str, query: str = "", page: int = 1) -> list[dict]:
         client = self._client_or_raise()
@@ -175,7 +218,7 @@ class TushareMarketDataProvider:
         return [row for row in rows if not needle or needle in str(row.get("ts_code", "")).upper() or needle in str(row.get("name", ""))]
 
     def subscribe(self, symbol: str, timeframe: str, callback):
-        raise MarketDataProviderError("Tushare 当前未提供本网站可用的共享 WebSocket 订阅")
+        raise MarketDataProviderError("Tushare 实时能力由统一轮询 Provider 提供", status="unavailable")
 
     def unsubscribe(self, symbol: str, timeframe: str):
         return {"status": "unsupported", "provider": self.provider_id}

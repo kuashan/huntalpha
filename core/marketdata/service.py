@@ -5,7 +5,6 @@ from typing import Any
 from .contracts import MarketDataFetch
 from .profiles import CN_A_SHARE, CRYPTO_24_7, HK_EQUITY, US_EQUITY
 from .providers.coinbase import CoinbaseMarketDataProvider
-from .providers.futu_legacy import FutuLegacyMarketDataProvider
 from .providers.longbridge import LongbridgeMarketDataProvider
 from .providers.tushare import TushareMarketDataProvider
 from .router import MarketDataRouter
@@ -31,17 +30,23 @@ def legacy_fetch_crypto_historical_bars(*args, **kwargs):
 
 
 def build_realtime_provider():
-    """Compose the shared realtime router behind the market-data boundary.
+    """Compose the provider-neutral realtime router.
 
-    The stock adapter remains an explicit migration bridge until a configured
-    Tushare/Longbridge streaming implementation is available.  Composition is
-    kept here so the Registry does not know concrete provider classes.
+    A-shares use Tushare's explicit polling seam, HK/US use Longbridge's
+    candlestick push seam, and crypto keeps the public Coinbase stream. Futu
+    remains importable only as an explicit legacy adapter and is never part of
+    the default runtime composition.
     """
     from ..crypto_provider import CoinbaseRealtimeProvider
-    from ..realtime.futu_provider import FutuRealtimeProvider
+    from ..realtime.longbridge_provider import LongbridgeRealtimeProvider
     from ..realtime.router import MarketDataProviderRouter
+    from ..realtime.tushare_provider import TushareRealtimeProvider
 
-    return MarketDataProviderRouter(FutuRealtimeProvider(), CoinbaseRealtimeProvider())
+    return MarketDataProviderRouter(
+        LongbridgeRealtimeProvider(),
+        TushareRealtimeProvider(),
+        CoinbaseRealtimeProvider(),
+    )
 
 
 def market_id_for_symbol(symbol: str) -> str:
@@ -156,6 +161,8 @@ class MarketDataService:
         )
 
     def legacy_window(self, symbol: str, timeframe: str, context_factory=None, **kwargs: Any) -> MarketDataFetch:
+        from .providers.futu_legacy import FutuLegacyMarketDataProvider
+
         market = market_id_for_symbol(symbol)
         profile = {CN_A_SHARE.market_id: CN_A_SHARE, HK_EQUITY.market_id: HK_EQUITY, US_EQUITY.market_id: US_EQUITY}.get(market)
         if profile is None:
@@ -170,21 +177,53 @@ class MarketDataService:
         only for the old API/test seam while all normal application requests
         go through the provider-neutral service methods.
         """
+        from .providers.futu_legacy import FutuLegacyMarketDataProvider
+
         provider = FutuLegacyMarketDataProvider(CN_A_SHARE)
         return provider.open_context()
 
     def index_snapshot_response(self) -> dict:
-        """Return the legacy index header through an isolated compatibility seam."""
-        from ..market_indices import FutuOpenDIndexAdapter, grouped_snapshot_response, unavailable_index_items
+        """Return provider-neutral index availability without opening OpenD.
 
-        adapter = FutuOpenDIndexAdapter(self.legacy_context)
-        try:
-            items = adapter.fetch()
-        except Exception:
-            items = unavailable_index_items()
-        return grouped_snapshot_response(items)
+        Index-specific providers are not configured yet, so this endpoint
+        reports explicit unavailable/not_configured states instead of routing
+        through the legacy Futu adapter or inventing index values.
+        """
+        from ..market_indices import INDEX_DEFINITIONS
+
+        items = []
+        profile_ids = {"cn": CN_A_SHARE.market_id, "hk": HK_EQUITY.market_id, "us": US_EQUITY.market_id}
+        for definition in INDEX_DEFINITIONS:
+            provider_ids = self.router.provider_ids(profile_ids.get(definition.market, definition.market))
+            status = "not_configured" if provider_ids else "unavailable"
+            items.append({
+                "code": definition.provider_code,
+                "name": definition.name,
+                "provider_name": definition.provider_name,
+                "market": definition.market,
+                "price": None,
+                "previous_close": None,
+                "change": None,
+                "change_percent": None,
+                "open": None,
+                "high": None,
+                "low": None,
+                "updated_at": None,
+                "status": status,
+                "source": provider_ids[0] if provider_ids else "marketdata-router",
+                "error": "统一行情源未配置" if status == "not_configured" else "统一行情源不可用",
+            })
+        return {
+            "source": "marketdata-router",
+            "markets": [
+                {"market": market, "items": [item for item in items if item["market"] == market]}
+                for market in ("cn", "hk", "us")
+            ],
+        }
 
     def legacy_quote(self, symbol: str, context_factory=None) -> dict:
+        from .providers.futu_legacy import FutuLegacyMarketDataProvider
+
         market = market_id_for_symbol(symbol)
         profile = {CN_A_SHARE.market_id: CN_A_SHARE, HK_EQUITY.market_id: HK_EQUITY, US_EQUITY.market_id: US_EQUITY}.get(market)
         if profile is None:

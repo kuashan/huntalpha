@@ -6,6 +6,7 @@ from typing import Any
 from .cache import MarketDataCache
 from .contracts import MarketDataFetch, MarketDataProvider
 from .profiles import normalize_market_id
+from .providers.base import MarketDataProviderError
 
 
 class MarketDataRouter:
@@ -59,7 +60,7 @@ class MarketDataRouter:
                 self.cache.put(fetch)
                 return fetch
             except Exception as exc:
-                errors.append(f"{provider.provider_id}:{type(exc).__name__}:{exc}")
+                errors.append(f"{provider.provider_id}:{getattr(exc, 'status', 'unavailable')}:{type(exc).__name__}:{exc}")
                 cached = self.cache.get(market, symbol, timeframe, provider.provider_id)
                 if cached is not None:
                     stale.append(cached)
@@ -74,7 +75,8 @@ class MarketDataRouter:
                     "error": "；".join(errors),
                 },
             )
-        raise RuntimeError("；".join(errors) or f"{market}: 行情获取失败")
+        status = "not_configured" if errors and all(":not_configured:" in item for item in errors) else "unavailable"
+        raise MarketDataProviderError("；".join(errors) or f"{market}: 行情获取失败", status=status)
 
     def capabilities(self, market_id: str, provider_id: str | None = None) -> dict[str, Any]:
         provider = self._provider(market_id, provider_id)

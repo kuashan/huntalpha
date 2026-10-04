@@ -45,7 +45,7 @@ from .realtime import (
 )
 from .realtime.formula_scheduler import FormulaRunRegistry, calculation_input_fingerprint
 from .realtime.provider import REALTIME_PERIOD_SUBTYPES
-from .symbol_catalog import COINBASE_PROVIDER, FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
+from .symbol_catalog import COINBASE_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 from .watchlist import account_tier_payload, watchlist_limit_for_user
 
 PERIODS = ("1分", "5分", "15分", "30分", "60分", "2小时", "4小时", "日线", "周线", "月线")
@@ -618,7 +618,11 @@ def quote(request, code):
             payload = get_market_data_service().quote_for_symbol(normalized_code)
         return json(payload)
     except Exception as exc:
-        return json({"error": f"统一行情不可用：{exc}", "source": "marketdata-router", "status": "unavailable"}, 503)
+        status = getattr(exc, "status", "unavailable")
+        return json({
+            "error": f"行情源未配置：{exc}" if status == "not_configured" else f"统一行情不可用：{exc}",
+            "source": "marketdata-router", "status": status,
+        }, 503)
     finally:
         if client is not None:
             client.close()
@@ -686,7 +690,11 @@ def kline(request, code):
             bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)))
         return json({"code": code.upper(), "period": period, "bars": bars, "source": fetch.provider_id, "adjustment": fetch.meta.get("adjustment", "前复权"), "has_more": len(bars) >= count})
     except Exception as exc:
-        return json({"error": f"统一行情不可用：{exc}", "source": "marketdata-router", "status": "unavailable"}, 503)
+        status = getattr(exc, "status", "unavailable")
+        return json({
+            "error": f"行情源未配置：{exc}" if status == "not_configured" else f"统一行情不可用：{exc}",
+            "source": "marketdata-router", "status": status,
+        }, 503)
     finally:
         if client is not None:
             client.close()
@@ -707,8 +715,13 @@ def realtime_market_stream(request, code):
     try:
         consumer = registry.subscribe(code.upper(), period)
     except RealtimeProviderError as exc:
+        status = getattr(exc, "status", "unavailable")
         return json({
-            "error": str(exc), "code": "realtime_unavailable", "source": registry.provider_name_for(code), "mode": "unavailable",
+            "error": str(exc),
+            "code": "realtime_not_configured" if status == "not_configured" else "realtime_unavailable",
+            "source": registry.provider_name_for(code),
+            "status": status,
+            "mode": "polling" if registry.provider_name_for(code) == "tushare" else "streaming",
         }, 503)
 
     def events():
@@ -893,6 +906,7 @@ def _catalog_status(market, leaders_available=None):
     if leaders_available is None:
         leaders_available = _market_catalog_queryset(market).filter(market_cap__gt=0).exists()
     latest = _market_catalog_queryset(market).order_by("-catalog_updated_at").first()
+    provider_ids = get_market_data_service().router.provider_ids(definition.code)
     status_error = None
     if not catalog_available:
         status_error = "真实证券目录尚未同步"
@@ -901,7 +915,7 @@ def _catalog_status(market, leaders_available=None):
     return {
         "market": market,
         "name": definition.name,
-        "provider": FUTU_PROVIDER,
+        "provider": provider_ids[0] if provider_ids else None,
         "catalog_available": catalog_available,
         "leaders_available": leaders_available,
         "status": "ok" if catalog_available else "unavailable",

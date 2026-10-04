@@ -28,6 +28,7 @@ const realtimeStatusText = computed(() => ({
   live: '● 实时',
   polling: '轮询中',
   reconnecting: '重连中',
+  not_configured: '未配置实时行情源',
   unavailable: '行情暂不可用',
 }[realtimeStatus.value] || '实时状态未知'))
 
@@ -183,14 +184,14 @@ function acceptRealtimeEpoch(epoch) {
 function setRealtimeStatus(status) {
   if (!status) return
   if (status === 'live') providerLive = true
-  else if (status === 'unavailable' || status === 'connecting' || status === 'reconnecting') providerLive = false
+  else if (status === 'unavailable' || status === 'not_configured' || status === 'connecting' || status === 'reconnecting') providerLive = false
   if (status === 'live' && (needsHistoryReconcile || historyReconcileInFlight)) {
     pendingRecoveryLiveStatus = true
     realtimeStatus.value = 'reconnecting'
     return
   }
   if (status !== 'live') pendingRecoveryLiveStatus = false
-  if (status === 'connecting' || status === 'reconnecting' || status === 'unavailable') {
+  if (status === 'connecting' || status === 'reconnecting' || status === 'unavailable' || status === 'not_configured') {
     realtimeStatusGeneration += 1
     realtimeUiBuffer?.clear()
   }

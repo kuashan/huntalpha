@@ -9,7 +9,17 @@ from .base import MarketDataProviderError, unavailable_status
 
 
 LONGBRIDGE_PROVIDER = "longbridge"
-_PERIOD_NAMES = {"1分": "Minute", "5分": "FiveMinute", "15分": "FifteenMinute", "30分": "ThirtyMinute", "60分": "Hour", "日线": "Day", "周线": "Week", "月线": "Month"}
+_PERIOD_NAMES = {"1分": "Minute", "5分": "FiveMinute", "15分": "FifteenMinute", "30分": "ThirtyMinute", "60分": "Hour", "2小时": "TwoHour", "4小时": "FourHour", "日线": "Day", "周线": "Week", "月线": "Month"}
+
+
+def provider_symbol_for(symbol: str) -> str:
+    normalized = str(symbol or "").strip().upper()
+    prefix, separator, body = normalized.partition(".")
+    if separator and prefix in {"SH", "SZ", "HK", "US"}:
+        if prefix == "HK":
+            body = body.lstrip("0") or "0"
+        return f"{body}.{prefix}"
+    return normalized
 
 
 def _stamp(value: Any) -> int | None:
@@ -51,14 +61,14 @@ class LongbridgeMarketDataProvider:
         if self.context is not None:
             return self.context
         if not self.token:
-            raise MarketDataProviderError("Longbridge access token 未配置")
+            raise MarketDataProviderError("Longbridge access token 未配置", status="not_configured")
         try:
             from longbridge.openapi import Config, QuoteContext
             self.context = QuoteContext(Config.from_apikey_env())
         except ImportError as exc:
-            raise MarketDataProviderError("Longbridge SDK 未安装") from exc
+            raise MarketDataProviderError("Longbridge SDK 未安装", status="unavailable") from exc
         except Exception as exc:
-            raise MarketDataProviderError("Longbridge 行情上下文初始化失败") from exc
+            raise MarketDataProviderError("Longbridge 行情上下文初始化失败", status="unavailable") from exc
         return self.context
 
     def capabilities(self, market_id: str | None = None) -> dict[str, Any]:
@@ -70,16 +80,19 @@ class LongbridgeMarketDataProvider:
         return {"status": "ready", "provider": self.provider_id, "mode": "historical"}
 
     def quote(self, symbol: str) -> dict:
-        rows = self._context_or_raise().quote([str(symbol).upper()])
+        rows = self._context_or_raise().quote([provider_symbol_for(symbol)])
         if not rows:
-            raise MarketDataProviderError("Longbridge 未返回真实报价")
+            raise MarketDataProviderError("Longbridge 未返回真实报价", status="unavailable")
         row = rows[0]
         price = _attr(row, "last_done", "last", "price")
         if price is None:
-            raise MarketDataProviderError("Longbridge 报价缺少最新价")
+            raise MarketDataProviderError("Longbridge 报价缺少最新价", status="unavailable")
         return {"code": str(symbol).upper(), "price": float(price), "volume": _attr(row, "volume"), "amount": _attr(row, "turnover"), "source": self.provider_id, "status": "ready"}
 
     def fetch_window(self, symbol: str, timeframe: str, **kwargs: Any) -> dict:
+        # Resolve credentials before probing the optional SDK so an absent
+        # provider is reported as not_configured rather than as an SDK error.
+        context = self._context_or_raise()
         try:
             from longbridge.openapi import AdjustType, Period
             period = getattr(Period, _PERIOD_NAMES.get(timeframe, "Day"))
@@ -91,9 +104,8 @@ class LongbridgeMarketDataProvider:
             if self.context is None:
                 raise MarketDataProviderError("Longbridge SDK 未安装") from exc
             period, adjust = timeframe, None
-        context = self._context_or_raise()
         count = int(kwargs.get("limit", 300))
-        rows = context.candlesticks(str(symbol).upper(), period, adjust, count)
+        rows = context.candlesticks(provider_symbol_for(symbol), period, adjust, count)
         completed = []
         for row in rows or []:
             stamp = _stamp(_attr(row, "timestamp", "time"))
@@ -111,7 +123,7 @@ class LongbridgeMarketDataProvider:
         raise MarketDataProviderError("Longbridge 全市场目录需要按市场分页配置")
 
     def subscribe(self, symbol: str, timeframe: str, callback):
-        raise MarketDataProviderError("Longbridge 实时订阅将在共享 Registry 迁移阶段接入")
+        raise MarketDataProviderError("Longbridge 实时能力由统一实时 Provider 提供", status="unavailable")
 
     def unsubscribe(self, symbol: str, timeframe: str):
         return {"status": "unsupported", "provider": self.provider_id}

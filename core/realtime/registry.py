@@ -100,7 +100,13 @@ class RealtimeRegistry:
                         self.provider.unsubscribe(symbol, period)
                     except Exception:
                         pass
-                    self.state_store.set_status(key, "unavailable", source=key[0], error=str(exc))
+                    self.state_store.set_status(
+                        key,
+                        getattr(exc, "status", "unavailable"),
+                        mode="polling" if key[0] == "tushare" else "streaming",
+                        source=key[0],
+                        error=str(exc),
+                    )
                     raise RealtimeProviderError(str(exc)) from exc
                 self._entries[key]["subscribed"] = True
                 subscribed = True

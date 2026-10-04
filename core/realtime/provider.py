@@ -18,6 +18,10 @@ REALTIME_PERIOD_SUBTYPES = {
 class RealtimeProviderError(RuntimeError):
     """A real provider is unavailable or rejected a subscription."""
 
+    def __init__(self, message, *, status="unavailable"):
+        super().__init__(message)
+        self.status = status
+
 
 class RealtimeMarketProvider(ABC):
     provider_name = "unknown"
