@@ -18,11 +18,17 @@ class RealtimeState:
     error: str | None = None
 
     def to_dict(self):
+        if len(self.key) >= 4:
+            provider, market, symbol, period = self.key[:4]
+        else:
+            provider, symbol, period = self.key[:3]
+            market = None
         return {
             "epoch": self.epoch,
-            "provider": self.key[0],
-            "symbol": self.key[1],
-            "period": self.key[2],
+            "provider": provider,
+            "market": market,
+            "symbol": symbol,
+            "period": period,
             "bar": self.current_bar.to_dict() if self.current_bar else None,
             "last_closed_bar": self.last_closed_bar.to_dict() if self.last_closed_bar else None,
             "revision": self.revision,

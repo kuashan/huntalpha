@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, field
 
 from .contracts import NormalizedBar
+from .contracts import market_for_symbol
 from .provider import RealtimeProviderError
 from .state import RealtimeStateStore
 
@@ -35,7 +36,8 @@ class RealtimeRegistry:
         self._last_health_check = 0.0
 
     def _key(self, symbol, period):
-        return (self.provider_name_for(symbol), str(symbol).upper(), period)
+        normalized = str(symbol).upper()
+        return (self.provider_name_for(symbol), market_for_symbol(normalized) or "unknown", normalized, period)
 
     def provider_name_for(self, symbol):
         resolver = getattr(self.provider, "provider_name_for", None)
@@ -146,7 +148,7 @@ class RealtimeRegistry:
             self._entries.pop(key, None)
         try:
             if entry.get("subscribed"):
-                self.provider.unsubscribe(key[1], key[2])
+                self.provider.unsubscribe(key[2], key[3])
         finally:
             self.state_store.set_status(key, "unavailable", source=key[0])
 
@@ -173,7 +175,7 @@ class RealtimeRegistry:
                 entry["timer"].cancel()
             if entry.get("subscribed"):
                 try:
-                    self.provider.unsubscribe(key[1], key[2])
+                    self.provider.unsubscribe(key[2], key[3])
                 except Exception:
                     pass
         self.provider.close()
