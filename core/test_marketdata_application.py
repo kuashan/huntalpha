@@ -32,4 +32,5 @@ class MarketDataApplicationTests(TestCase):
     def test_views_do_not_import_a_provider_sdk(self):
         source = Path(__file__).with_name("views.py").read_text(encoding="utf-8")
         self.assertNotIn("from futu import", source)
+        self.assertNotIn("from .crypto_provider", source)
         self.assertIn("marketdata.service", source)

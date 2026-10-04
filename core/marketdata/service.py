@@ -11,6 +11,25 @@ from .providers.tushare import TushareMarketDataProvider
 from .router import MarketDataRouter
 
 
+def legacy_coinbase_client():
+    """Construct the old Coinbase client only for explicit test compatibility."""
+    from ..crypto_provider import CoinbasePublicClient
+
+    return CoinbasePublicClient()
+
+
+def legacy_crypto_quote(*args, **kwargs):
+    from ..crypto_provider import crypto_quote
+
+    return crypto_quote(*args, **kwargs)
+
+
+def legacy_fetch_crypto_historical_bars(*args, **kwargs):
+    from ..crypto_provider import fetch_crypto_historical_bars
+
+    return fetch_crypto_historical_bars(*args, **kwargs)
+
+
 def market_id_for_symbol(symbol: str) -> str:
     prefix = str(symbol or "").strip().upper().split(".", 1)[0]
     return {"SH": CN_A_SHARE.market_id, "SZ": CN_A_SHARE.market_id, "HK": HK_EQUITY.market_id, "US": US_EQUITY.market_id, "CC": CRYPTO_24_7.market_id}.get(prefix, US_EQUITY.market_id)

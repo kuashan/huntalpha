@@ -20,21 +20,20 @@ from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from formula_editor.models import Formula
 from .models import AccountProfile, MarketSymbol, WatchlistEntry
-# These aliases are retained solely as an explicit compatibility seam for the
-# existing API regression tests.  Normal requests use MarketDataService below.
-from .crypto_provider import (
-    CoinbasePublicClient as _legacy_CoinbasePublicClient,
-    crypto_quote as _legacy_crypto_quote,
-    fetch_crypto_historical_bars as _legacy_fetch_crypto_historical_bars,
-)
-crypto_quote = _legacy_crypto_quote
-fetch_crypto_historical_bars = _legacy_fetch_crypto_historical_bars
-CoinbasePublicClient = _legacy_CoinbasePublicClient
 from .account import (
     AvatarValidationError, account_avatar_url, account_display_name, account_preferences as account_preferences_data,
     delete_avatar, save_avatar,
 )
-from .marketdata.service import get_market_data_service, market_id_for_symbol
+from .marketdata.service import (
+    get_market_data_service,
+    legacy_coinbase_client,
+    legacy_crypto_quote,
+    legacy_fetch_crypto_historical_bars,
+)
+# Patchable compatibility aliases; production execution bypasses these and
+# calls MarketDataService/MarketDataRouter directly.
+crypto_quote = legacy_crypto_quote
+fetch_crypto_historical_bars = legacy_fetch_crypto_historical_bars
 from .realtime import (
     NormalizedBar,
     RealtimeProviderError,
@@ -477,6 +476,8 @@ def context():
 
 
 _default_context_function = context
+_default_crypto_quote = crypto_quote
+_default_fetch_crypto_historical_bars = fetch_crypto_historical_bars
 
 
 def numeric_value(value):
@@ -597,8 +598,8 @@ def quote(request, code):
         try:
             # Keep the old patchable helper only for compatibility fixtures;
             # production requests use the provider-neutral service.
-            if crypto_quote is not _legacy_crypto_quote:
-                payload = crypto_quote(symbol.provider_symbol, client=CoinbasePublicClient(), name=symbol.name)
+            if crypto_quote is not _default_crypto_quote:
+                payload = crypto_quote(symbol.provider_symbol, client=legacy_coinbase_client(), name=symbol.name)
             else:
                 payload = get_market_data_service().quote_for_symbol(normalized_code)
             payload = {**payload, "code": payload.get("code") or normalized_code, "source": payload.get("source", COINBASE_PROVIDER)}
@@ -642,9 +643,9 @@ def kline(request, code):
         if period == "分时":
             return json({"error": "Coinbase 加密资产暂不支持分时接口", "code": "period_unavailable", "source": COINBASE_PROVIDER}, 422)
         try:
-            if fetch_crypto_historical_bars is not _legacy_fetch_crypto_historical_bars:
+            if fetch_crypto_historical_bars is not _default_fetch_crypto_historical_bars:
                 bars = fetch_crypto_historical_bars(
-                    symbol.provider_symbol, period, count=count, before=before, client=CoinbasePublicClient(),
+                    symbol.provider_symbol, period, count=count, before=before, client=legacy_coinbase_client(),
                 )
                 source = COINBASE_PROVIDER
                 adjustment = "UTC"
@@ -756,9 +757,9 @@ def history_bars(code, period, calculation_snapshot=None):
         if period == "分时":
             return None, None, "自定义公式暂不支持分时；请选择 K 线周期"
         try:
-            if fetch_crypto_historical_bars is not _legacy_fetch_crypto_historical_bars:
+            if fetch_crypto_historical_bars is not _default_fetch_crypto_historical_bars:
                 bars = fetch_crypto_historical_bars(
-                    symbol.provider_symbol, period, count=KLINE_PAGE_SIZE, client=CoinbasePublicClient(),
+                    symbol.provider_symbol, period, count=KLINE_PAGE_SIZE, client=legacy_coinbase_client(),
                 )
             else:
                 bars = get_market_data_service().window_for_symbol(

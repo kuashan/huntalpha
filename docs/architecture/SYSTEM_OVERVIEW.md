@@ -21,7 +21,8 @@ HuntAlpha 是准备正式上线的金融分析/量化网站。当前代码库已
 
 ### 行情与分析
 
-- 本地富途 OpenD：当前授权行情入口
+- `core/marketdata`：统一 MarketProfile/Router/Provider 入口；按市场接入 Tushare、Longbridge、Coinbase 公共行情
+- 富途 OpenD：迁移期间仅作为隔离的 legacy/实时兼容桥，不是历史行情和报价的统一架构基础
 - 通达信公式兼容层：服务端计算，前端只消费绘图结果
 - `vendor/formula-ts`：Git submodule，上游研究参考
 - `vendor/chan.py-main`：用于内置缠论结构适配的第三方代码，须保留许可证
@@ -30,10 +31,17 @@ HuntAlpha 是准备正式上线的金融分析/量化网站。当前代码库已
 
 浏览器/Vue
 → Django API
-→ 行情/业务服务
+→ `core.marketdata.MarketDataService`
+→ `MarketDataRouter`
+→ `MarketProfile`
+→ Provider
 → 服务端指标或分析计算
 → 返回必要的元数据、坐标与信号
 → 前端绘图
+
+Provider 失败时重新获取同一完整窗口，不拼接供应商数据；缓存至少隔离
+`market + symbol + timeframe + provider`。实时页面继续使用单进程共享
+Registry/StateStore/SSE，实时状态键同时包含 provider、market、symbol、period。
 
 私有通达信公式正文不得沿这条链路返回给浏览器。
 

@@ -48,7 +48,8 @@ const indexTitle = index => {
 const list = computed(() => symbols.value)
 const selectedQuote = computed(() => quotes.value[selected.value?.code] || { status: 'idle' })
 const quoteData = computed(() => selectedQuote.value.status === 'ready' ? selectedQuote.value.data : null)
-const providerLabel = provider => provider || '统一行情源'
+// Labels are presentation-only; routing and data fetching remain server-side.
+const providerLabel = provider => ({ coinbase: 'Coinbase', 'futu-opend': '富途 OpenD' }[provider] || provider || '—')
 const quoteStatusText = computed(() => {
   if (selectedQuote.value.status === 'ready') return `${t('quoteSource')}${providerLabel(quoteData.value?.source || selected.value?.provider)}`
   if (selectedQuote.value.status === 'loading' || selectedQuote.value.status === 'idle') return t('quoteLoading')

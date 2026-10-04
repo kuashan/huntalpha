@@ -15,6 +15,12 @@
 
 ## 当前进行中
 
+### Task 006 — SLTD 对齐的统一行情基础设施
+
+状态：`IMPLEMENTED_AND_VERIFIED`（分支 `codex/006-unified-marketdata-siftalpha`，待审查；未推送、未合并）
+
+已完成真实 `siftalpha-research` 分支审计，并将统一行情契约、港股 MarketProfile、Provider Router、四维缓存、Tushare/Longbridge/Coinbase 适配器和应用层入口迁移到 HuntAlpha。详见 `docs/tasks/006-unified-marketdata-siftalpha.md`。本任务不加入交易策略；无凭据或权限不足时必须显示 unavailable。
+
 ### Task 005.1.3 — Real-time Market Data & Indicator Pipeline Foundation
 
 状态：`IN_PROGRESS`
