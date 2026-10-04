@@ -32,7 +32,7 @@ Tushare、Longbridge 仅从本地 `.env` 或服务器环境读取；当前没有
 - `python manage.py check`：通过；仅保留既有 `DEFAULT_AUTO_FIELD` 警告。
 - `python manage.py makemigrations --check`：`No changes detected`。
 - `python -m compileall -q core quant_site formula_editor`：通过。
-- `python manage.py test core`：175/175，通过；仅保留既有 `DEFAULT_AUTO_FIELD` 警告。
+- `python manage.py test core`：176/176，通过；仅保留既有 `DEFAULT_AUTO_FIELD` 警告。
 - `python manage.py test core.test_marketdata_core`：6/6，通过。
 - `python manage.py test core.test_marketdata_application`：通过。
 - `python manage.py test core.test_marketdata_realtime core.tests.RealtimeCoreContractTests`：47/47，通过。
