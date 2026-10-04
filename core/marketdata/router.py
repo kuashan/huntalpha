@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+from typing import Any
+
+from .contracts import MarketDataFetch, MarketDataProvider
+from .profiles import normalize_market_id
+
+
+class MarketDataRouter:
+    """Route by MarketProfile and Provider priority with whole-window failover."""
+
+    def __init__(self):
+        self._providers: dict[str, list[MarketDataProvider]] = {}
+
+    def register(self, provider: MarketDataProvider) -> None:
+        market_id = normalize_market_id(provider.profile.market_id)
+        self._providers.setdefault(market_id, []).append(provider)
+
+    def provider_ids(self, market_id: str) -> tuple[str, ...]:
+        return tuple(provider.provider_id for provider in self._providers.get(normalize_market_id(market_id), ()))
+
+    def fetch_window(self, market_id: str, symbol: str, timeframe: str, **kwargs: Any) -> MarketDataFetch:
+        market = normalize_market_id(market_id)
+        providers = self._providers.get(market) or []
+        if not providers:
+            raise RuntimeError(f"没有可用行情供应商：{market}")
+
+        errors: list[str] = []
+        for provider in providers:
+            try:
+                fetcher = getattr(provider, "fetch_window", None)
+                if not callable(fetcher):
+                    fetcher = getattr(provider, "fetch", None)
+                if not callable(fetcher):
+                    raise TypeError("provider has no complete-window fetcher")
+                payload = fetcher(symbol, timeframe, **kwargs)
+                stream_factory = getattr(provider, "stream_url", None)
+                stream_url = stream_factory(symbol) if callable(stream_factory) else None
+                return MarketDataFetch.from_payload(
+                    market_id=market,
+                    provider_id=provider.provider_id,
+                    provider_label_zh=provider.provider_label_zh,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    payload=payload,
+                    stream_url=stream_url,
+                )
+            except Exception as exc:
+                errors.append(f"{provider.provider_id}:{type(exc).__name__}:{exc}")
+        raise RuntimeError("；".join(errors) or f"{market}: 行情获取失败")
+
+    def capabilities(self, market_id: str, provider_id: str | None = None) -> dict[str, Any]:
+        provider = self._provider(market_id, provider_id)
+        method = getattr(provider, "capabilities", None)
+        return dict(method(market_id) if callable(method) else {})
+
+    def status(self, market_id: str, provider_id: str | None = None, symbol: str | None = None) -> dict[str, Any]:
+        provider = self._provider(market_id, provider_id)
+        method = getattr(provider, "status", None)
+        return dict(method(market_id, symbol) if callable(method) else {"status": "unknown", "provider": provider.provider_id})
+
+    def _provider(self, market_id: str, provider_id: str | None):
+        providers = self._providers.get(normalize_market_id(market_id)) or []
+        if provider_id is None:
+            if not providers:
+                raise RuntimeError(f"没有可用行情供应商：{normalize_market_id(market_id)}")
+            return providers[0]
+        for provider in providers:
+            if provider.provider_id == provider_id:
+                return provider
+        raise KeyError(f"provider is not registered for market: {provider_id}")
