@@ -603,6 +603,7 @@ function connectRealtime({ reconcileHistory = false } = {}) {
   const generation = ++streamGeneration
   let needsRecovery = reconcileHistory
   if (reconcileHistory) markHistoryReconcileNeeded()
+  realtimeDataStatus.value = ''
   setRealtimeStatus('connecting')
   const url = `http://127.0.0.1:8003/api/realtime/market-stream/${encodeURIComponent(props.symbol.code)}/?period=${encodeURIComponent(props.period)}`
   const source = new EventSource(url, { withCredentials: true })
