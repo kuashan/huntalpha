@@ -647,6 +647,7 @@ def kline(request, code):
         if period == "分时":
             return json({"error": "Coinbase 加密资产暂不支持分时接口", "code": "period_unavailable", "source": COINBASE_PROVIDER}, 422)
         try:
+            data_status = "historical"
             if fetch_crypto_historical_bars is not _default_fetch_crypto_historical_bars:
                 bars = fetch_crypto_historical_bars(
                     symbol.provider_symbol, period, count=count, before=before, client=legacy_coinbase_client(),
@@ -660,12 +661,14 @@ def kline(request, code):
                 bars = fetch.completed
                 source = fetch.provider_id
                 adjustment = fetch.meta.get("adjustment", "UTC")
+                data_status = fetch.meta.get("data_status", "historical")
             registry = get_realtime_registry()
             if before is None:
                 bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)))
             return json({
                 "code": normalized_code, "period": period, "bars": bars, "source": source,
                 "adjustment": adjustment, "has_more": len(bars) >= count,
+                "data_status": data_status,
             })
         except Exception as exc:
             return json({"error": f"Coinbase 不可用：{exc}", "source": COINBASE_PROVIDER, "status": "unavailable"}, 503)
@@ -688,7 +691,7 @@ def kline(request, code):
         if before is None:
             registry = get_realtime_registry()
             bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)))
-        return json({"code": code.upper(), "period": period, "bars": bars, "source": fetch.provider_id, "adjustment": fetch.meta.get("adjustment", "前复权"), "has_more": len(bars) >= count})
+        return json({"code": code.upper(), "period": period, "bars": bars, "source": fetch.provider_id, "adjustment": fetch.meta.get("adjustment", "前复权"), "has_more": len(bars) >= count, "data_status": fetch.meta.get("data_status", "historical"), "delay_seconds": fetch.meta.get("delay_seconds")})
     except Exception as exc:
         status = getattr(exc, "status", "unavailable")
         return json({

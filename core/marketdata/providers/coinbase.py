@@ -32,7 +32,7 @@ class CoinbaseMarketDataProvider:
         completed = []
         for row in rows:
             completed.append({**row, "provider": self.provider_id, "market": self.profile.market_id, "symbol": str(symbol).upper(), "period": timeframe, "is_closed": True, "timestamp": row.get("time"), "sequence": None, "revision": 0, "mode": "historical"})
-        return {"completed": completed, "forming": None, "meta": {"mode": "historical", "source": self.provider_id}}
+        return {"completed": completed, "forming": None, "meta": {"mode": "historical", "source": self.provider_id, "data_status": "historical"}}
 
     def fetch_recent(self, symbol, timeframe, **kwargs):
         return self.fetch_window(symbol, timeframe, **kwargs)

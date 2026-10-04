@@ -26,6 +26,7 @@ const realtimeStatus = ref('connecting')
 const realtimeDataStatus = ref('')
 const realtimeStatusText = computed(() => {
   if (realtimeDataStatus.value === 'delayed' && ['live', 'polling'].includes(realtimeStatus.value)) return '● 延迟行情'
+  if (realtimeDataStatus.value === 'historical') return '历史行情'
   return ({
   connecting: '连接实时行情…',
   live: '● 实时',
@@ -680,6 +681,7 @@ async function draw(options = {}) {
       if (payload.bars?.length) {
         loadedBars = orderedUniqueBars(payload.bars)
         hasMoreHistory = Boolean(payload.has_more)
+        if (payload.data_status) realtimeDataStatus.value = payload.data_status
       } else {
         historyStatus.value = '行情不可用：统一行情源未返回真实 K 线'
       }
