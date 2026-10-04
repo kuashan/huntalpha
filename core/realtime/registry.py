@@ -217,12 +217,10 @@ _default_lock = threading.Lock()
 
 def create_default_realtime_registry(**kwargs):
     """Application composition point for the currently selected provider."""
-    from ..crypto_provider import CoinbaseRealtimeProvider
-    from .futu_provider import FutuRealtimeProvider
-    from .router import MarketDataProviderRouter
+    from ..marketdata.service import build_realtime_provider
 
     return RealtimeRegistry(
-        provider=MarketDataProviderRouter(FutuRealtimeProvider(), CoinbaseRealtimeProvider()),
+        provider=build_realtime_provider(),
         **kwargs,
     )
 

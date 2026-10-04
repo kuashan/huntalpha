@@ -1,4 +1,5 @@
 from unittest import TestCase
+from pathlib import Path
 
 from .realtime.contracts import NormalizedBar
 from .realtime.registry import RealtimeRegistry
@@ -25,6 +26,12 @@ class FakeRealtimeProvider:
 
 
 class UnifiedRealtimeBoundaryTests(TestCase):
+    def test_default_registry_composition_is_delegated_to_marketdata_service(self):
+        source = Path(__file__).with_name("realtime") / "registry.py"
+        text = source.read_text(encoding="utf-8")
+        self.assertNotIn("from .futu_provider import", text)
+        self.assertIn("marketdata.service", text)
+
     def test_registry_identity_contains_provider_market_symbol_and_period(self):
         registry = RealtimeRegistry(FakeRealtimeProvider(), state_store=RealtimeStateStore(), grace_seconds=0)
         consumer = registry.subscribe("SH.600519", "1分")

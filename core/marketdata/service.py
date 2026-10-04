@@ -30,6 +30,20 @@ def legacy_fetch_crypto_historical_bars(*args, **kwargs):
     return fetch_crypto_historical_bars(*args, **kwargs)
 
 
+def build_realtime_provider():
+    """Compose the shared realtime router behind the market-data boundary.
+
+    The stock adapter remains an explicit migration bridge until a configured
+    Tushare/Longbridge streaming implementation is available.  Composition is
+    kept here so the Registry does not know concrete provider classes.
+    """
+    from ..crypto_provider import CoinbaseRealtimeProvider
+    from ..realtime.futu_provider import FutuRealtimeProvider
+    from ..realtime.router import MarketDataProviderRouter
+
+    return MarketDataProviderRouter(FutuRealtimeProvider(), CoinbaseRealtimeProvider())
+
+
 def market_id_for_symbol(symbol: str) -> str:
     prefix = str(symbol or "").strip().upper().split(".", 1)[0]
     return {"SH": CN_A_SHARE.market_id, "SZ": CN_A_SHARE.market_id, "HK": HK_EQUITY.market_id, "US": US_EQUITY.market_id, "CC": CRYPTO_24_7.market_id}.get(prefix, US_EQUITY.market_id)
