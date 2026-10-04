@@ -3,3 +3,5 @@ futu-api==10.10.7008
 django-simpleui==2026.1.13
 Pillow==12.3.0
 websocket-client==1.8.0
+tushare==1.4.29
+longbridge==5.2.0
