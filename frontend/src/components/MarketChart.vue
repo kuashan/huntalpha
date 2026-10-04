@@ -673,8 +673,7 @@ async function draw(options = {}) {
         loadedBars = orderedUniqueBars(payload.bars)
         hasMoreHistory = Boolean(payload.has_more)
       } else {
-        const providerName = props.symbol.market === 'crypto' ? 'Coinbase' : '富途 OpenD'
-        historyStatus.value = `行情不可用：${providerName} 未返回真实 K 线`
+        historyStatus.value = '行情不可用：统一行情源未返回真实 K 线'
       }
     } catch (error) {
       historyStatus.value = `行情加载失败：${error.message}`
