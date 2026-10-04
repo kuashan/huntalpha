@@ -1,4 +1,4 @@
-from .cache import cache_key, cache_path
+from .cache import MarketDataCache, cache_key, cache_path
 from .contracts import MarketDataFetch, MarketDataProvider
 from .profiles import (
     CN_A_SHARE,
@@ -18,6 +18,7 @@ __all__ = [
     "US_EQUITY",
     "MARKET_PROFILES",
     "MarketDataFetch",
+    "MarketDataCache",
     "MarketDataProvider",
     "MarketDataRouter",
     "MarketProfile",

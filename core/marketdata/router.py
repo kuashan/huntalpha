@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
+from .cache import MarketDataCache
 from .contracts import MarketDataFetch, MarketDataProvider
 from .profiles import normalize_market_id
 
@@ -9,8 +11,9 @@ from .profiles import normalize_market_id
 class MarketDataRouter:
     """Route by MarketProfile and Provider priority with whole-window failover."""
 
-    def __init__(self):
+    def __init__(self, cache: MarketDataCache | None = None):
         self._providers: dict[str, list[MarketDataProvider]] = {}
+        self.cache = cache or MarketDataCache()
 
     def register(self, provider: MarketDataProvider) -> None:
         market_id = normalize_market_id(provider.profile.market_id)
@@ -33,6 +36,7 @@ class MarketDataRouter:
             raise RuntimeError(f"没有可用行情供应商：{market}")
 
         errors: list[str] = []
+        stale = []
         for provider in providers:
             try:
                 fetcher = getattr(provider, "fetch_window", None)
@@ -43,7 +47,7 @@ class MarketDataRouter:
                 payload = fetcher(symbol, timeframe, **kwargs)
                 stream_factory = getattr(provider, "stream_url", None)
                 stream_url = stream_factory(symbol) if callable(stream_factory) else None
-                return MarketDataFetch.from_payload(
+                fetch = MarketDataFetch.from_payload(
                     market_id=market,
                     provider_id=provider.provider_id,
                     provider_label_zh=provider.provider_label_zh,
@@ -52,8 +56,24 @@ class MarketDataRouter:
                     payload=payload,
                     stream_url=stream_url,
                 )
+                self.cache.put(fetch)
+                return fetch
             except Exception as exc:
                 errors.append(f"{provider.provider_id}:{type(exc).__name__}:{exc}")
+                cached = self.cache.get(market, symbol, timeframe, provider.provider_id)
+                if cached is not None:
+                    stale.append(cached)
+        if stale:
+            cached = stale[0]
+            return replace(
+                cached,
+                meta={
+                    **cached.meta,
+                    "mode": "cache",
+                    "stale": True,
+                    "error": "；".join(errors),
+                },
+            )
         raise RuntimeError("；".join(errors) or f"{market}: 行情获取失败")
 
     def capabilities(self, market_id: str, provider_id: str | None = None) -> dict[str, Any]:

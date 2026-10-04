@@ -8,6 +8,7 @@ from .marketdata import (
     US_EQUITY,
     MarketDataFetch,
     MarketDataRouter,
+    MarketDataCache,
     cache_key,
 )
 
@@ -95,3 +96,15 @@ class MarketDataCoreTests(TestCase):
         self.assertEqual(router.provider_ids("US_EQUITY"), ("P1",))
         self.assertEqual(router.capabilities("US_EQUITY", "P1"), {"quote": True, "history": True})
         self.assertEqual(router.status("US_EQUITY", "P1")["status"], "live")
+
+    def test_router_can_use_only_same_provider_cache_after_all_live_attempts_fail(self):
+        provider = FakeProvider("P1", US_EQUITY)
+        cache = MarketDataCache()
+        router = MarketDataRouter(cache=cache)
+        router.register(provider)
+        router.fetch_window("US_EQUITY", "AAPL.US", "1d", limit=10)
+        provider.error = RuntimeError("provider down")
+        stale = router.fetch_window("US_EQUITY", "AAPL.US", "1d", limit=10)
+        self.assertEqual(stale.provider_id, "P1")
+        self.assertEqual(stale.meta.get("mode"), "cache")
+        self.assertTrue(stale.meta.get("stale"))
