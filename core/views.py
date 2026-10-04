@@ -739,7 +739,9 @@ def realtime_market_stream(request, code):
 
     response = StreamingHttpResponse(events(), content_type="text/event-stream")
     response["Cache-Control"] = "no-cache"
-    response["Connection"] = "keep-alive"
+    # ``Connection`` is a hop-by-hop header and Django's WSGI handler rejects
+    # it. Keep the stream alive through the generator/keep-alive comments;
+    # reverse proxies can manage transport persistence themselves.
     response["X-Accel-Buffering"] = "no"
     response["Access-Control-Allow-Origin"] = "http://127.0.0.1:5173"
     response["Access-Control-Allow-Credentials"] = "true"
