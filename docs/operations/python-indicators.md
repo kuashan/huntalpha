@@ -32,11 +32,13 @@ python manage.py check_python_indicators
 
 当前 Web 适配器调用 Chan.py 的核心结构计算模块，这部分使用仓库内代码和 Python 标准库即可运行。`vendor/chan.py-main/Script/requirements.txt` 中的 Baostock、绘图、研究数据和交互式 UI 依赖属于上游研究脚本，不是本网站请求路径的隐式依赖；需要运行那些脚本时，应在单独的隔离环境按该文件安装。
 
-每次指标请求仍有最大输入 K 线数、超时、输出大小限制；在支持 `resource` 的 Linux/Unix 环境额外设置 CPU 和地址空间上限，Windows 使用跨平台的超时、输入和输出限制。依赖缺失、超时、无效响应和计算失败都会返回结构化不可用/失败状态，K 线响应不会因此被清空。
+每次指标请求仍有最大输入 K 线数、超时、输出大小限制。图表可见窗口仍最多 1000 根；受控 Python 指标默认最多计算 5000 根，避免把真实历史计算错误截断在图表页大小。当前真实 `SZ.002315` 日线 3637 根验证输出为约 5.01 MB，适配器保留 16 MiB 输出上限。
+
+在支持 `resource` 的 Linux/Unix 环境，CPU 和地址空间上限由 `core/chan_runner.py` 在受控子进程内部读取环境变量后设置；Django 多线程父进程不使用 `preexec_fn`。Windows 继续使用跨平台的超时、输入和输出限制。依赖缺失、超时、无效响应和计算失败都会返回结构化不可用/失败状态，K 线响应不会因此被清空。
 
 ## 时间一致性
 
-`core/chan_runner.py` 将 provider epoch 转成 UTC 日历字段，并把原始 epoch 写入 Chan.py 时间对象。这样同一组输入不会因 Windows 与 Oracle Linux 的本地时区不同而改变日期字段。当前环境没有 Oracle ARM64 真机验证条件，因此本任务不声称 ARM64 真机已通过。
+`core/chan_runner.py` 将 provider epoch 转成标的市场本地日历字段，并把原始 epoch 写入 Chan.py 时间对象：A 股 `Asia/Shanghai`、港股 `Asia/Hong_Kong`、美股 `America/New_York`、加密货币 `UTC`。这样同一组输入不会因 Windows 与 Oracle Linux 的本地时区不同而改变交易日字段。当前环境没有 Oracle ARM64 真机验证条件，因此本任务不声称 ARM64 真机已通过。
 
 ## 扩展边界
 

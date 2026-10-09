@@ -42,6 +42,7 @@ from .realtime import (
     optional_numeric,
     provider_time_to_timestamp,
     timestamp_to_market_datetime,
+    MARKET_TIMEZONES,
 )
 from .realtime.formula_scheduler import FormulaRunRegistry, calculation_input_fingerprint
 from .realtime.provider import REALTIME_PERIOD_SUBTYPES
@@ -58,6 +59,10 @@ from .python_indicators import (
 
 PERIODS = ("1分", "5分", "15分", "30分", "60分", "2小时", "4小时", "日线", "周线", "月线")
 KLINE_PAGE_SIZE = 1000
+PYTHON_INDICATOR_CALCULATION_PAGE_SIZE = max(
+    (definition.max_bars for definition in list_python_indicators()),
+    default=KLINE_PAGE_SIZE,
+)
 # Calendar windows chosen to contain at least one page of trading bars for
 # every supported period without making a single OpenD request unbounded.
 KLINE_LOOKBACK_DAYS = {"1分": 14, "5分": 45, "15分": 90, "30分": 180, "60分": 365, "2小时": 730, "4小时": 1460, "日线": 1825, "周线": 7300, "月线": 14600}
@@ -518,7 +523,7 @@ def bar_rows(frame):
     return rows
 
 
-def request_history_rows(client, code, period, before=None):
+def request_history_rows(client, code, period, before=None, limit=KLINE_PAGE_SIZE):
     """Load one bounded, explicitly forward-adjusted OpenD history window.
 
     This is the one runtime market-data path for both chart pages and formula
@@ -529,7 +534,7 @@ def request_history_rows(client, code, period, before=None):
     try:
         factory = lambda: client
         fetch = get_market_data_service().legacy_window(
-            code.upper(), period, context_factory=factory, before=before, limit=KLINE_PAGE_SIZE,
+            code.upper(), period, context_factory=factory, before=before, limit=limit,
         )
         return fetch.completed, None
     except Exception as exc:
@@ -775,7 +780,7 @@ def live_float_shares(client, code):
         return None
 
 
-def history_bars(code, period, calculation_snapshot=None):
+def history_bars(code, period, calculation_snapshot=None, calculation_limit=KLINE_PAGE_SIZE):
     """Load the complete bounded OpenD window used for one formula run."""
     if str(code).upper().startswith("CC."):
         symbol = MarketSymbol.objects.filter(code__iexact=str(code).upper(), active=True, market="crypto").first()
@@ -786,11 +791,11 @@ def history_bars(code, period, calculation_snapshot=None):
         try:
             if fetch_crypto_historical_bars is not _default_fetch_crypto_historical_bars:
                 bars = fetch_crypto_historical_bars(
-                    symbol.provider_symbol, period, count=KLINE_PAGE_SIZE, client=legacy_coinbase_client(),
+                    symbol.provider_symbol, period, count=calculation_limit, client=legacy_coinbase_client(),
                 )
             else:
                 bars = get_market_data_service().window_for_symbol(
-                    str(code).upper(), period, limit=KLINE_PAGE_SIZE,
+                    str(code).upper(), period, limit=calculation_limit,
                 ).completed
             return merge_calculation_snapshot_rows(bars, calculation_snapshot), None, None
         except Exception as exc:
@@ -800,7 +805,7 @@ def history_bars(code, period, calculation_snapshot=None):
     if context is not _default_context_function:
         client = context()
         try:
-            bars, error = request_history_rows(client, code, period)
+            bars, error = request_history_rows(client, code, period, limit=calculation_limit)
             if not error:
                 bars = merge_calculation_snapshot_rows(bars, calculation_snapshot)
             return bars, live_float_shares(client, code) if not error else None, error
@@ -808,7 +813,7 @@ def history_bars(code, period, calculation_snapshot=None):
             client.close()
     try:
         fetch = get_market_data_service().window_for_symbol(
-            str(code).upper(), period, limit=KLINE_PAGE_SIZE,
+            str(code).upper(), period, limit=calculation_limit,
         )
         bars = merge_calculation_snapshot_rows(fetch.completed, calculation_snapshot)
         return bars, None, None
@@ -1070,7 +1075,10 @@ def indicator_render(request, code, symbol):
             "epoch": calculation_snapshot.epoch,
             "revision": calculation_snapshot.revision,
         }, 409)
-    calculation_bars, float_shares, error = history_bars(symbol, period, calculation_snapshot)
+    calculation_limit = PYTHON_INDICATOR_CALCULATION_PAGE_SIZE if python_indicator else KLINE_PAGE_SIZE
+    calculation_bars, float_shares, error = history_bars(
+        symbol, period, calculation_snapshot, calculation_limit=calculation_limit,
+    )
     if error:
         return json({"error": error}, 400 if period == "分时" else 502)
     visible_start = max(0, len(calculation_bars) - count)
@@ -1086,7 +1094,8 @@ def indicator_render(request, code, symbol):
 
         def run_formula():
             if python_indicator:
-                return run_python_indicator(python_indicator, calculation_bars, period)
+                market_timezone = MARKET_TIMEZONES.get(market_for_symbol(symbol) or "", "UTC")
+                return run_python_indicator(python_indicator, calculation_bars, period, market_timezone=market_timezone)
             else:
                 completed = subprocess.run(
                     ["node", str(settings.BASE_DIR / "core" / "formula_runner.mjs")],

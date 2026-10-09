@@ -7,6 +7,8 @@ from unittest import mock
 from django.test import SimpleTestCase, override_settings
 
 from .python_indicators import (
+    DEFAULT_MEMORY_LIMIT_BYTES,
+    MAX_OUTPUT_BYTES,
     PythonIndicatorExecutionError,
     PythonIndicatorRuntimeUnavailable,
     PythonIndicatorTimeout,
@@ -42,11 +44,23 @@ class PythonIndicatorRegistryTests(SimpleTestCase):
 
         self.assertEqual(context.exception.code, "python_indicator_not_registered")
 
-    def test_epoch_conversion_is_utc_and_preserves_original_epoch(self):
-        chan_time = epoch_to_chan_time(1_700_000_000)
+    def test_epoch_conversion_uses_market_timezone_and_preserves_original_epoch(self):
+        chan_time = epoch_to_chan_time(1_704_159_000, "Asia/Shanghai")
 
-        self.assertEqual((chan_time.year, chan_time.month, chan_time.day), (2023, 11, 14))
-        self.assertEqual(chan_time.ts, 1_700_000_000)
+        self.assertEqual((chan_time.year, chan_time.month, chan_time.day, chan_time.hour, chan_time.minute), (2024, 1, 2, 9, 30))
+        self.assertEqual(chan_time.ts, 1_704_159_000)
+
+    def test_supported_market_timezones_keep_local_trading_date(self):
+        cases = (
+            (1_704_159_000, "Asia/Shanghai", (2024, 1, 2, 9, 30)),
+            (1_704_159_000, "Asia/Hong_Kong", (2024, 1, 2, 9, 30)),
+            (1_704_159_000, "America/New_York", (2024, 1, 1, 20, 30)),
+            (1_704_159_000, "UTC", (2024, 1, 2, 1, 30)),
+        )
+        for epoch, timezone_name, expected in cases:
+            with self.subTest(timezone_name=timezone_name):
+                chan_time = epoch_to_chan_time(epoch, timezone_name)
+                self.assertEqual((chan_time.year, chan_time.month, chan_time.day, chan_time.hour, chan_time.minute), expected)
 
 
 class PythonIndicatorExecutionTests(SimpleTestCase):
@@ -78,7 +92,24 @@ class PythonIndicatorExecutionTests(SimpleTestCase):
         payload = json.loads(run.call_args.kwargs["input"])
         self.assertEqual(payload["bars"], self.bars)
         self.assertEqual(payload["period"], "日线")
+        self.assertEqual(payload["market_timezone"], "UTC")
         self.assertNotIn("source", payload)
+        kwargs = run.call_args.kwargs
+        self.assertNotIn("preexec_fn", kwargs)
+        self.assertEqual(kwargs["env"]["HUNTALPHA_INDICATOR_CPU_LIMIT_SECONDS"], "13")
+        self.assertEqual(kwargs["env"]["HUNTALPHA_INDICATOR_MEMORY_LIMIT_BYTES"], str(DEFAULT_MEMORY_LIMIT_BYTES))
+
+    def test_real_history_window_size_is_accepted(self):
+        result = {"lines": [], "sticks": [], "markers": [], "engine": "chan.py"}
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps(result), stderr="")
+        bars = self.bars * 3637
+        with mock.patch("core.python_indicators.resolve_python_indicator_executable", return_value=sys.executable), \
+             mock.patch("core.python_indicators.python_indicator_dependencies_available", return_value=True), \
+             mock.patch("core.python_indicators.subprocess.run", return_value=completed) as run:
+            run_python_indicator("CHANLUN", bars, "日线")
+
+        payload = json.loads(run.call_args.kwargs["input"])
+        self.assertEqual(len(payload["bars"]), 3637)
 
     def test_missing_dependencies_is_structured_and_does_not_run_indicator(self):
         with mock.patch("core.python_indicators.resolve_python_indicator_executable", return_value=sys.executable), \
@@ -108,7 +139,7 @@ class PythonIndicatorExecutionTests(SimpleTestCase):
         self.assertEqual(context.exception.code, "chanlun_runtime_unavailable")
 
     def test_invalid_or_oversized_output_is_structured(self):
-        oversized = SimpleNamespace(returncode=0, stdout="x" * (4 * 1024 * 1024 + 1), stderr="")
+        oversized = SimpleNamespace(returncode=0, stdout="x" * (MAX_OUTPUT_BYTES + 1), stderr="")
         with mock.patch("core.python_indicators.resolve_python_indicator_executable", return_value=sys.executable), \
              mock.patch("core.python_indicators.python_indicator_dependencies_available", return_value=True), \
              mock.patch("core.python_indicators.subprocess.run", return_value=oversized):

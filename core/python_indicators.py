@@ -17,7 +17,11 @@ import sys
 from django.conf import settings
 
 
-MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+DEFAULT_MAX_BARS = 5000
+# The real SZ.002315 daily validation produced 5,009,337 UTF-8 bytes for
+# 3,637 bars.  Keep a bounded response budget with more than 2x headroom for
+# that verified window, rather than rejecting a valid Chan result at 4 MiB.
+MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 12
 DEFAULT_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
 
@@ -53,7 +57,7 @@ class PythonIndicatorDefinition:
     invalid_response_code: str
     timeout_code: str
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
-    max_bars: int = 1000
+    max_bars: int = DEFAULT_MAX_BARS
 
     def metadata(self):
         return {
@@ -151,24 +155,6 @@ def python_indicator_dependencies_available(executable, definition=None):
     return True
 
 
-def _posix_resource_limiter(timeout_seconds):
-    if os.name == "nt":
-        return None
-    try:
-        import resource
-    except ImportError:
-        return None
-
-    cpu_seconds = max(1, int(timeout_seconds) + 1)
-
-    def limit_resources():
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
-        if hasattr(resource, "RLIMIT_AS"):
-            resource.setrlimit(resource.RLIMIT_AS, (DEFAULT_MEMORY_LIMIT_BYTES, DEFAULT_MEMORY_LIMIT_BYTES))
-
-    return limit_resources
-
-
 def _validate_result(definition, completed):
     stdout = completed.stdout or ""
     if len(stdout.encode("utf-8")) > MAX_OUTPUT_BYTES:
@@ -199,7 +185,7 @@ def _validate_result(definition, completed):
     return result
 
 
-def run_python_indicator(code, bars, period):
+def run_python_indicator(code, bars, period, market_timezone="UTC"):
     definition = code if isinstance(code, PythonIndicatorDefinition) else get_python_indicator(code)
     if definition is None:
         raise PythonIndicatorExecutionError(
@@ -233,8 +219,18 @@ def run_python_indicator(code, bars, period):
             code=definition.unavailable_code,
         )
     timeout_seconds = max(1, int(getattr(settings, "HUNTALPHA_PYTHON_INDICATOR_TIMEOUT_SECONDS", definition.timeout_seconds)))
-    payload = {"bars": bars, "period": period}
+    payload = {"bars": bars, "period": period, "market_timezone": market_timezone or "UTC"}
     command = [executable, str(runner)]
+    child_env = {
+        **os.environ,
+        "PYTHONIOENCODING": "utf-8",
+        "TZ": "UTC",
+        # The runner applies these inside the already-created child process.
+        # This avoids preexec_fn in the Django parent, which is unsafe in a
+        # multithreaded server, while retaining POSIX CPU/address-space caps.
+        "HUNTALPHA_INDICATOR_CPU_LIMIT_SECONDS": str(timeout_seconds + 1),
+        "HUNTALPHA_INDICATOR_MEMORY_LIMIT_BYTES": str(DEFAULT_MEMORY_LIMIT_BYTES),
+    }
     kwargs = {
         "input": json.dumps(payload, ensure_ascii=False),
         "text": True,
@@ -242,11 +238,8 @@ def run_python_indicator(code, bars, period):
         "capture_output": True,
         "timeout": timeout_seconds,
         "check": True,
-        "env": {**os.environ, "PYTHONIOENCODING": "utf-8", "TZ": "UTC"},
+        "env": child_env,
     }
-    limiter = _posix_resource_limiter(timeout_seconds)
-    if limiter is not None:
-        kwargs["preexec_fn"] = limiter
     try:
         completed = subprocess.run(command, **kwargs)
     except subprocess.TimeoutExpired as exc:
