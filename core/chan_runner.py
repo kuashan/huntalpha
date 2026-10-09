@@ -2,7 +2,7 @@
 import json
 import math
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -56,14 +56,29 @@ def normalized_ohlc(bar):
     return open_price, max(high_price, open_price, close_price), min(low_price, open_price, close_price), close_price
 
 
+def epoch_to_chan_time(timestamp):
+    """Build a deterministic Chan.py time value from a provider epoch.
+
+    ``datetime.fromtimestamp`` uses the host's local timezone.  That made the
+    same provider bar produce different calendar fields on Windows and Linux.
+    Chan.py stores a timestamp on ``CTime`` using a naive datetime, so assign
+    the original epoch after constructing UTC fields.  The vendored algorithm
+    remains unchanged; only the adapter's input normalization is deterministic.
+    """
+    epoch = int(timestamp)
+    date = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    chan_time = CTime(date.year, date.month, date.day, date.hour, date.minute, auto=False)
+    chan_time.ts = epoch
+    return chan_time
+
+
 def run(raw_bars, period="日线"):
     kl_type = PERIOD_TYPES.get(period, KL_TYPE.K_DAY)
     units = []
     for bar in raw_bars:
         open_price, high_price, low_price, close_price = normalized_ohlc(bar)
-        date = datetime.fromtimestamp(int(bar["time"]))
         units.append(CKLine_Unit({
-            DATA_FIELD.FIELD_TIME: CTime(date.year, date.month, date.day, date.hour, date.minute),
+            DATA_FIELD.FIELD_TIME: epoch_to_chan_time(bar["time"]),
             DATA_FIELD.FIELD_OPEN: open_price,
             DATA_FIELD.FIELD_HIGH: high_price,
             DATA_FIELD.FIELD_LOW: low_price,
