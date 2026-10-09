@@ -66,6 +66,23 @@ def _number(value):
         return None
 
 
+def _recent_previous_close(price, closes):
+    """Resolve the latest session close from a chart response.
+
+    ``chartPreviousClose`` is tied to the beginning of Yahoo's requested
+    window.  It is not a safe previous close for a long-range quote request.
+    When the latest chart close is the current market price, the preceding
+    close is the prior session's close; otherwise the latest chart close is
+    the best available prior close.
+    """
+    valid = [value for value in (_number(item) for item in (closes or [])) if value is not None]
+    if len(valid) >= 2 and price is not None:
+        tolerance = max(1e-9, abs(price) * 1e-6)
+        if abs(valid[-1] - price) <= tolerance:
+            return valid[-2]
+    return valid[-1] if valid else None
+
+
 def _timestamp(value, market: MarketProfile) -> int | None:
     if isinstance(value, (int, float)):
         return int(value)
@@ -293,8 +310,16 @@ class YahooFinanceMarketDataProvider:
         price = _number(meta.get("regularMarketPrice")) or next((_number(value) for value in reversed(closes) if _number(value) is not None), None)
         if price is None:
             raise MarketDataProviderError("Yahoo 未返回真实报价")
-        previous = _number(meta.get("previousClose") or meta.get("chartPreviousClose"))
-        change = ((price - previous) / previous * 100) if previous else None
+        previous = _number(meta.get("previousClose"))
+        if previous is None:
+            previous = _recent_previous_close(price, closes)
+        if previous is None:
+            # This is only a last-resort provider field. It is intentionally
+            # not preferred because long-range chartPreviousClose can be the
+            # first close in the requested history window.
+            previous = _number(meta.get("chartPreviousClose"))
+        provider_change = _number(meta.get("regularMarketChangePercent"))
+        change = provider_change if provider_change is not None else ((price - previous) / previous * 100) if previous else None
         delay_seconds = int(meta.get("exchangeDataDelayedBy") or 0)
         updated = meta.get("regularMarketTime")
         return {
