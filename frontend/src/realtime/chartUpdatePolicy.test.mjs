@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { classifyChartUpdate } from './chartUpdatePolicy.mjs'
+import { classifyChartUpdate, diffIndicatorSets } from './chartUpdatePolicy.mjs'
 
 const symbol = { code: 'SH.600519' }
 const period = '日线'
@@ -13,6 +13,17 @@ assert.equal(
   classifyChartUpdate({ symbol, period, indicators: baseIndicators }, { symbol: { code: 'HK.00700' }, period, indicators: baseIndicators }),
   'full',
 )
+
+const withMacd = [...baseIndicators, { code: 'MACD', placement: 'sub', common: true }]
+const diff = diffIndicatorSets(baseIndicators, withMacd)
+assert.deepEqual(diff.added.map(item => item.code), ['MACD'])
+assert.deepEqual(diff.removed, [])
+assert.deepEqual(diff.retained.map(item => item.code), ['MA'])
+
+const changedPlacement = diffIndicatorSets(baseIndicators, [{ ...baseIndicators[0], placement: 'sub' }])
+assert.deepEqual(changedPlacement.added.map(item => item.placement), ['sub'])
+assert.deepEqual(changedPlacement.removed.map(item => item.placement), ['main'])
+assert.deepEqual(changedPlacement.retained, [])
 assert.equal(
   classifyChartUpdate({ symbol, period, indicators: baseIndicators }, { symbol, period: '周线', indicators: baseIndicators }),
   'full',

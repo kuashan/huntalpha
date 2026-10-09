@@ -57,6 +57,36 @@ KLINE_LOOKBACK_DAYS = {"1分": 14, "5分": 45, "15分": 90, "30分": 180, "60分
 formula_run_registry = FormulaRunRegistry()
 
 
+class ChanlunRuntimeUnavailable(RuntimeError):
+    pass
+
+
+def chanlun_runtime_dependencies_available(executable):
+    vendor_root = str(settings.BASE_DIR / "vendor" / "chan.py-main")
+    probe = (
+        "import sys; sys.path.insert(0, %r); "
+        "from Chan import CChan; "
+        "from ChanConfig import CChanConfig; "
+        "from Common.CEnum import DATA_FIELD, KL_TYPE; "
+        "from Common.CTime import CTime; "
+        "from KLine.KLine_Unit import CKLine_Unit"
+    ) % vendor_root
+    try:
+        subprocess.run(
+            [executable, "-c", probe],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+    except FileNotFoundError:
+        raise
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
 def chanlun_python_executable():
     configured = str(
         getattr(settings, "HUNTALPHA_CHANLUN_PYTHON", "")
@@ -69,6 +99,8 @@ def chanlun_python_executable():
         executable = str(legacy) if legacy.is_file() else sys.executable
     if not os.path.isfile(executable):
         raise FileNotFoundError("缠论计算环境不可用")
+    if not chanlun_runtime_dependencies_available(executable):
+        raise ChanlunRuntimeUnavailable("缠论计算环境缺少必要依赖")
     return executable
 
 def json(data, status=200):
@@ -1107,12 +1139,21 @@ def indicator_render(request, code, symbol):
             return json_module.loads(completed.stdout)
 
         formula = formula_run_registry.run(formula_key, calculation_snapshot.revision, run_formula)
+    except ChanlunRuntimeUnavailable:
+        if builtin_chanlun:
+            return json({"error": "缠论计算服务不可用：缺少必要运行依赖", "code": "chanlun_runtime_unavailable", "status": "unavailable"}, 503)
+        raise
     except FileNotFoundError:
         if builtin_chanlun:
             return json({"error": "缠论计算服务不可用：运行环境未配置", "code": "chanlun_runtime_unavailable", "status": "unavailable"}, 503)
         raise
     except subprocess.CalledProcessError as exc:
         if builtin_chanlun:
+            detail = exc.stderr or ""
+            if isinstance(detail, bytes):
+                detail = detail.decode("utf-8", errors="ignore")
+            if "CChanException" in detail and "price" in detail:
+                return json({"error": "缠论计算失败：行情 OHLC 数据不一致", "code": "chanlun_invalid_market_data"}, 422)
             return json({"error": "缠论计算服务计算失败，请稍后重试", "code": "chanlun_calculation_failed"}, 422)
         # Formula source is private. Only a function name is safe and useful
         # to return to the browser; parser excerpts and source fragments stay

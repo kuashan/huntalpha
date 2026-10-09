@@ -9,7 +9,7 @@ import { createRealtimeUiBuffer, mergeHistoricalTail, mergeRealtimePayload } fro
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from '../realtime/realtimeGeneration.mjs'
 import { settleHistoryReconcile } from '../realtime/historyRecovery.mjs'
 import { isCurrentFormulaResult, shouldScheduleFormulaRefresh } from '../realtime/formulaRefreshScheduler.mjs'
-import { classifyChartUpdate } from '../realtime/chartUpdatePolicy.mjs'
+import { classifyChartUpdate, diffIndicatorSets, indicatorKey } from '../realtime/chartUpdatePolicy.mjs'
 
 const props = defineProps({
   symbol: Object,
@@ -62,8 +62,11 @@ let formulaInFlight = false
 let formulaPendingRevision = 0
 let formulaRefreshPending = false
 let formulaRunToken = 0
-let indicatorRefreshQueue = Promise.resolve()
+let indicatorRefreshTimer
+let indicatorRefreshInFlight = false
+let indicatorRefreshPending = false
 let indicatorRefreshVersion = 0
+const drawingRequestCache = new Map()
 let lastChartState
 let realtimeUiBuffer
 let latestRealtimePayload
@@ -109,19 +112,32 @@ async function requestFormulaDrawing(item, bars, revision = 0) {
     const payload = await reply.json()
     if (reply.ok) return { item, drawing: payload.drawing, epoch: payload.epoch || '', revision: Number(payload.revision || revision) }
     renderErrors.value.push(`${item.name}：${payload.error || '指标计算失败'}`)
-  } catch {
+  } catch (error) {
+    if (error?.name === 'AbortError') return null
     renderErrors.value.push(`${item.name}：无法连接指标计算服务`)
   }
   return null
 }
 
+async function requestDrawing(item, bars, revision = 0) {
+  if (item.common) return { item, drawing: commonDrawing(item.code, bars), revision }
+  return requestFormulaDrawing(item, bars, revision)
+}
+
+function requestDrawingOnce(item, bars, revision = 0) {
+  const key = `${chartKey()}|${indicatorKey(item)}|${realtimeEpoch}|${revision}`
+  if (drawingRequestCache.has(key)) return drawingRequestCache.get(key)
+  const request = requestDrawing(item, bars, revision).finally(() => {
+    if (drawingRequestCache.get(key) === request) drawingRequestCache.delete(key)
+  })
+  drawingRequestCache.set(key, request)
+  return request
+}
+
 async function requestDrawings(bars, revision = 0) {
   renderErrors.value = []
   const requestedEpoch = realtimeEpoch
-  const results = (await Promise.all(props.installedIndicators.map(async item => {
-    if (item.common) return { item, drawing: commonDrawing(item.code, bars), revision }
-    return requestFormulaDrawing(item, bars, revision)
-  }))).filter(Boolean)
+  const results = (await Promise.all(props.installedIndicators.map(item => requestDrawingOnce(item, bars, revision)))).filter(Boolean)
   const responseEpoch = results.find(result => result.epoch)?.epoch
   if (responseEpoch && !acceptFormulaResponseEpoch(responseEpoch, requestedEpoch)) return []
   if (responseEpoch && results.some(result => result.epoch && result.epoch !== responseEpoch)) return []
@@ -661,6 +677,7 @@ function handleVisibilityChange() {
 async function draw(options = {}) {
   if (!el.value || !props.symbol) return
   const version = ++drawVersion
+  cancelIndicatorRefresh()
   disconnectRealtime({ clearRecovery: true })
   const key = chartKey()
   subTitlePositions.value = []
@@ -756,29 +773,74 @@ function clearIndicatorLayers() {
   renderedItems = []
 }
 
+function cancelIndicatorRefresh() {
+  if (indicatorRefreshTimer) window.clearTimeout(indicatorRefreshTimer)
+  indicatorRefreshTimer = undefined
+  indicatorRefreshPending = false
+  indicatorRefreshVersion += 1
+}
+
+function syncIndicatorLayout() {
+  if (!chart || !el.value) return
+  const subCount = renderedItems.filter(result => result.item.placement === 'sub').length
+  const chartHeight = 460 + subCount * 150
+  el.value.style.height = `${chartHeight}px`
+  chart.applyOptions({ height: chartHeight })
+  chart.panes()[0]?.setHeight(440)
+}
+
 async function refreshIndicatorLayers() {
   if (!chart || !props.symbol || !loadedBars.length) return scheduleDraw()
-  const version = ++indicatorRefreshVersion
+  const version = indicatorRefreshVersion
+  const generation = drawVersion
+  indicatorRefreshInFlight = true
   cancelFormulaWork()
-  const rendered = await requestDrawings(loadedBars.slice(), realtimeRevision)
-  if (version !== indicatorRefreshVersion || !chart || !props.symbol) return
-  clearIndicatorLayers()
-  renderedItems = rendered
-  let nextPane = 1
-  for (const result of rendered) {
-    const pane = result.item.placement === 'main' ? 0 : nextPane++
-    layerRefs.set(result.item.code, installLayer(result, pane))
-    if (result.item.placement === 'sub') chart.panes()[pane]?.setHeight(savedSubPaneHeights()[result.item.code] || 150)
+  try {
+    const currentItems = props.installedIndicators.slice()
+    const presentItems = renderedItems.map(result => result.item)
+    const { added, removed } = diffIndicatorSets(presentItems, currentItems)
+    removed.forEach(item => {
+      const layer = layerRefs.get(item.code)
+      if (layer) destroyLayer(layer)
+      layerRefs.delete(item.code)
+    })
+    const currentByKey = new Map(currentItems.map(item => [indicatorKey(item), item]))
+    renderedItems = renderedItems
+      .filter(result => currentByKey.has(indicatorKey(result.item)))
+      .map(result => ({ ...result, item: currentByKey.get(indicatorKey(result.item)) }))
+
+    const rendered = (await Promise.all(added.map(item => requestDrawingOnce(item, loadedBars.slice(), realtimeRevision)))).filter(Boolean)
+    if (version !== indicatorRefreshVersion || generation !== drawVersion || !chart || !props.symbol) return
+    let nextPane = 1 + renderedItems.filter(result => result.item.placement === 'sub').length
+    for (const result of rendered) {
+      const pane = result.item.placement === 'main' ? 0 : nextPane++
+      layerRefs.set(result.item.code, installLayer(result, pane))
+      renderedItems.push(result)
+      if (result.item.placement === 'sub') chart.panes()[pane]?.setHeight(savedSubPaneHeights()[result.item.code] || 150)
+    }
+    syncIndicatorLayout()
+    setCandleMode(renderedItems)
+    syncSubTitlePositions(renderedItems)
+    lastChartState = { symbol: props.symbol, period: props.period, indicators: props.installedIndicators }
+  } finally {
+    indicatorRefreshInFlight = false
+    if (indicatorRefreshPending) {
+      indicatorRefreshPending = false
+      scheduleIndicatorRefresh()
+    }
   }
-  chart.panes()[0]?.setHeight(440)
-  setCandleMode(renderedItems)
-  syncSubTitlePositions(renderedItems)
-  lastChartState = { symbol: props.symbol, period: props.period, indicators: props.installedIndicators }
 }
 
 function scheduleIndicatorRefresh() {
-  indicatorRefreshQueue = indicatorRefreshQueue.catch(() => {}).then(() => refreshIndicatorLayers())
-  return indicatorRefreshQueue
+  indicatorRefreshVersion += 1
+  indicatorRefreshPending = true
+  renderErrors.value = []
+  if (indicatorRefreshInFlight || indicatorRefreshTimer) return
+  indicatorRefreshTimer = window.setTimeout(() => {
+    indicatorRefreshTimer = undefined
+    indicatorRefreshPending = false
+    void refreshIndicatorLayers()
+  }, 0)
 }
 
 async function loadOlderBars() {
