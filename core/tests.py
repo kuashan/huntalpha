@@ -823,6 +823,25 @@ class RealMarketDataApiTests(TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.json()['error'], '指标计算耗时过长，请稍后重试或降低同时运行的指标数量')
 
+    def test_chanlun_missing_runtime_returns_structured_unavailable_error(self):
+        self.client.force_login(self.make_user())
+        bars = [{
+            'time': 1_700_000_000,
+            'open': 10,
+            'high': 11,
+            'low': 9,
+            'close': 10,
+            'volume': 1_000,
+            'amount': 10_000,
+        }]
+        with patch('core.views.history_bars', return_value=(bars, None, None)), patch(
+            'core.views.subprocess.run', side_effect=FileNotFoundError
+        ):
+            response = self.client.get('/api/indicator-render/CHANLUN/SH.600519/?period=日线&count=100')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['code'], 'chanlun_runtime_unavailable')
+        self.assertNotIn('path', response.json())
+
 
 class TongdaxinFormulaEngineTests(SimpleTestCase):
     def run_formula(self, source):

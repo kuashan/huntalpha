@@ -9,6 +9,7 @@ import { createRealtimeUiBuffer, mergeHistoricalTail, mergeRealtimePayload } fro
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from '../realtime/realtimeGeneration.mjs'
 import { settleHistoryReconcile } from '../realtime/historyRecovery.mjs'
 import { isCurrentFormulaResult, shouldScheduleFormulaRefresh } from '../realtime/formulaRefreshScheduler.mjs'
+import { classifyChartUpdate } from '../realtime/chartUpdatePolicy.mjs'
 
 const props = defineProps({
   symbol: Object,
@@ -61,6 +62,9 @@ let formulaInFlight = false
 let formulaPendingRevision = 0
 let formulaRefreshPending = false
 let formulaRunToken = 0
+let indicatorRefreshQueue = Promise.resolve()
+let indicatorRefreshVersion = 0
+let lastChartState
 let realtimeUiBuffer
 let latestRealtimePayload
 let latestRealtimePayloadGeneration = 0
@@ -743,6 +747,38 @@ async function draw(options = {}) {
   else chart.timeScale().fitContent()
   requestAnimationFrame(() => { historyWatchReady = true })
   connectRealtime()
+  lastChartState = { symbol: props.symbol, period: props.period, indicators: props.installedIndicators }
+}
+
+function clearIndicatorLayers() {
+  layerRefs.forEach(destroyLayer)
+  layerRefs = new Map()
+  renderedItems = []
+}
+
+async function refreshIndicatorLayers() {
+  if (!chart || !props.symbol || !loadedBars.length) return scheduleDraw()
+  const version = ++indicatorRefreshVersion
+  cancelFormulaWork()
+  const rendered = await requestDrawings(loadedBars.slice(), realtimeRevision)
+  if (version !== indicatorRefreshVersion || !chart || !props.symbol) return
+  clearIndicatorLayers()
+  renderedItems = rendered
+  let nextPane = 1
+  for (const result of rendered) {
+    const pane = result.item.placement === 'main' ? 0 : nextPane++
+    layerRefs.set(result.item.code, installLayer(result, pane))
+    if (result.item.placement === 'sub') chart.panes()[pane]?.setHeight(savedSubPaneHeights()[result.item.code] || 150)
+  }
+  chart.panes()[0]?.setHeight(440)
+  setCandleMode(renderedItems)
+  syncSubTitlePositions(renderedItems)
+  lastChartState = { symbol: props.symbol, period: props.period, indicators: props.installedIndicators }
+}
+
+function scheduleIndicatorRefresh() {
+  indicatorRefreshQueue = indicatorRefreshQueue.catch(() => {}).then(() => refreshIndicatorLayers())
+  return indicatorRefreshQueue
 }
 
 async function loadOlderBars() {
@@ -797,7 +833,14 @@ onBeforeUnmount(() => {
   resize?.disconnect()
   chart?.remove()
 })
-watch(() => [props.symbol, props.period, props.installedIndicators], scheduleDraw, { deep: true })
+watch(() => [props.symbol, props.period, props.installedIndicators], (next, previous) => {
+  const update = classifyChartUpdate(
+    lastChartState || { symbol: previous?.[0], period: previous?.[1], indicators: previous?.[2] },
+    { symbol: next?.[0], period: next?.[1], indicators: next?.[2] },
+  )
+  if (update === 'indicators') scheduleIndicatorRefresh()
+  else if (update === 'full') scheduleDraw()
+})
 watch(() => props.marketColorTokens, tokens => {
   if (marketCandleSeries && candleSeries && tokens) candleSeries.applyOptions({ upColor: tokens.up, downColor: tokens.down, wickUpColor: tokens.up, wickDownColor: tokens.down })
 }, { deep: true })
