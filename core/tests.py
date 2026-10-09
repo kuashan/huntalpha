@@ -1163,7 +1163,7 @@ class MarketIndexSnapshotTests(SimpleTestCase):
         self.assertIn("const providerLabel = provider =>", app_source)
 
 
-class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
+class SiftAlphaBrandHeaderContractTests(SimpleTestCase):
     def setUp(self):
         self.base_dir = Path(settings.BASE_DIR)
         self.app_source = (self.base_dir / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
@@ -1171,20 +1171,29 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.tier_badge_source = (self.base_dir / "frontend" / "src" / "components" / "AccountTierBadge.vue").read_text(encoding="utf-8")
         self.popover_source = (self.base_dir / "frontend" / "src" / "components" / "AccountPopover.vue").read_text(encoding="utf-8")
         self.center_source = (self.base_dir / "frontend" / "src" / "components" / "PersonalCenter.vue").read_text(encoding="utf-8")
+        self.index_source = (self.base_dir / "frontend" / "index.html").read_text(encoding="utf-8")
 
-    def test_visible_brand_uses_huntalpha_hub_and_real_account_state(self):
+    def test_visible_brand_uses_siftalpha_hub_and_real_account_state(self):
         self.assertIn("HuntAlphaLogo", self.app_source)
-        self.assertIn("<span class=\"brand-name\">HuntAlpha</span>", self.app_source)
+        self.assertIn("<span class=\"brand-name\">SiftAlpha</span>", self.app_source)
         self.assertIn("<small class=\"brand-hub\">HUB</small>", self.app_source)
         self.assertIn("<AccountPopover v-else :user=\"user\"", self.app_source)
         self.assertIn("<div v-if=\"visitor\" class=\"visitor-account\">", self.app_source)
         self.assertNotIn("visitor ? t('visitor') : user.name", self.app_source)
         self.assertIn("HuntAlphaLogo", self.auth_source)
-        self.assertIn("<span>HuntAlpha</span><small>HUB</small>", self.auth_source)
+        self.assertIn("<span>SiftAlpha</span><small>HUB</small>", self.auth_source)
         self.assertNotIn("QuantScope", self.app_source)
         self.assertNotIn("QuantScope", self.auth_source)
         self.assertNotIn("visitor ? t('visitor') : t('pro')", self.app_source)
         self.assertNotIn("visitor ? t('visitorAi') : user.name", self.app_source)
+        self.assertNotIn(">HuntAlpha<", self.app_source)
+        self.assertNotIn(">HuntAlpha<", self.auth_source)
+        self.assertNotIn(">HuntAlpha<", self.center_source)
+
+    def test_page_title_and_personal_center_use_siftalpha(self):
+        self.assertIn("<title>SiftAlpha</title>", self.index_source)
+        self.assertIn("<strong>SiftAlpha</strong>", self.center_source)
+        self.assertIn("SIFTALPHA ACCOUNT", self.center_source)
 
     def test_logo_is_local_original_svg_without_external_dependency_or_letter_mark(self):
         logo_path = self.base_dir / "frontend" / "public" / "huntalpha-wolf.svg"
