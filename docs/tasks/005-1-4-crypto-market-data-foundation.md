@@ -47,7 +47,7 @@ Crypto 使用 `MarketSymbol`、`WatchlistEntry`、统一 Quote/Kline API、内�
 - Coinbase Exchange quote 使用 `ticker.volume`，24h change 使用真实 `ticker.price` 与 `stats.open`，缺失时保持 `null`。
 - Crypto 默认市场选项和 provider-aware UI 文案已更新；通用 disclaimer 不再错误声明所有行情来自 Futu OpenD。
 
-本轮未新增 migration、未写入正式数据库，Task 与 Worklog 保持 `IN_PROGRESS`，等待 review 和浏览器验收。
+本轮未新增 migration、未写入正式数据库；Task 005.1.3 已完成 review、合并和浏览器验收，本任务自身仍等待 review 和浏览器验收。
 
 ## Completion Report
 

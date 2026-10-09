@@ -23,7 +23,7 @@
 
 ### Task 005.1.3 — Real-time Market Data & Indicator Pipeline Foundation
 
-状态：`IN_PROGRESS`
+状态：`ACCEPTED`
 
 核心原则：
 > Provider 负责提供真实市场数据；Indicator / Formula 保持原有算法；实时行情更新当前正在形成的 bar；当前 bar 变化驱动技术指标重新计算。
@@ -42,7 +42,7 @@
 
 状态：`IN_PROGRESS`
 
-Task 005.1.3 的 stacked implementation branch 已开始接入 Coinbase 第一批真实加密资产（BTC-USD / ETH-USD）。本任务沿用统一 MarketSymbol、Watchlist、Kline、Indicator、Formula 和 RealtimeRegistry 管线，不创建第二套 Crypto runtime；当前仍保留 Task 005.1.3 的 `IN_PROGRESS` 状态，等待本任务完成 review 与浏览器验收。
+Task 005.1.3 已完成 review、合并和浏览器验收，状态为 `ACCEPTED`。本任务沿用统一 MarketSymbol、Watchlist、Kline、Indicator、Formula 和 RealtimeRegistry 管线，不创建第二套 Crypto runtime。
 
 ---
 

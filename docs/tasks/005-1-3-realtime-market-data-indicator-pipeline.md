@@ -1,6 +1,6 @@
 # Task 005.1.3 — Real-time Market Data & Indicator Pipeline Foundation
 
-Status: `IN_PROGRESS`
+Status: `ACCEPTED`
 
 ## Goal
 
