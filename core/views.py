@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import queue
+import sys
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -54,6 +55,53 @@ KLINE_PAGE_SIZE = 1000
 # every supported period without making a single OpenD request unbounded.
 KLINE_LOOKBACK_DAYS = {"1分": 14, "5分": 45, "15分": 90, "30分": 180, "60分": 365, "2小时": 730, "4小时": 1460, "日线": 1825, "周线": 7300, "月线": 14600}
 formula_run_registry = FormulaRunRegistry()
+
+
+class ChanlunRuntimeUnavailable(RuntimeError):
+    pass
+
+
+def chanlun_runtime_dependencies_available(executable):
+    vendor_root = str(settings.BASE_DIR / "vendor" / "chan.py-main")
+    probe = (
+        "import sys; sys.path.insert(0, %r); "
+        "from Chan import CChan; "
+        "from ChanConfig import CChanConfig; "
+        "from Common.CEnum import DATA_FIELD, KL_TYPE; "
+        "from Common.CTime import CTime; "
+        "from KLine.KLine_Unit import CKLine_Unit"
+    ) % vendor_root
+    try:
+        subprocess.run(
+            [executable, "-c", probe],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+    except FileNotFoundError:
+        raise
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
+def chanlun_python_executable():
+    configured = str(
+        getattr(settings, "HUNTALPHA_CHANLUN_PYTHON", "")
+        or os.environ.get("HUNTALPHA_CHANLUN_PYTHON", "")
+    ).strip()
+    if configured:
+        executable = configured
+    else:
+        legacy = settings.BASE_DIR / ".chanlun-venv" / "Scripts" / "python.exe"
+        executable = str(legacy) if legacy.is_file() else sys.executable
+    if not os.path.isfile(executable):
+        raise FileNotFoundError("缠论计算环境不可用")
+    if not chanlun_runtime_dependencies_available(executable):
+        raise ChanlunRuntimeUnavailable("缠论计算环境缺少必要依赖")
+    return executable
 
 def json(data, status=200):
     result = JsonResponse(data, status=status)
@@ -1077,7 +1125,7 @@ def indicator_render(request, code, symbol):
         def run_formula():
             if builtin_chanlun:
                 completed = subprocess.run(
-                    [str(settings.BASE_DIR / ".chanlun-venv" / "Scripts" / "python.exe"), str(settings.BASE_DIR / "core" / "chan_runner.py")],
+                    [chanlun_python_executable(), str(settings.BASE_DIR / "core" / "chan_runner.py")],
                     input=json_module.dumps({"bars": calculation_bars, "period": period}, ensure_ascii=False),
                     text=True, encoding="utf-8", capture_output=True, timeout=12, check=True,
                     env={**os.environ, "PYTHONIOENCODING": "utf-8"},
@@ -1091,7 +1139,22 @@ def indicator_render(request, code, symbol):
             return json_module.loads(completed.stdout)
 
         formula = formula_run_registry.run(formula_key, calculation_snapshot.revision, run_formula)
+    except ChanlunRuntimeUnavailable:
+        if builtin_chanlun:
+            return json({"error": "缠论计算服务不可用：缺少必要运行依赖", "code": "chanlun_runtime_unavailable", "status": "unavailable"}, 503)
+        raise
+    except FileNotFoundError:
+        if builtin_chanlun:
+            return json({"error": "缠论计算服务不可用：运行环境未配置", "code": "chanlun_runtime_unavailable", "status": "unavailable"}, 503)
+        raise
     except subprocess.CalledProcessError as exc:
+        if builtin_chanlun:
+            detail = exc.stderr or ""
+            if isinstance(detail, bytes):
+                detail = detail.decode("utf-8", errors="ignore")
+            if "CChanException" in detail and "price" in detail:
+                return json({"error": "缠论计算失败：行情 OHLC 数据不一致", "code": "chanlun_invalid_market_data"}, 422)
+            return json({"error": "缠论计算服务计算失败，请稍后重试", "code": "chanlun_calculation_failed"}, 422)
         # Formula source is private. Only a function name is safe and useful
         # to return to the browser; parser excerpts and source fragments stay
         # in the admin/server boundary.
@@ -1100,8 +1163,12 @@ def indicator_render(request, code, symbol):
         message = unsupported.group(0) if unsupported else "公式语法或参数不受支持，请在后台检查公式"
         return json({"error": f"指标计算失败：{message}"}, 422)
     except subprocess.TimeoutExpired:
+        if builtin_chanlun:
+            return json({"error": "缠论计算耗时过长，请稍后重试", "code": "chanlun_calculation_timeout"}, 422)
         return json({"error": "指标计算耗时过长，请稍后重试或降低同时运行的指标数量"}, 422)
     except json_module.JSONDecodeError:
+        if builtin_chanlun:
+            return json({"error": "缠论计算服务返回了无效结果", "code": "chanlun_invalid_response"}, 422)
         return json({"error": "指标计算服务返回了无效结果"}, 422)
     def points(values):
         if isinstance(values, (int, float)):

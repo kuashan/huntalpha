@@ -1,5 +1,6 @@
 """Server-only adapter for the vendored chan.py structural engine (MIT)."""
 import json
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -41,17 +42,32 @@ PERIOD_TYPES = {
 }
 
 
+def normalized_ohlc(bar):
+    open_price = float(bar["open"])
+    high_price = float(bar["high"])
+    low_price = float(bar["low"])
+    close_price = float(bar["close"])
+    values = (open_price, high_price, low_price, close_price)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("行情 OHLC 数据包含无效数值")
+    # Some public adjusted-bar responses can violate the OHLC envelope by a
+    # few ticks. Chan.py rejects such records, so only repair the envelope
+    # used by the structural engine; the chart still displays provider data.
+    return open_price, max(high_price, open_price, close_price), min(low_price, open_price, close_price), close_price
+
+
 def run(raw_bars, period="日线"):
     kl_type = PERIOD_TYPES.get(period, KL_TYPE.K_DAY)
     units = []
     for bar in raw_bars:
+        open_price, high_price, low_price, close_price = normalized_ohlc(bar)
         date = datetime.fromtimestamp(int(bar["time"]))
         units.append(CKLine_Unit({
             DATA_FIELD.FIELD_TIME: CTime(date.year, date.month, date.day, date.hour, date.minute),
-            DATA_FIELD.FIELD_OPEN: float(bar["open"]),
-            DATA_FIELD.FIELD_HIGH: float(bar["high"]),
-            DATA_FIELD.FIELD_LOW: float(bar["low"]),
-            DATA_FIELD.FIELD_CLOSE: float(bar["close"]),
+            DATA_FIELD.FIELD_OPEN: open_price,
+            DATA_FIELD.FIELD_HIGH: high_price,
+            DATA_FIELD.FIELD_LOW: low_price,
+            DATA_FIELD.FIELD_CLOSE: close_price,
             DATA_FIELD.FIELD_VOLUME: float(bar.get("volume", 0)),
             DATA_FIELD.FIELD_TURNOVER: float(bar.get("amount", 0)),
         }))
