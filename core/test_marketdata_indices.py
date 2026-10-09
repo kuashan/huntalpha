@@ -1,3 +1,5 @@
+from threading import Barrier, BrokenBarrierError
+
 from django.test import SimpleTestCase
 
 from .marketdata.providers.base import MarketDataProviderError
@@ -82,3 +84,36 @@ class UnifiedIndexSnapshotTests(SimpleTestCase):
 
         self.assertEqual(tencent_symbol_for("INDEX.HSI"), "hkHSI")
         self.assertEqual(tencent_symbol_for("INDEX.HSTECH"), "hkHSTECH")
+
+    def test_snapshot_response_fetches_independent_indexes_concurrently(self):
+        from .marketdata.indices import UnifiedIndexSnapshotAdapter
+        from .marketdata.profiles import CN_A_SHARE
+
+        barrier = Barrier(7)
+
+        class ParallelProvider(_QuoteProvider):
+            def quote(self, symbol):
+                self.calls.append(symbol)
+                try:
+                    barrier.wait(timeout=2)
+                except BrokenBarrierError as exc:
+                    raise AssertionError("index snapshots were fetched serially") from exc
+                return {
+                    "price": 100.0,
+                    "previous_close": 99.0,
+                    "source": self.provider_id,
+                    "data_status": "delayed",
+                }
+
+        provider = ParallelProvider("yahoo-finance", CN_A_SHARE)
+        adapter = UnifiedIndexSnapshotAdapter({
+            "cn": (provider,),
+            "hk": (provider,),
+            "us": (provider,),
+        })
+
+        payload = adapter.snapshot_response()
+        items = [item for market in payload["markets"] for item in market["items"]]
+        self.assertEqual(len(items), 7)
+        self.assertTrue(all(item["status"] == "ok" for item in items))
+        self.assertEqual(len(provider.calls), 7)

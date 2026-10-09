@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 
 from ..market_indices import INDEX_DEFINITIONS, MarketIndexDefinition
 
@@ -69,7 +70,14 @@ class UnifiedIndexSnapshotAdapter:
         return self._unavailable_item(definition)
 
     def snapshot_response(self) -> dict:
-        items = [self.snapshot_item(definition.key) for definition in INDEX_DEFINITIONS]
+        # Each index is an independent provider request.  Keep the response
+        # order stable while preventing a slow/unavailable provider for one
+        # index from blocking all other market cards in sequence.
+        with ThreadPoolExecutor(max_workers=len(INDEX_DEFINITIONS), thread_name_prefix="market-index") as executor:
+            items = list(executor.map(
+                lambda definition: self.snapshot_item(definition.key),
+                INDEX_DEFINITIONS,
+            ))
         return {
             "source": "marketdata-router",
             "markets": [
