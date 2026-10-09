@@ -38,4 +38,6 @@ Status: `IMPLEMENTED`
 - 数据库、Formula source、日志和凭据：未读取、未修改、未加入 Git。
 - Oracle ARM64：当前没有可用真机执行条件，因此不声明 ARM64 真机测试通过；代码使用跨平台解释器配置和 UTC 输入边界。
 
-Commit 和 PR 信息在 Git 提交完成后补充。
+实现提交：`6bdf95ed76dc71b394223f2543279ebf18ef5f98`。
+
+独立 PR：[#31](https://github.com/kuashan/huntalpha/pull/31)，目标分支为 `main`，未自动合并。
