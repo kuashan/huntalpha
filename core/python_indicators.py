@@ -8,13 +8,18 @@ accepted as input.
 
 from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 
 from django.conf import settings
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_MAX_BARS = 5000
@@ -185,6 +190,14 @@ def _validate_result(definition, completed):
     return result
 
 
+def _child_exception_type(stderr):
+    for line in reversed(str(stderr or "").splitlines()):
+        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))(?::|$)", line)
+        if match:
+            return match.group(1)
+    return "unknown"
+
+
 def run_python_indicator(code, bars, period, market_timezone="UTC"):
     definition = code if isinstance(code, PythonIndicatorDefinition) else get_python_indicator(code)
     if definition is None:
@@ -250,6 +263,13 @@ def run_python_indicator(code, bars, period, market_timezone="UTC"):
         detail = exc.stderr or ""
         if isinstance(detail, bytes):
             detail = detail.decode("utf-8", errors="ignore")
+        logger.error(
+            "Python indicator child failed: code=%s returncode=%s child_exception=%s stderr_bytes=%s",
+            definition.code,
+            exc.returncode,
+            _child_exception_type(detail),
+            len(detail.encode("utf-8")),
+        )
         if definition.code == "CHANLUN" and "CChanException" in detail and "price" in detail:
             raise PythonIndicatorExecutionError(
                 "缠论计算失败：行情 OHLC 数据不一致",
