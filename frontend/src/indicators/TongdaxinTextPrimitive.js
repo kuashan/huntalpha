@@ -6,11 +6,19 @@ export class TongdaxinTextPrimitive {
     this.chart = chart
     this.priceSeries = priceSeries
     this.groups = groups
+    this.requestUpdate = undefined
     this.view = { zOrder: () => 'top', renderer: () => ({ draw: target => this.draw(target) }) }
   }
 
   paneViews() { return [this.view] }
-  updateAllViews() {}
+  attached({ requestUpdate }) { this.requestUpdate = requestUpdate }
+  detached() { this.requestUpdate = undefined }
+  updateAllViews() { this.requestUpdate?.() }
+
+  update(groups) {
+    this.groups = groups || []
+    this.updateAllViews()
+  }
 
   draw(target) {
     target.useMediaCoordinateSpace(({ context }) => {

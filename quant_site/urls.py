@@ -39,6 +39,7 @@ urlpatterns = [
     path('api/ai-analysis/status/<str:task_id>/', views.ai_analysis_status),
     path('api/quote/<str:code>/', views.quote),
     path('api/kline/<str:code>/', views.kline),
+    path('api/realtime/market-stream/<str:code>/', views.realtime_market_stream),
     path('api/markets/', views.markets),
     path('api/market-index-snapshots/', views.market_index_snapshots),
     path('api/market-leaders/<str:market>/', views.market_leaders),

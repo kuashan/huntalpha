@@ -1,10 +1,10 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json as json_module
 import math
 import os
 import re
-import socket
 import subprocess
+import queue
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -14,26 +14,46 @@ from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
 from django.core.exceptions import ValidationError
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
-from futu import AuType, KLType, OpenQuoteContext, RET_OK
 from formula_editor.models import Formula
 from .models import AccountProfile, MarketSymbol, WatchlistEntry
 from .account import (
     AvatarValidationError, account_avatar_url, account_display_name, account_preferences as account_preferences_data,
     delete_avatar, save_avatar,
 )
-from .market_indices import FutuOpenDIndexAdapter, grouped_snapshot_response, unavailable_index_items
-from .symbol_catalog import FUTU_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
+from .marketdata.service import (
+    get_market_data_service,
+    legacy_coinbase_client,
+    legacy_crypto_quote,
+    legacy_fetch_crypto_historical_bars,
+)
+# Patchable compatibility aliases; production execution bypasses these and
+# calls MarketDataService/MarketDataRouter directly.
+crypto_quote = legacy_crypto_quote
+fetch_crypto_historical_bars = legacy_fetch_crypto_historical_bars
+from .realtime import (
+    NormalizedBar,
+    RealtimeProviderError,
+    get_realtime_registry,
+    market_for_symbol,
+    optional_numeric,
+    provider_time_to_timestamp,
+    timestamp_to_market_datetime,
+)
+from .realtime.formula_scheduler import FormulaRunRegistry, calculation_input_fingerprint
+from .realtime.provider import REALTIME_PERIOD_SUBTYPES
+from .symbol_catalog import COINBASE_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 from .watchlist import account_tier_payload, watchlist_limit_for_user
 
-PERIODS = {"1分": KLType.K_1M, "5分": KLType.K_5M, "15分": KLType.K_15M, "30分": KLType.K_30M, "60分": KLType.K_60M, "2小时": KLType.K_120M, "4小时": KLType.K_240M, "日线": KLType.K_DAY, "周线": KLType.K_WEEK, "月线": KLType.K_MON}
+PERIODS = ("1分", "5分", "15分", "30分", "60分", "2小时", "4小时", "日线", "周线", "月线")
 KLINE_PAGE_SIZE = 1000
 # Calendar windows chosen to contain at least one page of trading bars for
 # every supported period without making a single OpenD request unbounded.
 KLINE_LOOKBACK_DAYS = {"1分": 14, "5分": 45, "15分": 90, "30分": 180, "60分": 365, "2小时": 730, "4小时": 1460, "日线": 1825, "周线": 7300, "月线": 14600}
+formula_run_registry = FormulaRunRegistry()
 
 def json(data, status=200):
     result = JsonResponse(data, status=status)
@@ -359,15 +379,6 @@ def _watchlist_get(request):
             "error": "登录或注册后使用自选功能",
             **totals,
         })
-    if market == "crypto":
-        return json({
-            "items": [],
-            "market": market,
-            "mode": "watchlist",
-            "status": "unavailable",
-            "error": "真实数据源尚未接入",
-            **totals,
-        })
     entries = WatchlistEntry.objects.select_related("symbol").filter(user=request.user)
     if market:
         entries = entries.filter(symbol__market=market)
@@ -392,8 +403,8 @@ def _watchlist_create(request):
         return _watchlist_error("未找到真实证券", "symbol_not_found", request, 404)
     if not symbol.active:
         return _watchlist_error("该证券当前不可用", "symbol_inactive", request, 409)
-    if symbol.security_type != "STOCK":
-        return _watchlist_error("仅支持普通股票", "symbol_unavailable", request, 409)
+    if symbol.security_type not in {"STOCK", "CRYPTO_SPOT"}:
+        return _watchlist_error("该证券类型暂不支持自选", "symbol_unavailable", request, 409)
     try:
         with transaction.atomic():
             locked_user = get_user_model().objects.select_for_update().get(pk=request.user.pk)
@@ -461,12 +472,12 @@ def watchlist_delete(request, code):
     })
 
 def context():
-    try:
-        with socket.create_connection(("127.0.0.1", 11111), timeout=1):
-            pass
-    except OSError as exc:
-        raise RuntimeError("无法连接富途 OpenD（127.0.0.1:11111）") from exc
-    return OpenQuoteContext(host="127.0.0.1", port=11111, ai_type=1)
+    return get_market_data_service().legacy_context()
+
+
+_default_context_function = context
+_default_crypto_quote = crypto_quote
+_default_fetch_crypto_historical_bars = fetch_crypto_historical_bars
 
 
 def numeric_value(value):
@@ -478,14 +489,24 @@ def numeric_value(value):
 
 
 def bar_rows(frame):
-    return [{
-        "time": int(datetime.strptime(row.time_key, "%Y-%m-%d %H:%M:%S").timestamp()),
-        "open": float(row.open), "high": float(row.high), "low": float(row.low),
-        "close": float(row.close), "volume": float(row.volume),
-        "amount": float(getattr(row, "turnover", 0) or 0),
-        "turnover_rate": float(getattr(row, "turnover_rate", 0) or 0),
-        "last_close": float(getattr(row, "last_close", 0) or 0),
-    } for row in frame.itertuples()]
+    rows = []
+    for row in frame.itertuples():
+        symbol = str(getattr(row, "code", ""))
+        event_time = provider_time_to_timestamp(getattr(row, "time_key", None), market_for_symbol(symbol))
+        if event_time is None:
+            continue
+        rows.append({
+            "time": event_time,
+            "open": optional_numeric(getattr(row, "open", None)),
+            "high": optional_numeric(getattr(row, "high", None)),
+            "low": optional_numeric(getattr(row, "low", None)),
+            "close": optional_numeric(getattr(row, "close", None)),
+            "volume": optional_numeric(getattr(row, "volume", None)),
+            "amount": optional_numeric(getattr(row, "turnover", None)),
+            "turnover_rate": optional_numeric(getattr(row, "turnover_rate", None)),
+            "last_close": optional_numeric(getattr(row, "last_close", None)),
+        })
+    return rows
 
 
 def request_history_rows(client, code, period, before=None):
@@ -496,18 +517,14 @@ def request_history_rows(client, code, period, before=None):
     they remain offline regression fixtures only, so the browser cannot show
     one price series while the formula calculates another.
     """
-    end = datetime.fromtimestamp(before) if before else datetime.now()
-    start = end - timedelta(days=KLINE_LOOKBACK_DAYS.get(period, 1825))
-    ret, frame, _ = client.request_history_kline(
-        code.upper(), start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"),
-        ktype=PERIODS.get(period, KLType.K_DAY), autype=AuType.QFQ, max_count=None,
-    )
-    if ret != RET_OK or frame.empty:
-        return None, str(frame)
-    rows = bar_rows(frame)
-    if before:
-        rows = [bar for bar in rows if bar["time"] < before]
-    return rows, None
+    try:
+        factory = lambda: client
+        fetch = get_market_data_service().legacy_window(
+            code.upper(), period, context_factory=factory, before=before, limit=KLINE_PAGE_SIZE,
+        )
+        return fetch.completed, None
+    except Exception as exc:
+        return None, str(exc)
 
 
 def request_page(client, code, period, count, before=None):
@@ -515,36 +532,97 @@ def request_page(client, code, period, count, before=None):
     rows, error = request_history_rows(client, code, period, before)
     if error:
         return None, False, error
+    if before is None:
+        registry = get_realtime_registry()
+        rows = merge_realtime_rows(rows, code, period, registry.state_store.capture(registry.key_for(code, period)))
     rows = rows[-count:]
     # A non-empty page can have older provider history.  The client will make
     # at most one extra request to determine the true beginning of history.
     return rows, bool(rows), None
 
 
+def merge_realtime_rows(rows, code, period, calculation_snapshot=None):
+    """Overlay the shared authoritative current bar on a historical response."""
+    if calculation_snapshot is None:
+        registry = get_realtime_registry()
+        calculation_snapshot = registry.state_store.capture(registry.key_for(code, period))
+    if calculation_snapshot.current_bar is None:
+        return rows
+    current = calculation_snapshot.current_bar.to_dict()
+    bar = {field: current.get(field) for field in (
+        "time", "open", "high", "low", "close", "volume", "amount", "turnover_rate"
+    )}
+    if not rows or bar["time"] > rows[-1]["time"]:
+        return [*rows, bar]
+    if bar["time"] == rows[-1]["time"]:
+        return [*rows[:-1], {**rows[-1], **bar}]
+    return rows
+
+
+def merge_calculation_snapshot_rows(rows, calculation_snapshot):
+    """Build Formula input bounded by one captured realtime bar.
+
+    Formula calculation must describe the exact state represented by the
+    captured epoch/revision.  A history request can finish after the provider
+    has advanced to a newer bar, so rows newer than the captured current bar
+    are excluded and the captured bar authoritatively replaces any same-time
+    history row.
+    """
+    history = list(rows or [])
+    current = calculation_snapshot.current_bar
+    if current is None:
+        return history
+    captured_time = current.time
+    bounded = {
+        row["time"]: row
+        for row in history
+        if isinstance(row, dict) and isinstance(row.get("time"), (int, float))
+        and row["time"] <= captured_time
+    }
+    captured = {
+        field: getattr(current, field)
+        for field in ("time", "open", "high", "low", "close", "volume", "amount", "turnover_rate")
+    }
+    bounded[captured_time] = {**bounded.get(captured_time, {}), **captured}
+    return [bounded[key] for key in sorted(bounded)]
+
+
 @require_GET
 @api_terminal_required
 def quote(request, code):
+    normalized_code = code.upper()
+    if normalized_code.startswith("CC."):
+        symbol = MarketSymbol.objects.filter(code__iexact=normalized_code, active=True, market="crypto").first()
+        if symbol is None or symbol.provider != COINBASE_PROVIDER:
+            return json({"error": "未找到真实加密资产目录", "source": COINBASE_PROVIDER, "status": "unavailable"}, 404)
+        try:
+            # Keep the old patchable helper only for compatibility fixtures;
+            # production requests use the provider-neutral service.
+            if crypto_quote is not _default_crypto_quote:
+                payload = crypto_quote(symbol.provider_symbol, client=legacy_coinbase_client(), name=symbol.name)
+            else:
+                payload = get_market_data_service().quote_for_symbol(normalized_code)
+            payload = {**payload, "code": payload.get("code") or normalized_code, "source": payload.get("source", COINBASE_PROVIDER)}
+            return json(payload)
+        except Exception as exc:
+            return json({"error": f"Coinbase 不可用：{exc}", "source": COINBASE_PROVIDER, "status": "unavailable"}, 503)
     client = None
     try:
-        client = context()
-        ret, frame = client.get_market_snapshot([code.upper()])
-        if ret != RET_OK or frame.empty:
-            return json({"error": f"富途 OpenD 未返回 {code.upper()} 的真实报价", "source": "futu-opend"}, 502)
-        row = frame.iloc[0]
-        price = numeric_value(row.get("last_price"))
-        if price is None:
-            return json({"error": f"富途 OpenD 未返回 {code.upper()} 的有效最新价", "source": "futu-opend"}, 502)
-        previous = numeric_value(row.get("prev_close_price"))
-        return json({
-            "code": row["code"], "name": row["name"], "price": price,
-            "change": round((price - previous) / previous * 100, 3) if previous else None,
-            "open": numeric_value(row.get("open_price")),
-            "high": numeric_value(row.get("high_price")),
-            "low": numeric_value(row.get("low_price")),
-            "updated_at": row.get("update_time"), "source": "futu-opend",
-        })
+        if context is not _default_context_function:
+            client = context()
+            payload = get_market_data_service().legacy_quote(
+                normalized_code, context_factory=lambda: client,
+            )
+            payload.pop("status", None)
+        else:
+            payload = get_market_data_service().quote_for_symbol(normalized_code)
+        return json(payload)
     except Exception as exc:
-        return json({"error": f"富途 OpenD 不可用：{exc}", "source": "futu-opend"}, 503)
+        status = getattr(exc, "status", "unavailable")
+        return json({
+            "error": f"行情源未配置：{exc}" if status == "not_configured" else f"统一行情不可用：{exc}",
+            "source": "marketdata-router", "status": status,
+        }, 503)
     finally:
         if client is not None:
             client.close()
@@ -561,31 +639,125 @@ def kline(request, code):
         before = int(request.GET["before"]) if request.GET.get("before") else None
     except ValueError:
         return json({"error": "before 必须是 Unix 时间戳"}, 400)
+    normalized_code = code.upper()
+    if normalized_code.startswith("CC."):
+        symbol = MarketSymbol.objects.filter(code__iexact=normalized_code, active=True, market="crypto").first()
+        if symbol is None or symbol.provider != COINBASE_PROVIDER:
+            return json({"error": "未找到真实加密资产目录", "source": COINBASE_PROVIDER}, 404)
+        if period == "分时":
+            return json({"error": "Coinbase 加密资产暂不支持分时接口", "code": "period_unavailable", "source": COINBASE_PROVIDER}, 422)
+        try:
+            data_status = "historical"
+            if fetch_crypto_historical_bars is not _default_fetch_crypto_historical_bars:
+                bars = fetch_crypto_historical_bars(
+                    symbol.provider_symbol, period, count=count, before=before, client=legacy_coinbase_client(),
+                )
+                source = COINBASE_PROVIDER
+                adjustment = "UTC"
+            else:
+                fetch = get_market_data_service().window_for_symbol(
+                    normalized_code, period, limit=count, before=before,
+                )
+                bars = fetch.completed
+                source = fetch.provider_id
+                adjustment = fetch.meta.get("adjustment", "UTC")
+                data_status = fetch.meta.get("data_status", "historical")
+            registry = get_realtime_registry()
+            if before is None:
+                bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)))
+            return json({
+                "code": normalized_code, "period": period, "bars": bars, "source": source,
+                "adjustment": adjustment, "has_more": len(bars) >= count,
+                "data_status": data_status,
+            })
+        except Exception as exc:
+            return json({"error": f"Coinbase 不可用：{exc}", "source": COINBASE_PROVIDER, "status": "unavailable"}, 503)
     client = None
     try:
-        client = context()
+        if context is not _default_context_function:
+            client = context()
+            if period == "分时":
+                return json({"error": "兼容 OpenD 分时接口已移入统一 Provider，当前请求不可用", "code": "period_unavailable", "source": "futu-opend"}, 422)
+            bars, has_more, error = request_page(client, code, period, count, before)
+            if error:
+                return json({"error": error}, 502)
+            return json({"code": code.upper(), "period": period, "bars": bars, "source": "futu-opend", "adjustment": "前复权", "has_more": has_more})
         if period == "分时":
-            if before:
-                return json({"code": code.upper(), "period": period, "bars": [], "source": "futu-opend", "has_more": False})
-            ret, frame = client.get_rt_data(code.upper())
-            if ret != RET_OK or frame.empty:
-                return json({"error": f"富途 OpenD 未返回 {code.upper()} 的真实分时数据", "source": "futu-opend"}, 502)
-            bars = [{"time": int(datetime.strptime(f"{datetime.now().date()} {row.time}", "%Y-%m-%d %H:%M:%S").timestamp()), "open": float(row.cur_price), "high": float(row.cur_price), "low": float(row.cur_price), "close": float(row.cur_price), "volume": float(row.volume)} for row in frame.itertuples() if not row.is_blank]
-            return json({"code": code.upper(), "period": period, "bars": bars, "source": "futu-opend", "adjustment": "实时分时", "has_more": False})
-        bars, has_more, error = request_page(client, code, period, count, before)
-        if error: return json({"error": error}, 502)
-        return json({"code": code.upper(), "period": period, "bars": bars, "source": "futu-opend", "adjustment": "前复权", "has_more": has_more})
+            return json({"error": "该周期尚未由统一 Provider 提供", "code": "period_unavailable", "source": "marketdata-router"}, 422)
+        fetch = get_market_data_service().window_for_symbol(
+            normalized_code, period, limit=count, before=before,
+        )
+        bars = fetch.completed
+        if before is None:
+            registry = get_realtime_registry()
+            bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)))
+        return json({"code": code.upper(), "period": period, "bars": bars, "source": fetch.provider_id, "adjustment": fetch.meta.get("adjustment", "前复权"), "has_more": len(bars) >= count, "data_status": fetch.meta.get("data_status", "historical"), "delay_seconds": fetch.meta.get("delay_seconds")})
     except Exception as exc:
-        return json({"error": f"富途 OpenD 不可用：{exc}", "source": "futu-opend"}, 503)
+        status = getattr(exc, "status", "unavailable")
+        return json({
+            "error": f"行情源未配置：{exc}" if status == "not_configured" else f"统一行情不可用：{exc}",
+            "source": "marketdata-router", "status": status,
+        }, 503)
     finally:
         if client is not None:
             client.close()
 
 
+def _sse_event(payload):
+    event_type = payload.get("type", "message")
+    return f"event: {event_type}\ndata: {json_module.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@require_GET
+@api_terminal_required
+def realtime_market_stream(request, code):
+    period = request.GET.get("period", "日线")
+    if period not in REALTIME_PERIOD_SUBTYPES:
+        return json({"error": "该周期暂不支持实时 K 线推送", "code": "realtime_unavailable", "mode": "unavailable"}, 422)
+    registry = get_realtime_registry()
+    try:
+        consumer = registry.subscribe(code.upper(), period)
+    except RealtimeProviderError as exc:
+        status = getattr(exc, "status", "unavailable")
+        return json({
+            "error": str(exc),
+            "code": "realtime_not_configured" if status == "not_configured" else "realtime_unavailable",
+            "source": registry.provider_name_for(code),
+            "status": status,
+            "mode": "polling" if registry.provider_name_for(code) in {"tushare", "public-market"} else "streaming",
+        }, 503)
+
+    def events():
+        try:
+            while not consumer.closed:
+                try:
+                    payload = consumer.get(timeout=15)
+                except queue.Empty:
+                    registry.health_check()
+                    yield ": keep-alive\n\n"
+                    continue
+                yield _sse_event(payload)
+        finally:
+            registry.unsubscribe(consumer)
+
+    response = StreamingHttpResponse(events(), content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache"
+    # ``Connection`` is a hop-by-hop header and Django's WSGI handler rejects
+    # it. Keep the stream alive through the generator/keep-alive comments;
+    # reverse proxies can manage transport persistence themselves.
+    response["X-Accel-Buffering"] = "no"
+    response["Access-Control-Allow-Origin"] = "http://127.0.0.1:5173"
+    response["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+
 def live_float_shares(client, code):
     """Return OpenD's current circulating share count when it is available."""
-    ret, frame = client.get_market_snapshot([code.upper()])
-    if ret != RET_OK or frame.empty:
+    result = client.get_market_snapshot([code.upper()])
+    if not isinstance(result, tuple) or len(result) < 2:
+        return None
+    ret, frame = result[:2]
+    if ret != 0 or frame.empty:
         return None
     value = frame.iloc[0].get("outstanding_shares")
     try:
@@ -594,16 +766,45 @@ def live_float_shares(client, code):
         return None
 
 
-def history_bars(code, period):
+def history_bars(code, period, calculation_snapshot=None):
     """Load the complete bounded OpenD window used for one formula run."""
-    client = context()
-    try:
+    if str(code).upper().startswith("CC."):
+        symbol = MarketSymbol.objects.filter(code__iexact=str(code).upper(), active=True, market="crypto").first()
+        if symbol is None or symbol.provider != COINBASE_PROVIDER:
+            return None, None, "未找到真实加密资产目录"
         if period == "分时":
             return None, None, "自定义公式暂不支持分时；请选择 K 线周期"
-        bars, error = request_history_rows(client, code, period)
-        return bars, live_float_shares(client, code) if not error else None, error
-    finally:
-        client.close()
+        try:
+            if fetch_crypto_historical_bars is not _default_fetch_crypto_historical_bars:
+                bars = fetch_crypto_historical_bars(
+                    symbol.provider_symbol, period, count=KLINE_PAGE_SIZE, client=legacy_coinbase_client(),
+                )
+            else:
+                bars = get_market_data_service().window_for_symbol(
+                    str(code).upper(), period, limit=KLINE_PAGE_SIZE,
+                ).completed
+            return merge_calculation_snapshot_rows(bars, calculation_snapshot), None, None
+        except Exception as exc:
+            return None, None, f"Coinbase 不可用：{exc}"
+    if period == "分时":
+        return None, None, "自定义公式暂不支持分时；请选择 K 线周期"
+    if context is not _default_context_function:
+        client = context()
+        try:
+            bars, error = request_history_rows(client, code, period)
+            if not error:
+                bars = merge_calculation_snapshot_rows(bars, calculation_snapshot)
+            return bars, live_float_shares(client, code) if not error else None, error
+        finally:
+            client.close()
+    try:
+        fetch = get_market_data_service().window_for_symbol(
+            str(code).upper(), period, limit=KLINE_PAGE_SIZE,
+        )
+        bars = merge_calculation_snapshot_rows(fetch.completed, calculation_snapshot)
+        return bars, None, None
+    except Exception as exc:
+        return None, None, f"统一行情不可用：{exc}"
 
 
 def indicator_data(item, include_source=False):
@@ -676,10 +877,25 @@ def watchlist_item_data(entry):
 
 
 def _market_catalog_queryset(market):
-    return MarketSymbol.objects.filter(market=market, active=True, security_type="STOCK")
+    security_type = "CRYPTO_SPOT" if market == "crypto" else "STOCK"
+    return MarketSymbol.objects.filter(market=market, active=True, security_type=security_type)
 
 
 def _catalog_status(market, leaders_available=None):
+    if market == "crypto":
+        queryset = _market_catalog_queryset(market)
+        latest = queryset.order_by("-catalog_updated_at").first()
+        available = queryset.exists()
+        return {
+            "market": market,
+            "name": "加密资产",
+            "provider": COINBASE_PROVIDER,
+            "catalog_available": available,
+            "leaders_available": False,
+            "status": "ok" if available else "unavailable",
+            "error": None if available else "真实加密资产目录尚未同步",
+            "updated_at": latest.catalog_updated_at.isoformat() if latest else None,
+        }
     definition = MARKET_DEFINITIONS.get(market)
     if definition is None:
         return {
@@ -695,6 +911,7 @@ def _catalog_status(market, leaders_available=None):
     if leaders_available is None:
         leaders_available = _market_catalog_queryset(market).filter(market_cap__gt=0).exists()
     latest = _market_catalog_queryset(market).order_by("-catalog_updated_at").first()
+    provider_ids = get_market_data_service().router.provider_ids(definition.code)
     status_error = None
     if not catalog_available:
         status_error = "真实证券目录尚未同步"
@@ -703,7 +920,7 @@ def _catalog_status(market, leaders_available=None):
     return {
         "market": market,
         "name": definition.name,
-        "provider": FUTU_PROVIDER,
+        "provider": provider_ids[0] if provider_ids else None,
         "catalog_available": catalog_available,
         "leaders_available": leaders_available,
         "status": "ok" if catalog_available else "unavailable",
@@ -715,19 +932,14 @@ def _catalog_status(market, leaders_available=None):
 @require_GET
 @api_terminal_required
 def markets(request):
-    return json({"markets": [_catalog_status(market) for market in SUPPORTED_MARKETS] + [_catalog_status("crypto")]})
+    return json({"markets": [_catalog_status(market) for market in SUPPORTED_MARKETS]})
 
 
 @require_GET
 @api_terminal_required
 def market_index_snapshots(request):
-    """Return only real, lightweight OpenD index snapshots for the header."""
-    adapter = FutuOpenDIndexAdapter(context)
-    try:
-        items = adapter.fetch()
-    except Exception:
-        items = unavailable_index_items()
-    return json(grouped_snapshot_response(items))
+    """Return real index snapshots through the unified market-data seam."""
+    return json(get_market_data_service().index_snapshot_response())
 
 
 def _parse_catalog_paging(request):
@@ -767,7 +979,7 @@ def _catalog_response(request, market, items, query="", page=1, limit=5, total=N
 @api_terminal_required
 def market_leaders(request, market):
     if market not in MARKET_DEFINITIONS:
-        return _catalog_response(request, market, [], mode="leaders", error="真实数据源未接入") if market == "crypto" else json({"error": "不支持的市场"}, 400)
+        return _catalog_response(request, market, [], mode="leaders", error="加密资产不提供市值榜单") if market == "crypto" else json({"error": "不支持的市场"}, 400)
     metric = request.GET.get("metric", "market_cap").strip() or "market_cap"
     leader_metrics = {"market_cap": "-market_cap"}
     if metric not in leader_metrics:
@@ -779,12 +991,12 @@ def market_leaders(request, market):
 @require_GET
 @api_terminal_required
 def symbols(request, market):
-    if market not in MARKET_DEFINITIONS:
-        return _catalog_response(request, market, [], mode="unavailable", error="真实数据源未接入") if market == "crypto" else json({"error": "不支持的市场"}, 400)
+    if market not in SUPPORTED_MARKETS:
+        return json({"error": "不支持的市场"}, 400)
     query = request.GET.get("q", "").strip()
     if len(query) > 80:
         return json({"error": "搜索内容过长"}, 400)
-    if not query:
+    if not query and market != "crypto":
         return market_leaders(request, market)
     limit, page, error = _parse_catalog_paging(request)
     if error:
@@ -825,29 +1037,60 @@ def indicator_render(request, code, symbol):
             return json({"error": "未找到已启用的指标"}, 404)
     period = request.GET.get("period", "日线")
     count = min(max(int(request.GET.get("count", 500)), 100), 1000)
+    try:
+        requested_revision = max(0, int(request.GET.get("revision", 0)))
+    except (TypeError, ValueError):
+        return json({"error": "revision 必须是整数", "code": "invalid_revision"}, 400)
+    requested_epoch = str(request.GET.get("epoch", "")).strip()
     # Future functions such as BACKSET and formulas using BARSCOUNT(C)=1
     # need the beginning of the same real OpenD history shown to the chart.
     # Calculate the complete bounded window, then return its visible tail.
-    calculation_bars, float_shares, error = history_bars(symbol, period)
+    registry = get_realtime_registry()
+    calculation_snapshot = registry.state_store.capture(registry.key_for(symbol, period))
+    # A revision from a previous process generation is not comparable with
+    # the current process-local counter.  Recalculate against the current
+    # captured snapshot and return its actual epoch/revision instead of
+    # reporting a misleading "future revision" error.
+    if requested_epoch and requested_epoch != calculation_snapshot.epoch:
+        requested_revision = 0
+    if requested_revision > calculation_snapshot.revision:
+        return json({
+            "error": "实时版本已更新，请重试",
+            "code": "revision_not_available",
+            "epoch": calculation_snapshot.epoch,
+            "revision": calculation_snapshot.revision,
+        }, 409)
+    calculation_bars, float_shares, error = history_bars(symbol, period, calculation_snapshot)
     if error:
         return json({"error": error}, 400 if period == "分时" else 502)
     visible_start = max(0, len(calculation_bars) - count)
     bars = calculation_bars[visible_start:]
     try:
-        if builtin_chanlun:
-            completed = subprocess.run(
-                [str(settings.BASE_DIR / ".chanlun-venv" / "Scripts" / "python.exe"), str(settings.BASE_DIR / "core" / "chan_runner.py")],
-                input=json_module.dumps({"bars": calculation_bars, "period": period}, ensure_ascii=False),
-                text=True, encoding="utf-8", capture_output=True, timeout=12, check=True,
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-            )
-        else:
-            completed = subprocess.run(
-                ["node", str(settings.BASE_DIR / "core" / "formula_runner.mjs")],
-                input=json_module.dumps({"source": item.source, "bars": calculation_bars, "period": period, "symbol": symbol.upper(), "name": item.name, "chip": {"floatShares": float_shares}}, ensure_ascii=False),
-                text=True, encoding="utf-8", capture_output=True, timeout=8, check=True,
-            )
-        formula = json_module.loads(completed.stdout)
+        formula_id = "builtin-chanlun" if builtin_chanlun else item.code
+        formula_version = 1 if builtin_chanlun else item.version
+        input_hash = calculation_input_fingerprint(calculation_bars, float_shares)
+        formula_key = (
+            registry.provider_name_for(symbol), symbol.upper(), period, formula_id, formula_version,
+            calculation_snapshot.epoch, calculation_snapshot.revision, input_hash,
+        )
+
+        def run_formula():
+            if builtin_chanlun:
+                completed = subprocess.run(
+                    [str(settings.BASE_DIR / ".chanlun-venv" / "Scripts" / "python.exe"), str(settings.BASE_DIR / "core" / "chan_runner.py")],
+                    input=json_module.dumps({"bars": calculation_bars, "period": period}, ensure_ascii=False),
+                    text=True, encoding="utf-8", capture_output=True, timeout=12, check=True,
+                    env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                )
+            else:
+                completed = subprocess.run(
+                    ["node", str(settings.BASE_DIR / "core" / "formula_runner.mjs")],
+                    input=json_module.dumps({"source": item.source, "bars": calculation_bars, "period": period, "symbol": symbol.upper(), "name": item.name, "chip": {"floatShares": float_shares}}, ensure_ascii=False),
+                    text=True, encoding="utf-8", capture_output=True, timeout=8, check=True,
+                )
+            return json_module.loads(completed.stdout)
+
+        formula = formula_run_registry.run(formula_key, calculation_snapshot.revision, run_formula)
     except subprocess.CalledProcessError as exc:
         # Formula source is private. Only a function name is safe and useful
         # to return to the browser; parser excerpts and source fragments stay
@@ -924,4 +1167,4 @@ def indicator_render(request, code, symbol):
             if isinstance(row, dict)
         ],
     }
-    return json({"code": "CHANLUN" if builtin_chanlun else item.code, "name": "缠论结构" if builtin_chanlun else item.name, "placement": "main" if builtin_chanlun else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "engine": formula.get("engine", "tongdaxin"), "source": "futu-opend", "adjustment": "前复权"})
+    return json({"code": "CHANLUN" if builtin_chanlun else item.code, "name": "缠论结构" if builtin_chanlun else item.name, "placement": "main" if builtin_chanlun else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "epoch": calculation_snapshot.epoch, "revision": calculation_snapshot.revision, "engine": formula.get("engine", "tongdaxin"), "source": registry.provider_name_for(symbol), "adjustment": "UTC" if str(symbol).upper().startswith("CC.") else "前复权"})

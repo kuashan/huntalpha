@@ -8,6 +8,8 @@ import subprocess
 import sqlite3
 import tempfile
 import shutil
+import threading
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 from datetime import datetime, timezone as datetime_timezone
@@ -27,8 +29,18 @@ from formula_editor.models import Formula
 from .market_indices import INDEX_DEFINITIONS, FutuOpenDIndexAdapter, convert_snapshot_frame
 from .models import AccountProfile, MarketSymbol, WatchlistEntry
 from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
-from .views import _watchlist_create, bar_rows
+from .views import _watchlist_create, bar_rows, formula_run_registry, merge_calculation_snapshot_rows
 from .watchlist import resolve_account_tier, resolve_watchlist_limit
+from .realtime import (
+    FutuRealtimeProvider,
+    NormalizedBar,
+    RealtimeRegistry,
+    RealtimeStateStore,
+    RealtimeProviderError,
+    merge_realtime_bar,
+    provider_time_to_timestamp,
+)
+from .realtime.formula_scheduler import FormulaFlightCoordinator, FormulaRunRegistry, calculation_input_fingerprint
 from PIL import Image
 
 
@@ -371,7 +383,7 @@ class AccountProfileApiTests(TestCase):
         self.client.force_login(self.user)
         self.assertEqual(self.patch_json('/api/account/preferences/', {'default_market': 'us'}).status_code, 403)
         headers = self.csrf_headers()
-        invalid = self.patch_json('/api/account/preferences/', {'default_market': 'crypto'}, headers)
+        invalid = self.patch_json('/api/account/preferences/', {'default_market': 'jp'}, headers)
         self.assertEqual(invalid.status_code, 400)
         non_string = self.patch_json('/api/account/preferences/', {'default_market': ['us']}, headers)
         self.assertEqual(non_string.status_code, 400)
@@ -760,31 +772,17 @@ class RealMarketDataApiTests(TestCase):
 
     def test_quote_reports_missing_real_data_instead_of_zero(self):
         self.client.force_login(self.make_user())
-
-        class Frame:
-            empty = False
-
-            def __init__(self):
-                self.iloc = self
-
-            def __getitem__(self, index):
-                return {
-                    'code': 'CC.BTCUSD', 'name': 'Bitcoin / USD', 'last_price': None,
-                    'prev_close_price': None, 'open_price': None, 'high_price': None,
-                    'low_price': None, 'update_time': '',
-                }
-
-        class Client:
-            def get_market_snapshot(self, codes):
-                return RET_OK, Frame()
-
-            def close(self):
-                pass
-
-        with patch('core.views.context', return_value=Client()):
-            response = self.client.get('/api/quote/CC.BTCUSD/')
-        self.assertEqual(response.status_code, 502)
-        self.assertIn('有效最新价', response.json()['error'])
+        MarketSymbol.objects.create(
+            code='CC.BTC-USD', name='Bitcoin', market='crypto',
+            security_type='CRYPTO_SPOT', provider='coinbase',
+            provider_symbol='BTC-USD', active=True,
+        )
+        with patch('core.views.crypto_quote', side_effect=Exception('Coinbase unavailable')):
+            response = self.client.get('/api/quote/CC.BTC-USD/')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['source'], 'coinbase')
+        self.assertEqual(response.json()['status'], 'unavailable')
+        self.assertNotIn('price', response.json())
 
     def test_kline_error_does_not_return_generated_bars(self):
         self.client.force_login(self.make_user())
@@ -1142,24 +1140,27 @@ class MarketIndexSnapshotTests(SimpleTestCase):
         self.assertTrue(all(item["price"] is None for item in items))
         self.assertTrue(all(item["change_percent"] is None for item in items))
 
-    def test_frontend_header_keeps_index_data_and_uses_crypto_preview_without_quotes(self):
+    def test_frontend_header_keeps_index_data_and_uses_backend_crypto_quotes(self):
         app_source = (Path(settings.BASE_DIR) / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
         self.assertIn("const visibleMarkets = computed(() => markets)", app_source)
         self.assertIn('v-for="item in visibleMarkets"', app_source)
         self.assertIn("/api/market-index-snapshots/", app_source)
         self.assertIn("displayIndexPrice(index.price)", app_source)
         self.assertIn("index.status === 'loading'", app_source)
-        self.assertIn("const cryptoPreviewRows = [{ name: 'BTC' }, { name: 'ETH' }]", app_source)
-        self.assertIn("item.code === 'crypto' ? '待接入真实数据源' : 'futu-opend'", app_source)
-        self.assertIn("provider_status: 'not_connected'", app_source)
+        self.assertIn("const cryptoOverviewRows = [{ code: 'CC.BTC-USD', name: 'BTC' }, { code: 'CC.ETH-USD', name: 'ETH' }]", app_source)
+        self.assertIn("item.code === 'crypto' ? 'Coinbase' : '统一行情源'", app_source)
+        self.assertNotIn("富途 OpenD", app_source)
+        self.assertIn("/api/quote/${encodeURIComponent(item.code)}/", app_source)
+        self.assertIn("provider_status: quote?.status === 'ready' ? 'connected' : 'unavailable'", app_source)
         self.assertIn(":title=\"indexTitle(index)\"", app_source)
         self.assertNotIn("v-for=\"item in markets\"", app_source)
         self.assertNotIn("/api/kline/", app_source)
         self.assertNotIn("/api/indicator-render/", app_source)
-        self.assertNotIn("/api/quote/CC.", app_source)
+        self.assertNotIn("https://api.exchange.coinbase.com", app_source)
         self.assertIn(".markets{grid-template-columns:repeat(4,minmax(0,1fr));min-height:100px}", app_source)
         self.assertIn("@media(max-width:800px){.markets{grid-template-columns:repeat(2,minmax(0,1fr))}", app_source)
         self.assertIn("index.updated_at ? `更新时间：${index.updated_at}` : status", app_source)
+        self.assertIn("const providerLabel = provider =>", app_source)
 
 
 class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
@@ -1244,6 +1245,15 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
         self.assertNotIn("next_reset_at", combined)
         self.assertNotIn("每月重置", combined)
 
+    def test_crypto_default_market_and_provider_aware_quote_copy(self):
+        self.assertIn("{ value: 'crypto', label: '加密资产' }", self.center_source)
+        self.assertIn("providerLabel(quoteData.value?.source || selected.value?.provider)", self.app_source)
+        self.assertIn("longbridge: 'Longbridge'", self.app_source)
+        self.assertIn("tushare: 'Tushare'", self.app_source)
+        self.assertNotIn("'富途 OpenD'", self.app_source)
+        self.assertNotIn("quoteLoading:'正在获取富途 OpenD 真实行情", (self.base_dir / "frontend" / "src" / "i18n.js").read_text(encoding="utf-8"))
+        self.assertIn("页面仅展示真实数据提供方返回的市场数据", (self.base_dir / "frontend" / "src" / "i18n.js").read_text(encoding="utf-8"))
+
     def test_account_summary_retry_only_caches_success(self):
         success_index = self.popover_source.index('summary.value = payload')
         loaded_index = self.popover_source.index('summaryLoaded.value = true')
@@ -1281,10 +1291,12 @@ class HuntAlphaBrandHeaderContractTests(SimpleTestCase):
 
     def test_header_right_controls_and_worklog_keep_account_security_out_of_realtime_task(self):
         worklog_source = (self.base_dir / 'docs' / 'product-worklog.md').read_text(encoding='utf-8')
-        self.assertIn('时区与交易时段 → Task 005.1.3', worklog_source)
-        self.assertIn('登录设备/会话与 2FA → future Account Security task', worklog_source)
-        self.assertIn('Task 005.1.3 仅负责 realtime provider abstraction', worklog_source)
-        self.assertNotIn('登录设备/会话与 2FA → Task 005.1.3', worklog_source)
+        task_lines = worklog_source.splitlines()
+        task_005_1_3 = next(index for index, line in enumerate(task_lines) if line.startswith('### Task 005.1.3'))
+        task_005_1_4 = next(index for index, line in enumerate(task_lines) if line.startswith('### Task 005.1.4'))
+        self.assertIn('状态：`IN_PROGRESS`', '\n'.join(task_lines[task_005_1_3:task_005_1_4]))
+        self.assertIn('状态：`IN_PROGRESS`', '\n'.join(task_lines[task_005_1_4:]))
+        self.assertIn('Provider-neutral realtime architecture', '\n'.join(task_lines[task_005_1_3:task_005_1_4]))
 
 
 class WatchlistModelAndApiTests(TestCase):
@@ -1468,3 +1480,899 @@ class WatchlistModelAndApiTests(TestCase):
         self.assertEqual(payload["items"][0]["watchlisted"], True)
         self.assertNotIn("formula_source", payload["items"][0])
         self.assertEqual(payload["watchlist_total"], 1)
+
+
+class FakeRealtimeProvider:
+    provider_name = "test-provider"
+
+    def __init__(self, snapshot=None, error=None, health_started=None, health_release=None):
+        self.snapshot = snapshot
+        self.error = error
+        self.callbacks = {}
+        self.subscribe_calls = []
+        self.unsubscribe_calls = []
+        self.status = "live"
+        self.health_calls = 0
+        self.health_started = health_started
+        self.health_release = health_release
+
+    def subscribe(self, symbol, period, callback):
+        self.subscribe_calls.append((symbol, period))
+        if self.error:
+            raise self.error
+        self.callbacks[(symbol.upper(), period)] = callback
+        return {"mode": "streaming"}
+
+    def unsubscribe(self, symbol, period):
+        self.unsubscribe_calls.append((symbol, period))
+        self.callbacks.pop((symbol.upper(), period), None)
+
+    def latest_snapshot(self, symbol, period):
+        return self.snapshot
+
+    def close(self):
+        self.callbacks.clear()
+
+    def health_check(self):
+        self.health_calls += 1
+        if self.health_started:
+            self.health_started.set()
+        if self.health_release:
+            self.health_release.wait(timeout=1)
+        return self.status
+
+    def emit(self, bar):
+        self.callbacks[(bar.symbol.upper(), bar.period)](bar)
+
+
+class RealtimeCoreContractTests(TestCase):
+    def bar(self, time_value, close=10, high=11, low=9, sequence=None, volume=100, amount=None, turnover_rate=None, **kwargs):
+        return NormalizedBar(
+            provider="test-provider", market="cn", symbol="SH.600519", period="1分",
+            time=time_value, open=10, high=high, low=low, close=close, volume=volume,
+            amount=amount, turnover_rate=turnover_rate, sequence=sequence, **kwargs,
+        )
+
+    def test_first_consumer_creates_one_provider_subscription(self):
+        provider = FakeRealtimeProvider()
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
+        first = registry.subscribe("SH.600519", "1分")
+        second = registry.subscribe("SH.600519", "1分")
+        stats = registry.stats(first.key)
+        self.assertEqual(len(provider.subscribe_calls), 1)
+        self.assertEqual(stats["consumer_count"], 2)
+        self.assertEqual(stats["provider_subscription_count"], 1)
+        registry.unsubscribe(first)
+        self.assertEqual(registry.stats(second.key)["consumer_count"], 1)
+        registry.unsubscribe(second)
+        time.sleep(0.03)
+        self.assertEqual(provider.unsubscribe_calls, [("SH.600519", "1分")])
+
+    def test_provider_identity_is_not_hardcoded_in_registry_key(self):
+        provider = FakeRealtimeProvider()
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
+        consumer = registry.subscribe("SH.600519", "1分")
+        self.assertEqual(consumer.key[0], "test-provider")
+        registry.unsubscribe(consumer)
+        time.sleep(0.03)
+
+    def test_failed_initial_subscribe_removes_entry_and_retry_subscribes_again(self):
+        provider = FakeRealtimeProvider(error=RuntimeError("first subscription failed"))
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=30)
+        with self.assertRaises(RealtimeProviderError):
+            registry.subscribe("SH.600519", "1分")
+        self.assertEqual(registry.stats()["active_keys"], 0)
+        self.assertEqual(registry.stats()["provider_subscription_count"], 0)
+        provider.error = None
+        consumer = registry.subscribe("SH.600519", "1分")
+        self.assertEqual(len(provider.subscribe_calls), 2)
+        self.assertEqual(registry.stats(consumer.key)["provider_subscription_count"], 1)
+        registry.unsubscribe(consumer)
+        registry.close()
+
+    def test_second_consumer_receives_the_shared_provider_event(self):
+        provider = FakeRealtimeProvider()
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
+        first = registry.subscribe("SH.600519", "1分")
+        second = registry.subscribe("SH.600519", "1分")
+        provider.emit(self.bar(100))
+        first_events = [first.get(timeout=0.2) for _ in range(2)]
+        second_events = [second.get(timeout=0.2) for _ in range(2)]
+        self.assertTrue(any(event["type"] == "snapshot" for event in first_events))
+        self.assertTrue(any(event["type"] == "snapshot" for event in second_events))
+        registry.unsubscribe(first)
+        registry.unsubscribe(second)
+
+    def test_grace_unsubscribe_is_cancelled_by_a_new_consumer(self):
+        provider = FakeRealtimeProvider()
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0.08)
+        first = registry.subscribe("SH.600519", "1分")
+        registry.unsubscribe(first)
+        second = registry.subscribe("SH.600519", "1分")
+        time.sleep(0.12)
+        self.assertEqual(provider.unsubscribe_calls, [])
+        registry.unsubscribe(second)
+        time.sleep(0.1)
+
+    def test_registry_health_probe_is_shared_and_throttled(self):
+        started = threading.Event()
+        release = threading.Event()
+        provider = FakeRealtimeProvider(health_started=started, health_release=release)
+        registry = RealtimeRegistry(
+            provider=provider, state_store=RealtimeStateStore(), grace_seconds=0, health_interval_seconds=5,
+        )
+        consumer = registry.subscribe("SH.600519", "1分")
+        results = []
+        first = threading.Thread(target=lambda: results.append(registry.health_check()))
+        second = threading.Thread(target=lambda: results.append(registry.health_check()))
+        first.start()
+        self.assertTrue(started.wait(timeout=1))
+        second.start()
+        second.join(timeout=1)
+        release.set()
+        first.join(timeout=1)
+        self.assertEqual(provider.health_calls, 1)
+        self.assertEqual(results, ["live", "live"])
+        registry.unsubscribe(consumer)
+
+    def test_registry_does_not_probe_without_consumers(self):
+        provider = FakeRealtimeProvider()
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
+        self.assertEqual(registry.health_check(), "live")
+        self.assertEqual(provider.health_calls, 0)
+
+    def test_reconnecting_status_is_published_without_fake_bar(self):
+        provider = FakeRealtimeProvider()
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
+        consumer = registry.subscribe("SH.600519", "1分")
+        provider.callbacks[("SH.600519", "1分")]({"status": "reconnecting", "error": "connection lost"})
+        events = [consumer.get(timeout=0.2) for _ in range(2)]
+        status = next(event for event in events if event["type"] == "status" and event["status"] == "reconnecting")
+        self.assertIsNone(status["bar"])
+        registry.unsubscribe(consumer)
+
+    def test_new_consumer_receives_latest_shared_snapshot(self):
+        provider = FakeRealtimeProvider()
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
+        first = registry.subscribe("SH.600519", "1分")
+        provider.emit(self.bar(100))
+        first.get(timeout=0.2)
+        first.get(timeout=0.2)
+        second = registry.subscribe("SH.600519", "1分")
+        events = [second.get(timeout=0.2) for _ in range(2)]
+        snapshot = next(event for event in events if event["type"] == "snapshot")
+        self.assertEqual(snapshot["bar"]["time"], 100)
+        registry.unsubscribe(first)
+        registry.unsubscribe(second)
+
+    def test_sequence_older_than_current_same_timestamp_is_stale(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, sequence=2))
+        state, result = store.apply_bar(key, self.bar(100, close=99, sequence=1))
+        self.assertFalse(result.accepted)
+        self.assertEqual(state.current_bar.close, 10)
+
+    def test_unavailable_status_is_explicit_and_has_no_bar(self):
+        store = RealtimeStateStore()
+        key = ("futu-opend", "SH.600519", "1分")
+        state = store.set_status(key, "unavailable", mode="streaming", source="futu-opend", error="OpenD unavailable")
+        self.assertEqual(state.status, "unavailable")
+        self.assertIsNone(state.current_bar)
+        self.assertEqual(state.error, "OpenD unavailable")
+
+    def test_status_changes_also_have_monotonic_revisions(self):
+        store = RealtimeStateStore()
+        key = ("futu-opend", "SH.600519", "1分")
+        connecting = store.set_status(key, "connecting", source="futu-opend")
+        live = store.set_status(key, "live", source="futu-opend")
+        self.assertLess(connecting.revision, live.revision)
+
+    def test_state_payload_and_calculation_snapshot_share_process_epoch(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        state, _ = store.apply_bar(key, self.bar(100))
+        snapshot = store.capture(key)
+        self.assertTrue(store.epoch)
+        self.assertEqual(state.epoch, store.epoch)
+        self.assertEqual(state.to_dict()["epoch"], store.epoch)
+        self.assertEqual(snapshot.epoch, store.epoch)
+
+    def test_lower_revision_from_new_epoch_is_a_new_authority_generation(self):
+        first = RealtimeStateStore()
+        second = RealtimeStateStore()
+        self.assertNotEqual(first.epoch, second.epoch)
+        first_key = ("test-provider", "SH.600519", "1分")
+        second_key = ("test-provider", "SH.600519", "1分")
+        for index in range(500):
+            first.apply_bar(first_key, self.bar(100 + index))
+        first_snapshot = first.capture(first_key)
+        second_snapshot = second.capture(second_key)
+        self.assertEqual(first_snapshot.revision, 500)
+        self.assertEqual(second_snapshot.revision, 0)
+        self.assertNotEqual(first_snapshot.epoch, second_snapshot.epoch)
+
+    def test_formula_flight_isolated_by_symbol_period_and_formula(self):
+        coordinator = FormulaFlightCoordinator()
+        self.assertTrue(coordinator.begin(("A", "1分", "MA"), 1))
+        self.assertTrue(coordinator.begin(("B", "1分", "MA"), 1))
+        self.assertTrue(coordinator.begin(("A", "5分", "MA"), 1))
+        self.assertTrue(coordinator.begin(("A", "1分", "RSI"), 1))
+
+    def test_visitor_can_use_stream_boundary_but_not_anonymous(self):
+        client = Client()
+        client.post("/api/auth/guest/")
+        provider = FakeRealtimeProvider()
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
+        with patch("core.views.get_realtime_registry", return_value=registry):
+            response = client.get("/api/realtime/market-stream/SH.600519/?period=1分")
+        self.assertEqual(response.status_code, 200)
+        response.close()
+
+    def test_realtime_period_contract_rejects_intraday_semantics(self):
+        client = Client()
+        client.post("/api/auth/guest/")
+        response = client.get("/api/realtime/market-stream/SH.600519/?period=分时")
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["mode"], "unavailable")
+
+    def test_same_timestamp_updates_current_bar_without_replacing_series_contract(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        first, result = store.apply_bar(key, self.bar(100, close=10, high=11, low=9))
+        second, result = store.apply_bar(key, self.bar(100, close=12, high=12, low=8))
+        self.assertEqual(result.relation, "updated")
+        self.assertEqual(first.revision + 1, second.revision)
+        self.assertEqual(second.current_bar.close, 12)
+        self.assertEqual(second.current_bar.high, 12)
+        self.assertEqual(second.current_bar.low, 8)
+
+    def test_live_same_timestamp_high_is_monotonic_and_low_is_monotonic(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, high=12, low=8, volume=100))
+        state, result = store.apply_bar(key, self.bar(100, high=10, low=9, volume=120, close=11))
+        self.assertTrue(result.accepted)
+        self.assertEqual(state.current_bar.high, 12)
+        self.assertEqual(state.current_bar.low, 8)
+        self.assertEqual(state.current_bar.volume, 120)
+
+    def test_live_same_timestamp_stale_cumulative_volume_is_rejected(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, volume=200, amount=300))
+        state, result = store.apply_bar(key, self.bar(100, volume=150, amount=250, close=12))
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.relation, "suspected_stale")
+        self.assertEqual(state.current_bar.volume, 200)
+
+    def test_authoritative_reconcile_can_correct_high_low_and_volume(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, high=120, low=80, volume=200))
+        corrected = self.bar(100, high=110, low=90, volume=180, event_kind="reconcile")
+        state, result = store.apply_bar(key, corrected)
+        self.assertEqual(result.relation, "reconciled")
+        self.assertEqual(state.current_bar.high, 110)
+        self.assertEqual(state.current_bar.low, 90)
+        self.assertEqual(state.current_bar.volume, 180)
+
+    def test_provider_time_key_is_not_used_as_event_sequence(self):
+        source = Path(settings.BASE_DIR / "core" / "realtime" / "futu_provider.py").read_text(encoding="utf-8")
+        self.assertIn("sequence=None", source)
+        self.assertNotIn("sequence=getattr(row, \"time_key\"", source)
+
+    def test_new_timestamp_appends_and_closes_previous_bar(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100))
+        state, result = store.apply_bar(key, self.bar(101, close=11))
+        self.assertEqual(result.relation, "appended")
+        self.assertEqual(state.current_bar.time, 101)
+        self.assertTrue(state.last_closed_bar.is_closed)
+        self.assertEqual(state.last_closed_bar.time, 100)
+
+    def test_older_event_is_rejected_and_revision_does_not_go_back(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        current, _ = store.apply_bar(key, self.bar(101, close=11))
+        stale, result = store.apply_bar(key, self.bar(100, close=9))
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.relation, "stale")
+        self.assertEqual(stale.revision, current.revision)
+        self.assertEqual(stale.current_bar.time, 101)
+
+    def test_duplicate_event_is_idempotent(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        first, _ = store.apply_bar(key, self.bar(100, sequence="a"))
+        second, result = store.apply_bar(key, self.bar(100, sequence="a"))
+        self.assertFalse(result.accepted)
+        self.assertEqual(first.revision, second.revision)
+
+    def test_revision_is_monotonic_for_state_changes(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        revisions = [store.apply_bar(key, self.bar(index))[0].revision for index in (100, 101, 102)]
+        self.assertEqual(revisions, sorted(revisions))
+        self.assertEqual(len(set(revisions)), 3)
+
+    def test_missing_amount_and_turnover_rate_remain_none_and_real_zero_survives(self):
+        bar = self.bar(100, amount=None, turnover_rate=None, volume=0)
+        self.assertIsNone(bar.amount)
+        self.assertIsNone(bar.turnover_rate)
+        self.assertEqual(bar.volume, 0)
+        result = merge_realtime_bar(None, bar)
+        self.assertEqual(result.bar.volume, 0)
+
+    def test_market_time_conversion_does_not_use_host_timezone(self):
+        cn = provider_time_to_timestamp("2026-09-04 09:30:00", "cn")
+        us = provider_time_to_timestamp("2026-09-04 09:30:00", "us")
+        self.assertNotEqual(cn, us)
+        self.assertEqual(cn, 1788485400)
+
+    def test_provider_failure_has_no_test_provider_runtime_fallback(self):
+        provider = FakeRealtimeProvider(error=RuntimeError("provider unavailable"))
+        registry = RealtimeRegistry(provider=provider, state_store=RealtimeStateStore(), grace_seconds=0)
+        with self.assertRaises(RealtimeProviderError):
+            registry.subscribe("SH.600519", "1分")
+        time.sleep(0.03)
+        self.assertEqual(registry.stats()["active_keys"], 0)
+        self.assertTrue(FutuRealtimeProvider.provider_name == "futu-opend")
+
+    def test_formula_flight_keeps_only_latest_pending_revision(self):
+        coordinator = FormulaFlightCoordinator()
+        key = ("SH.600519", "1分", "fixture")
+        self.assertTrue(coordinator.begin(key, 100))
+        self.assertFalse(coordinator.begin(key, 101))
+        self.assertFalse(coordinator.begin(key, 104))
+        self.assertEqual(coordinator.state(key).pending_revision, 104)
+        self.assertEqual(coordinator.finish(key, 100), 104)
+        self.assertEqual(coordinator.finish(key, 104), None)
+
+    def test_formula_stale_revision_is_rejected(self):
+        coordinator = FormulaFlightCoordinator()
+        key = ("SH.600519", "1分", "fixture")
+        coordinator.begin(key, 100)
+        self.assertTrue(coordinator.is_stale(key, 100, 101))
+        self.assertFalse(coordinator.is_stale(key, 100, 100))
+
+    def test_calculation_snapshot_remains_atomic_when_state_advances(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, close=10))
+        captured = store.capture(key)
+        store.apply_bar(key, self.bar(100, close=11))
+        self.assertEqual(captured.revision, 1)
+        self.assertEqual(captured.current_bar.close, 10)
+        self.assertEqual(store.capture(key).revision, 2)
+
+    def test_formula_history_is_bounded_by_captured_current_bar(self):
+        store = RealtimeStateStore()
+        key = ("test-provider", "SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, close=100))
+        snapshot = store.capture(key)
+        history = [
+            {"time": 100, "open": 100, "high": 101, "low": 99, "close": 105, "volume": 10},
+            {"time": 101, "open": 101, "high": 102, "low": 100, "close": 102, "volume": 20},
+        ]
+        bounded = merge_calculation_snapshot_rows(history, snapshot)
+        self.assertEqual([row["time"] for row in bounded], [100])
+        self.assertEqual(bounded[0]["close"], 100)
+        self.assertEqual(bounded[0]["volume"], 100)
+
+    def test_indicator_response_revision_matches_captured_calculation_snapshot(self):
+        user = get_user_model().objects.create_user(username="realtime-formula-user", password="Valid-password-123")
+        client = Client()
+        client.force_login(user)
+        provider = FakeRealtimeProvider()
+        store = RealtimeStateStore()
+        registry = RealtimeRegistry(provider=provider, state_store=store, grace_seconds=0)
+        key = registry.key_for("SH.600519", "1分")
+        store.apply_bar(key, self.bar(100, close=10))
+        item = SimpleNamespace(code="TEST", version=3, name="Public fixture", placement="main", source="PUBLIC_FIXTURE")
+        public_bars = [{"time": 100, "open": 10, "high": 11, "low": 9, "close": 10, "volume": 100}]
+        completed = SimpleNamespace(stdout=json.dumps({"lines": [], "sticks": [], "markers": [], "fixedTexts": [], "engine": "tongdaxin"}))
+        with patch("core.views.get_realtime_registry", return_value=registry), \
+             patch("core.views.Formula.objects.get", return_value=item), \
+             patch("core.views.history_bars", return_value=(public_bars, None, None)), \
+             patch("core.views.subprocess.run", return_value=completed):
+            formula_run_registry.clear()
+            response = client.get("/api/indicator-render/TEST/SH.600519/?period=1%E5%88%86&count=100&revision=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["revision"], 1)
+        self.assertEqual(response.json()["epoch"], store.epoch)
+        self.assertNotIn("PUBLIC_FIXTURE", response.content.decode("utf-8"))
+
+    def test_formula_run_registry_deduplicates_same_revision_subprocess(self):
+        registry = FormulaRunRegistry()
+        input_hash = calculation_input_fingerprint([{"time": 7, "close": 100}], 123.0)
+        key = ("SH.600519", "1分", "FORMULA", 1, 7, input_hash)
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+        results = []
+
+        def runner():
+            calls.append(True)
+            started.set()
+            release.wait(timeout=1)
+            return {"drawing": "shared"}
+
+        def invoke():
+            results.append(registry.run(key, 7, runner))
+
+        first = threading.Thread(target=invoke)
+        second = threading.Thread(target=invoke)
+        first.start()
+        self.assertTrue(started.wait(timeout=1))
+        second.start()
+        release.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(results, [{"drawing": "shared"}, {"drawing": "shared"}])
+        self.assertEqual(registry.coordinator.state(key).active_revision, None)
+
+        def fresh_runner():
+            calls.append(True)
+            return {"drawing": "fresh"}
+
+        self.assertEqual(registry.run(key, 7, fresh_runner), {"drawing": "fresh"})
+        self.assertEqual(len(calls), 2)
+
+    def test_formula_input_fingerprint_separates_real_inputs(self):
+        bars_a = [{"time": 100, "close": 10, "volume": 100}]
+        bars_b = [{"time": 100, "close": 11, "volume": 100}]
+        hash_a = calculation_input_fingerprint(bars_a, 1000.0)
+        self.assertEqual(hash_a, calculation_input_fingerprint(bars_a, 1000.0))
+        self.assertNotEqual(hash_a, calculation_input_fingerprint(bars_b, 1000.0))
+        self.assertNotEqual(hash_a, calculation_input_fingerprint(bars_a, 1001.0))
+        self.assertNotIn("source", calculation_input_fingerprint.__code__.co_varnames)
+
+        registry = FormulaRunRegistry()
+        calls = []
+
+        def runner():
+            calls.append(True)
+            return {"drawing": len(calls)}
+
+        base = ("test-provider", "SH.600519", "1分", "FORMULA", 1, "epoch", 7)
+        registry.run(base + (hash_a,), 7, runner)
+        registry.run(base + (calculation_input_fingerprint(bars_b, 1000.0),), 7, runner)
+        registry.run(base + (calculation_input_fingerprint(bars_a, 1001.0),), 7, runner)
+        self.assertEqual(len(calls), 3)
+
+    def test_formula_registry_inflight_error_is_shared_but_not_cached(self):
+        registry = FormulaRunRegistry()
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def runner():
+            calls.append(True)
+            started.set()
+            release.wait(timeout=1)
+            raise RuntimeError("fixture failure")
+
+        errors = []
+
+        def invoke():
+            try:
+                registry.run(("SH.600519", "1分", "FORMULA", 1, 8), 8, runner)
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        first = threading.Thread(target=invoke)
+        second = threading.Thread(target=invoke)
+        first.start()
+        self.assertTrue(started.wait(timeout=1))
+        second.start()
+        release.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+        self.assertEqual(calls, [True])
+        self.assertEqual(errors, ["fixture failure", "fixture failure"])
+        with self.assertRaises(RuntimeError):
+            registry.run(("SH.600519", "1分", "FORMULA", 1, 8), 8, runner)
+        self.assertEqual(len(calls), 2)
+
+    def test_provider_reconnect_failure_publishes_terminal_unavailable(self):
+        class FailingContext:
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def get_global_state(self):
+                return -1, "health failed"
+
+            def close(self):
+                return None
+
+            def subscribe(self, *args, **kwargs):
+                return RET_OK, ""
+
+            def get_cur_kline(self, *args, **kwargs):
+                return -1, "snapshot failed"
+
+        events = []
+        provider = FutuRealtimeProvider(context_factory=FailingContext)
+        provider._context = FailingContext()
+        provider._callbacks[("SH.600519", "1分")] = {events.append}
+        provider._status = "live"
+        self.assertEqual(provider.health_check(), "unavailable")
+        self.assertEqual(provider.status, "unavailable")
+        self.assertEqual(events[-1]["status"], "unavailable")
+
+    def test_provider_reconnect_rolls_back_partial_subscription_and_retries_all_keys(self):
+        class CandidateContext:
+            def __init__(self, fail_symbol=None):
+                self.fail_symbol = fail_symbol
+                self.subscribe_calls = []
+                self.closed = False
+
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                self.closed = True
+
+            def subscribe(self, symbols, subtypes, **kwargs):
+                symbol = symbols[0]
+                self.subscribe_calls.append(symbol)
+                if symbol == self.fail_symbol:
+                    return -1, "subscribe failed"
+                return RET_OK, ""
+
+            def unsubscribe(self, symbols, subtypes):
+                return RET_OK, ""
+
+            def get_global_state(self):
+                return RET_OK, ""
+
+        failed_candidate = CandidateContext(fail_symbol="US.AAPL")
+        recovered_candidate = CandidateContext()
+        candidates = [failed_candidate, recovered_candidate]
+        snapshot = self.bar(100, close=12)
+
+        class RecoveringProvider(FutuRealtimeProvider):
+            def _reconnect_snapshot(self, context, symbol, period):
+                return snapshot
+
+        provider = RecoveringProvider(context_factory=lambda: candidates.pop(0))
+        old_context = CandidateContext()
+        events = []
+        with provider._lock:
+            provider._context = old_context
+            provider._connection_generation = 1
+            provider._ready_generation = 1
+            provider._generation_subscriptions = {("SH.600519", "1分"), ("US.AAPL", "1分")}
+            provider._callbacks = {
+                ("SH.600519", "1分"): {events.append},
+                ("US.AAPL", "1分"): {events.append},
+            }
+            provider._status = "live"
+
+        with self.assertRaises(Exception):
+            provider.reconnect()
+        self.assertEqual(provider.status, "unavailable")
+        self.assertIsNone(provider._context)
+        self.assertTrue(failed_candidate.closed)
+        self.assertEqual(events, [])
+
+        self.assertEqual(provider.health_check(), "live")
+        self.assertEqual(recovered_candidate.subscribe_calls, ["SH.600519", "US.AAPL"])
+        self.assertEqual(provider._generation_subscriptions, set(provider._callbacks))
+        self.assertTrue(any(not isinstance(event, dict) for event in events))
+        provider.close()
+
+    def test_provider_reconnect_snapshot_failure_publishes_nothing_and_closes_candidate(self):
+        class CandidateContext:
+            def __init__(self):
+                self.closed = False
+                self.subscribe_calls = []
+
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                self.closed = True
+
+            def subscribe(self, symbols, subtypes, **kwargs):
+                self.subscribe_calls.append(symbols[0])
+                return RET_OK, ""
+
+            def get_global_state(self):
+                return RET_OK, ""
+
+        candidate = CandidateContext()
+        snapshot = self.bar(100)
+
+        class SnapshotFailingProvider(FutuRealtimeProvider):
+            def _reconnect_snapshot(self, context, symbol, period):
+                if symbol == "US.AAPL":
+                    raise RuntimeError("snapshot failed")
+                return snapshot
+
+        provider = SnapshotFailingProvider(context_factory=lambda: candidate)
+        events = []
+        with provider._lock:
+            provider._context = CandidateContext()
+            provider._connection_generation = 1
+            provider._ready_generation = 1
+            provider._generation_subscriptions = {("SH.600519", "1分"), ("US.AAPL", "1分")}
+            provider._callbacks = {
+                ("SH.600519", "1分"): {events.append},
+                ("US.AAPL", "1分"): {events.append},
+            }
+            provider._status = "live"
+
+        with self.assertRaises(Exception):
+            provider.reconnect()
+        self.assertEqual(provider.status, "unavailable")
+        self.assertIsNone(provider._context)
+        self.assertTrue(candidate.closed)
+        self.assertEqual(events, [])
+
+    def test_health_does_not_promote_incomplete_generation_to_live(self):
+        class Context:
+            def __init__(self, fail_symbol=None):
+                self.fail_symbol = fail_symbol
+                self.closed = False
+
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                self.closed = True
+
+            def get_global_state(self):
+                return RET_OK, ""
+
+            def subscribe(self, symbols, subtypes, **kwargs):
+                if symbols[0] == self.fail_symbol:
+                    return -1, "subscribe failed"
+                return RET_OK, ""
+
+        candidate = Context(fail_symbol="US.AAPL")
+        snapshot = self.bar(100)
+
+        class Provider(FutuRealtimeProvider):
+            def _reconnect_snapshot(self, context, symbol, period):
+                return snapshot
+
+        provider = Provider(context_factory=lambda: candidate)
+        with provider._lock:
+            provider._context = Context()
+            provider._connection_generation = 1
+            provider._ready_generation = 1
+            provider._generation_subscriptions = {("SH.600519", "1分")}
+            provider._callbacks = {
+                ("SH.600519", "1分"): {lambda event: None},
+                ("US.AAPL", "1分"): {lambda event: None},
+            }
+            provider._status = "live"
+
+        self.assertEqual(provider.health_check(), "unavailable")
+        self.assertNotEqual(provider.status, "live")
+        self.assertTrue(candidate.closed)
+
+    def test_context_none_with_active_subscription_retries_after_failure(self):
+        class Context:
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                return None
+
+            def subscribe(self, *args, **kwargs):
+                return RET_OK, ""
+
+        factory_calls = []
+
+        def factory():
+            factory_calls.append(True)
+            if len(factory_calls) == 1:
+                raise RuntimeError("OpenD offline")
+            return Context()
+
+        class RecoveringProvider(FutuRealtimeProvider):
+            def _reconnect_snapshot(self, context, symbol, period):
+                return self.snapshot
+
+        provider = RecoveringProvider(context_factory=factory)
+        provider.snapshot = self.bar(100)
+        events = []
+        provider._callbacks[("SH.600519", "1分")] = {events.append}
+        self.assertEqual(provider.health_check(), "unavailable")
+        self.assertEqual(provider.status, "unavailable")
+        self.assertEqual(provider.health_check(), "live")
+        self.assertEqual(len(factory_calls), 2)
+        self.assertEqual(provider.status, "live")
+        self.assertTrue(any(event.get("status") == "live" for event in events if isinstance(event, dict)))
+        provider.close()
+
+    def test_stale_health_result_cannot_override_new_connection_generation(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingContext:
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                return None
+
+            def get_global_state(self):
+                started.set()
+                release.wait(timeout=1)
+                return -1, "old context failed"
+
+        class LiveContext(BlockingContext):
+            def get_global_state(self):
+                return RET_OK, ""
+
+        provider = FutuRealtimeProvider(context_factory=LiveContext)
+        old_context = BlockingContext()
+        new_context = LiveContext()
+        provider._context = old_context
+        provider._callbacks[("SH.600519", "1分")] = {lambda event: None}
+        provider._status = "live"
+        with provider._lock:
+            provider._connection_generation = 1
+            provider._ready_generation = 1
+            provider._generation_subscriptions = {('SH.600519', '1分')}
+        worker = threading.Thread(target=provider.health_check)
+        worker.start()
+        self.assertTrue(started.wait(timeout=1))
+        with provider._lock:
+            provider._context = new_context
+            provider._connection_generation = 2
+            provider._ready_generation = 2
+            provider._generation_subscriptions = {('SH.600519', '1分')}
+            provider._status = "live"
+        release.set()
+        worker.join(timeout=1)
+        self.assertEqual(provider.status, "live")
+        provider.close()
+
+    def test_futu_connection_generation_ignores_old_frame_and_error(self):
+        class Context:
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def close(self):
+                return None
+
+        class Frame:
+            def itertuples(self, index=False):
+                return [SimpleNamespace(
+                    code="SH.600519", k_type="K_1M", time_key="2026-09-04 09:30:00",
+                    open=10, high=11, low=9, close=10, volume=100,
+                    turnover=1000, turnover_rate=None,
+                )]
+
+        provider = FutuRealtimeProvider(context_factory=Context)
+        provider._ensure_context()
+        old_generation = provider.connection_generation
+        events = []
+        provider._callbacks[("SH.600519", "1分")] = {events.append}
+        with provider._lock:
+            provider._connection_generation += 1
+            provider._ready_generation = provider._connection_generation
+            provider._generation_subscriptions = {('SH.600519', '1分')}
+        current_generation = provider.connection_generation
+        provider._handle_frame(Frame(), generation=old_generation)
+        provider._handle_response(old_generation, -1, "late old error")
+        self.assertEqual(events, [])
+        self.assertEqual(provider.status, "live")
+        provider._handle_response(current_generation, RET_OK, Frame())
+        self.assertEqual(len(events), 1)
+        provider.close()
+
+    def test_realtime_stream_requires_terminal_session_for_anonymous(self):
+        response = Client().get("/api/realtime/market-stream/SH.600519/?period=1分")
+        self.assertEqual(response.status_code, 401)
+
+
+class RealtimeSourceContractTests(SimpleTestCase):
+    def test_futu_provider_has_one_long_lived_context_and_all_supported_periods(self):
+        source = (Path(settings.BASE_DIR) / "core" / "realtime" / "futu_provider.py").read_text(encoding="utf-8")
+        self.assertIn("self._context", source)
+        self.assertIn("CurKlineHandlerBase", source)
+        self.assertIn("REALTIME_PERIOD_SUBTYPES", source)
+        self.assertIn("_connection_generation", source)
+        self.assertIn("_handle_response", source)
+        self.assertIn("_reconnect_lock", source)
+        self.assertIn("context is not self._context", source)
+        self.assertIn("_generation_subscriptions", source)
+        self.assertIn("_ready_generation", source)
+        self.assertIn("candidate", source)
+        self.assertIn("snapshots = []", source)
+        self.assertIn("_reconnect_snapshot", source)
+        self.assertNotIn("FakeRealtimeProvider", source)
+
+    def test_market_chart_updates_in_place_and_cleans_stream(self):
+        source = (Path(settings.BASE_DIR) / "frontend" / "src" / "components" / "MarketChart.vue").read_text(encoding="utf-8")
+        self.assertIn("candleSeries.update", source)
+        self.assertIn("new EventSource", source)
+        self.assertIn("eventSource?.close()", source)
+        self.assertIn("visibilitychange", source)
+        self.assertIn("realtimeRevision", source)
+        self.assertIn("realtimeEpoch", source)
+        self.assertIn("realtimeRevision = decision.revision", source)
+        self.assertIn("realtimeEpoch = decision.epoch", source)
+        self.assertIn("last_closed_bar", source)
+        self.assertIn("reconcileRealtimeVersion", source)
+        self.assertIn("closedChanged", source)
+        self.assertIn("formulaPendingRevision", source)
+        self.assertIn("createRealtimeUiBuffer", source)
+        self.assertIn("flushMs: 300", source)
+        self.assertIn("document.hidden", source)
+        self.assertIn("rebuildLayer", source)
+        self.assertIn("reconcileHistoryTail", source)
+        self.assertIn("requestHistoryTailReconcile", source)
+        self.assertIn("mergeHistoricalTail", source)
+        self.assertIn("reconcileHistory: true", source)
+        self.assertIn("source.onopen", source)
+        self.assertIn("realtimePayloadSequence", source)
+        self.assertIn("needsHistoryReconcile", source)
+        self.assertIn("historyReconcileRetryTimer", source)
+        self.assertIn("HISTORY_RECONCILE_RETRY_MS = 2000", source)
+        self.assertIn("Array.isArray(payload.bars)", source)
+        self.assertIn("getVisibleLogicalRange", source)
+        self.assertIn("latestRealtimePayloadGeneration", source)
+        self.assertIn("cancelFormulaWork()", source)
+        self.assertIn("invalidateFormulaResults({ clearPending: false })", source)
+        self.assertIn("formulaRefreshPending", source)
+        self.assertIn("historyReconcilePendingGeneration", source)
+        self.assertIn("settleHistoryReconcile", source)
+        self.assertNotIn("applyRealtimePayload", source)
+        self.assertGreaterEqual(source.count("chart?.remove()"), 2)
+
+    def test_realtime_ui_buffer_contract_has_coalescing_and_pause(self):
+        source = (Path(settings.BASE_DIR) / "frontend" / "src" / "realtime" / "realtimeUiBuffer.mjs").read_text(encoding="utf-8")
+        self.assertIn("REALTIME_UI_FLUSH_MS = 300", source)
+        self.assertIn("latest = payload", source)
+        self.assertIn("mergeRealtimeBars", source)
+        self.assertIn("mergeRealtimePayload", source)
+        self.assertIn("mergeHistoricalTail", source)
+        self.assertIn("isPaused", source)
+        self.assertIn("flushCount", source)
+
+    def test_registry_health_probe_has_shared_throttle_and_no_main_lock_io(self):
+        source = (Path(settings.BASE_DIR) / "core" / "realtime" / "registry.py").read_text(encoding="utf-8")
+        self.assertIn("_health_lock", source)
+        self.assertIn("_health_inflight", source)
+        self.assertIn("health_interval_seconds", source)
+        self.assertIn("time.monotonic", source)
+        self.assertIn("_has_active_consumers", source)
+
+    def test_dynamic_formula_primitives_request_redraw(self):
+        for filename in ("TongdaxinStickPrimitive.js", "TongdaxinTextPrimitive.js", "TongdaxinFixedTextPrimitive.js"):
+            source = (Path(settings.BASE_DIR) / "frontend" / "src" / "indicators" / filename).read_text(encoding="utf-8")
+            self.assertIn("attached({ requestUpdate })", source)
+            self.assertIn("this.requestUpdate?.()", source)
+
+    def test_formula_render_parses_revision_and_uses_capture_and_run_registry(self):
+        source = (Path(settings.BASE_DIR) / "core" / "views.py").read_text(encoding="utf-8")
+        self.assertIn('request.GET.get("revision", 0)', source)
+        self.assertIn('request.GET.get("epoch", "")', source)
+        self.assertIn("state_store.capture", source)
+        self.assertIn("merge_calculation_snapshot_rows", source)
+        self.assertIn("calculation_snapshot.epoch", source)
+        self.assertIn("input_hash", source)
+        self.assertIn("formula_run_registry.run", source)
+
+    def test_bar_rows_preserves_missing_fields_and_real_zero(self):
+        class Frame:
+            def itertuples(self):
+                return [SimpleNamespace(
+                    code="SH.600519", time_key="2026-09-04 09:30:00", open=0, high=1, low=0,
+                    close=0, volume=0, turnover=None, turnover_rate=None, last_close=0,
+                )]
+
+        row = bar_rows(Frame())[0]
+        self.assertEqual(row["open"], 0)
+        self.assertEqual(row["volume"], 0)
+        self.assertIsNone(row["amount"])
+        self.assertIsNone(row["turnover_rate"])

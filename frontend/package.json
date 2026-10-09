@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:indicators": "node src/indicators/commonIndicators.test.mjs",
+    "test:realtime": "node src/realtime/realtimeUiBuffer.test.mjs"
   },
   "dependencies": {
     "@dtrader/formula-ts": "github:DTrader-store/formula-ts",

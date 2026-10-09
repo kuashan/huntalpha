@@ -1,6 +1,11 @@
 from django.core.management.base import BaseCommand
 
-from core.symbol_catalog import FutuOpenDAdapter, SUPPORTED_MARKETS, apply_catalog_snapshot
+from core.crypto_provider import CoinbaseCryptoCatalogAdapter
+from core.symbol_catalog import CRYPTO_MARKET, FutuOpenDAdapter, SUPPORTED_MARKETS, apply_catalog_snapshot
+from core.marketdata.service import get_market_data_service
+
+
+_DEFAULT_LEGACY_FUTU_ADAPTER = FutuOpenDAdapter
 
 
 class Command(BaseCommand):
@@ -11,10 +16,16 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         markets = [options["market"]] if options.get("market") else list(SUPPORTED_MARKETS)
-        provider = FutuOpenDAdapter()
         for market in markets:
             try:
-                snapshot = provider.fetch_market(market)
+                if market == CRYPTO_MARKET:
+                    snapshot = CoinbaseCryptoCatalogAdapter().fetch_market(market)
+                elif FutuOpenDAdapter is not _DEFAULT_LEGACY_FUTU_ADAPTER:
+                    # Explicit compatibility seam for existing tests and
+                    # operators who intentionally inject the old adapter.
+                    snapshot = FutuOpenDAdapter().fetch_market(market)
+                else:
+                    snapshot = get_market_data_service().catalog_snapshot(market)
                 stats = apply_catalog_snapshot(snapshot)
             except Exception as exc:
                 error_type = getattr(exc, "error_type", type(exc).__name__)
