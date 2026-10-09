@@ -46,6 +46,29 @@ class PublicMarketDataProviderTests(TestCase):
         self.assertEqual(result["meta"]["data_status"], "delayed")
         self.assertEqual(result["meta"]["delay_seconds"], 15)
 
+    def test_yahoo_quote_uses_current_market_change_not_long_history_chart_previous_close(self):
+        payload = {
+            "chart": {
+                "result": [{
+                    "meta": {
+                        "regularMarketPrice": 24.73,
+                        "regularMarketChangePercent": 2.402,
+                        # Yahoo returns the beginning-of-window value here for
+                        # long range requests, not the latest session close.
+                        "chartPreviousClose": 13.473,
+                    },
+                    "indicators": {"quote": [{"close": [13.473, 24.15, 24.73]}]},
+                }],
+                "error": None,
+            }
+        }
+        provider = YahooFinanceMarketDataProvider(CN_A_SHARE)
+        with mock.patch.object(provider, "_request_chart", return_value=payload):
+            result = provider.quote("SZ.002315")
+        self.assertEqual(result["price"], 24.73)
+        self.assertEqual(result["previous_close"], 24.15)
+        self.assertEqual(result["change"], 2.402)
+
     def test_tencent_daily_payload_is_normalized_without_credentials(self):
         provider = TencentPublicMarketDataProvider(CN_A_SHARE)
         payload = {"code": 0, "data": {"sh600519": {"qfqday": [["2026-10-01", "10", "11", "12", "9", "100"]]}}}
