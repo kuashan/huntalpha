@@ -201,7 +201,7 @@ onMounted(loadSummary)
 <template>
   <section class="account-page">
     <header class="account-page-header">
-      <div class="account-page-brand"><span class="account-page-mark"><img src="/huntalpha-wolf.svg" alt="" /></span><strong>HuntAlpha</strong><small>HUB</small></div>
+      <div class="account-page-brand"><span class="account-page-mark"><img src="/huntalpha-wolf.svg" alt="" /></span><strong>SiftAlpha</strong><small>HUB</small></div>
       <button type="button" class="back-terminal" @click="emit('back')">返回行情</button>
     </header>
 
@@ -212,7 +212,7 @@ onMounted(loadSummary)
       </aside>
 
       <main class="account-content">
-        <div class="account-content-heading"><p>HUNTALPHA ACCOUNT</p><h1>{{ activeSectionLabel }}</h1><span v-if="summaryLoading">正在加载账户状态…</span><span v-else-if="summaryError">{{ summaryError }}</span></div>
+        <div class="account-content-heading"><p>SIFTALPHA ACCOUNT</p><h1>{{ activeSectionLabel }}</h1><span v-if="summaryLoading">正在加载账户状态…</span><span v-else-if="summaryError">{{ summaryError }}</span></div>
 
         <section v-if="activeSection === 'overview'" class="account-panel account-overview">
           <div class="account-hero">
