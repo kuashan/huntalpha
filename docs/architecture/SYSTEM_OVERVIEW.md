@@ -21,8 +21,8 @@ HuntAlpha 是准备正式上线的金融分析/量化网站。当前代码库已
 
 ### 行情与分析
 
-- `core/marketdata`：统一 MarketProfile/Router/Provider 入口；按市场接入 Tushare、Longbridge、Coinbase 公共行情
-- 富途 OpenD：迁移期间仅作为隔离的 legacy/实时兼容桥，不是历史行情和报价的统一架构基础
+- `core/marketdata`：统一 MarketProfile/Router/Provider 入口；接入 Yahoo Finance、腾讯财经公开行情、Coinbase 公共行情，并预留 Tushare、Longbridge 可选增强 Provider；股票、加密资产与顶部指数均通过该入口取得数据
+- 富途 OpenD：仅保留隔离的 legacy 兼容代码，不是历史行情、报价、指数或实时行情的默认运行时路径
 - 通达信公式兼容层：服务端计算，前端只消费绘图结果
 - `vendor/formula-ts`：Git submodule，上游研究参考
 - `vendor/chan.py-main`：用于内置缠论结构适配的第三方代码，须保留许可证

@@ -196,43 +196,18 @@ class MarketDataService:
         return provider.open_context()
 
     def index_snapshot_response(self) -> dict:
-        """Return provider-neutral index availability without opening OpenD.
+        """Return index snapshots through the same provider-neutral router.
 
-        Index-specific providers are not configured yet, so this endpoint
-        reports explicit unavailable/not_configured states instead of routing
-        through the legacy Futu adapter or inventing index values.
+        Index mappings are provider-specific identities.  No Futu/OpenD
+        context is created and no ETF or static proxy is permitted.
         """
-        from ..market_indices import INDEX_DEFINITIONS
+        from .indices import UnifiedIndexSnapshotAdapter
 
-        items = []
-        profile_ids = {"cn": CN_A_SHARE.market_id, "hk": HK_EQUITY.market_id, "us": US_EQUITY.market_id}
-        for definition in INDEX_DEFINITIONS:
-            provider_ids = self.router.provider_ids(profile_ids.get(definition.market, definition.market))
-            status = "not_configured" if provider_ids else "unavailable"
-            items.append({
-                "code": definition.provider_code,
-                "name": definition.name,
-                "provider_name": definition.provider_name,
-                "market": definition.market,
-                "price": None,
-                "previous_close": None,
-                "change": None,
-                "change_percent": None,
-                "open": None,
-                "high": None,
-                "low": None,
-                "updated_at": None,
-                "status": status,
-                "source": provider_ids[0] if provider_ids else "marketdata-router",
-                "error": "统一行情源未配置" if status == "not_configured" else "统一行情源不可用",
-            })
-        return {
-            "source": "marketdata-router",
-            "markets": [
-                {"market": market, "items": [item for item in items if item["market"] == market]}
-                for market in ("cn", "hk", "us")
-            ],
-        }
+        return UnifiedIndexSnapshotAdapter({
+            "cn": self.router.providers_for(CN_A_SHARE.market_id),
+            "hk": self.router.providers_for(HK_EQUITY.market_id),
+            "us": self.router.providers_for(US_EQUITY.market_id),
+        }).snapshot_response()
 
     def legacy_quote(self, symbol: str, context_factory=None) -> dict:
         from .providers.futu_legacy import FutuLegacyMarketDataProvider

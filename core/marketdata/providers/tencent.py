@@ -34,6 +34,8 @@ def tencent_symbol_for(symbol: str) -> str:
         return f"sh{body}"
     if prefix in {"SZ", "SZSE"}:
         return f"sz{body}"
+    if prefix == "INDEX":
+        return {"HSI": "hkHSI", "HSTECH": "hkHSTECH"}.get(body, normalized.lower())
     if prefix == "HK":
         return f"hk{body.zfill(5)}"
     if prefix == "US":
