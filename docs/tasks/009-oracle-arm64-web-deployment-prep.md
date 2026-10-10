@@ -55,15 +55,26 @@ staging 部署准备，并验证生产配置、统一公开行情、K 线、实�
   操作带唯一名称的 staging 容器和 staging 数据目录。
 - 增加不含真实凭据的 `.env.example` 和 Oracle ARM64 staging runbook。
 
-## 未完成的真实 staging 验收
+## ARM64 隔离 staging 验收
+
+以下证据已在 Oracle aarch64 真机、独立镜像和全新 staging SQLite 卷上完成：
+
+- 镜像 `siftalpha-task009:c8df985` 构建成功，包含 ARM64 Python 依赖、Vue
+  构建和 Django `collectstatic`。
+- 容器仅绑定服务器 loopback 临时端口，`/healthz/` 和首页均返回 HTTP 200，
+  未登录会话返回 HTTP 401，容器状态为 `running/healthy`。
+- 使用临时 staging 账户和真实公开行情，`SZ.002315` 日线返回 3636 根 K
+  线；缠论返回 221 条线、20 个标记和 7 个绘图项；实时 SSE 握手返回 HTTP
+  200。
+- 容器内 `python manage.py check_python_indicators` 返回 `CHANLUN: ok`，
+  `migrate --check` 没有待执行迁移。
+
+## 未完成的公开 staging 验收
 
 以下项目没有在本任务中虚报通过：
 
-- 新 staging 容器在 Oracle ARM64 上的实际构建、启动、迁移和健康检查：
-  `PENDING`，需要在 PR 代码推送后使用独立路径和独立测试数据库执行。
-- ARM64 上的公开行情、K 线、SSE、通达信指标和 Python 缠论真实绘图：
-  `PENDING`。
 - 手机浏览器通过 HTTPS 的验收：`PENDING`，当前没有新的安全公网路由。
+- 新 staging 的公开域名、HTTPS 反向代理、完整浏览器交互验收：`PENDING`。
 
 现有主机上的旧 web-staging 不是本任务的验收对象；不得用它代替新的
 SiftAlpha staging 证据。
