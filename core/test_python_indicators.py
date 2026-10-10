@@ -17,7 +17,7 @@ from .python_indicators import (
     run_python_indicator,
     resolve_python_indicator_executable,
 )
-from .chan_runner import epoch_to_chan_time
+from .chan_runner import epoch_to_chan_time, run as run_chanlun
 
 
 class PythonIndicatorRegistryTests(SimpleTestCase):
@@ -99,6 +99,15 @@ class PythonIndicatorExecutionTests(SimpleTestCase):
         self.assertEqual(kwargs["env"]["HUNTALPHA_INDICATOR_CPU_LIMIT_SECONDS"], "13")
         self.assertEqual(kwargs["env"]["HUNTALPHA_INDICATOR_MEMORY_LIMIT_BYTES"], str(DEFAULT_MEMORY_LIMIT_BYTES))
 
+    def test_chanlun_accepts_live_bar_without_optional_volume_fields(self):
+        bar = {**self.bars[0], "volume": None, "amount": None}
+
+        result = run_chanlun([bar], "日线", "Asia/Shanghai")
+
+        self.assertIsInstance(result["lines"], list)
+        self.assertIsInstance(result["sticks"], list)
+        self.assertIsInstance(result["markers"], list)
+
     def test_real_history_window_size_is_accepted(self):
         result = {"lines": [], "sticks": [], "markers": [], "engine": "chan.py"}
         completed = SimpleNamespace(returncode=0, stdout=json.dumps(result), stderr="")
@@ -129,6 +138,24 @@ class PythonIndicatorExecutionTests(SimpleTestCase):
                 run_python_indicator("CHANLUN", self.bars, "日线")
 
         self.assertEqual(context.exception.code, "chanlun_calculation_timeout")
+
+    def test_child_failure_logs_only_safe_diagnostic_metadata(self):
+        failure = subprocess.CalledProcessError(
+            1,
+            ["python"],
+            stderr="Traceback (most recent call last):\nTypeError: private detail",
+        )
+        with mock.patch("core.python_indicators.resolve_python_indicator_executable", return_value=sys.executable), \
+             mock.patch("core.python_indicators.python_indicator_dependencies_available", return_value=True), \
+             mock.patch("core.python_indicators.subprocess.run", side_effect=failure), \
+             self.assertLogs("core.python_indicators", level="ERROR") as logs:
+            with self.assertRaises(PythonIndicatorExecutionError):
+                run_python_indicator("CHANLUN", self.bars, "日线")
+
+        output = "\n".join(logs.output)
+        self.assertIn("child_exception=TypeError", output)
+        self.assertIn("returncode=1", output)
+        self.assertNotIn("private detail", output)
 
     @override_settings(HUNTALPHA_INDICATOR_PYTHON="missing-python-runtime")
     def test_invalid_configured_runtime_keeps_chanlun_error_code(self):

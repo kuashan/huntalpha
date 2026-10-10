@@ -81,6 +81,15 @@ def normalized_ohlc(bar):
     return open_price, max(high_price, open_price, close_price), min(low_price, open_price, close_price), close_price
 
 
+def optional_float(value):
+    """Normalize optional volume fields for Chan.py's numeric interface."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
 def epoch_to_chan_time(timestamp, timezone_name="UTC"):
     """Build a deterministic Chan.py time value from a provider epoch.
 
@@ -108,8 +117,8 @@ def run(raw_bars, period="日线", market_timezone="UTC"):
             DATA_FIELD.FIELD_HIGH: high_price,
             DATA_FIELD.FIELD_LOW: low_price,
             DATA_FIELD.FIELD_CLOSE: close_price,
-            DATA_FIELD.FIELD_VOLUME: float(bar.get("volume", 0)),
-            DATA_FIELD.FIELD_TURNOVER: float(bar.get("amount", 0)),
+            DATA_FIELD.FIELD_VOLUME: optional_float(bar.get("volume")),
+            DATA_FIELD.FIELD_TURNOVER: optional_float(bar.get("amount")),
         }))
     config = CChanConfig({"trigger_step": True, "print_warning": False, "print_err_time": False})
     chan = CChan("LOCAL", lv_list=[kl_type], config=config)
