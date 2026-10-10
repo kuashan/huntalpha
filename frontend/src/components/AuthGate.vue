@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { languages, locale, setLocale, t } from '../i18n'
 import HuntAlphaLogo from './HuntAlphaLogo.vue'
+import { API_BASE } from '../api'
 
 const emit = defineEmits(['authenticated'])
 const registerRequested = new URLSearchParams(window.location.search).get('register') === '1'
@@ -26,7 +27,7 @@ async function submit() {
   pending.value = true
   try {
     const endpoint = mode.value === 'login' ? 'login' : 'register'
-    const reply = await fetch(`http://127.0.0.1:8003/api/auth/${endpoint}/`, {
+    const reply = await fetch(`${API_BASE}/api/auth/${endpoint}/`, {
       method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: email.value, password: password.value, name: name.value }),
     })
@@ -38,7 +39,7 @@ async function submit() {
 async function enterGuest() {
   error.value = ''; pending.value = true
   try {
-    const reply = await fetch('http://127.0.0.1:8003/api/auth/guest/', { method: 'POST', credentials: 'include' })
+    const reply = await fetch(`${API_BASE}/api/auth/guest/`, { method: 'POST', credentials: 'include' })
     const data = await reply.json()
     if (!reply.ok) { error.value = data.error || '暂时无法进入访客模式'; return }
     emit('authenticated', { ...data.user, visitor: true })

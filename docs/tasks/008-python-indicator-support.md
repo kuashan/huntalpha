@@ -1,6 +1,12 @@
 # Task 008 — 受控 Python 指标支持
 
-Status: `IMPLEMENTED`
+Status: `ACCEPTED`
+
+## Acceptance
+
+- 用户已完成正式网页验收：缠论可在真实网页中使用，K 线保持显示，缠论绘图正常。
+- PR #32 已合并到 `main`，合并基线为 `086d87c0c270def1ef8ac19ca6e5f0c3bc111eec`。
+- Oracle ARM64 真机验收仍为 `PENDING`，不因本地或 Windows 验证结果推断服务器通过。
 
 ## 范围
 
