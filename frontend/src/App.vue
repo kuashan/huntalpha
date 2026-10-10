@@ -9,7 +9,7 @@ import AccountPopover from './components/AccountPopover.vue'
 import PersonalCenter from './components/PersonalCenter.vue'
 import { commonIndicators, markets } from './data/marketData'
 import { languages, locale, setLocale, t } from './i18n'
-const API_BASE = 'http://127.0.0.1:8003'
+import { API_BASE } from './api'
 const market = ref(markets[0]); const query = ref(''); const symbols = ref([]); const selected = ref(null); const period = ref('日线'); const mainInstalled = ref([]); const subInstalled = ref([]); const manager = ref(null)
 const user = ref(null); const visitor = ref(false); const checkingSession = ref(true); const quotes = ref({})
 const priceColorMode = ref('cn'); let initialPreferencesApplied = false

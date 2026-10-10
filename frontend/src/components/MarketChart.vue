@@ -10,6 +10,7 @@ import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from '../re
 import { settleHistoryReconcile } from '../realtime/historyRecovery.mjs'
 import { isCurrentFormulaResult, shouldScheduleFormulaRefresh } from '../realtime/formulaRefreshScheduler.mjs'
 import { classifyChartUpdate, diffIndicatorSets, indicatorKey } from '../realtime/chartUpdatePolicy.mjs'
+import { API_BASE } from '../api'
 
 const props = defineProps({
   symbol: Object,
@@ -108,7 +109,7 @@ async function requestFormulaDrawing(item, bars, revision = 0) {
   try {
     const params = new URLSearchParams({ period: props.period, count: String(bars.length), revision: String(revision) })
     if (realtimeEpoch) params.set('epoch', realtimeEpoch)
-    const reply = await fetch(`http://127.0.0.1:8003/api/indicator-render/${encodeURIComponent(item.code)}/${props.symbol.code}/?${params}`, { credentials: 'include' })
+    const reply = await fetch(`${API_BASE}/api/indicator-render/${encodeURIComponent(item.code)}/${props.symbol.code}/?${params}`, { credentials: 'include' })
     const payload = await reply.json()
     if (reply.ok) return { item, drawing: payload.drawing, epoch: payload.epoch || '', revision: Number(payload.revision || revision) }
     renderErrors.value.push(`${item.name}：${payload.error || '指标计算失败'}`)
@@ -244,7 +245,7 @@ function acceptFormulaResponseEpoch(responseEpoch, requestedEpoch) {
 async function fetchKlinePage(before = null) {
   const query = new URLSearchParams({ period: props.period, count: '1000' })
   if (before) query.set('before', String(before))
-  const reply = await fetch(`http://127.0.0.1:8003/api/kline/${props.symbol.code}/?${query}`, { credentials: 'include' })
+  const reply = await fetch(`${API_BASE}/api/kline/${props.symbol.code}/?${query}`, { credentials: 'include' })
   const payload = await reply.json()
   if (!reply.ok) throw new Error(payload.error || '行情服务不可用')
   return payload
@@ -542,7 +543,7 @@ async function reconcileHistoryTail(streamGenerationAtStart = streamGeneration) 
   let current = true
   try {
     const query = new URLSearchParams({ period: props.period, count: '100' })
-    const reply = await fetch(`http://127.0.0.1:8003/api/kline/${encodeURIComponent(props.symbol.code)}/?${query}`, { credentials: 'include' })
+  const reply = await fetch(`${API_BASE}/api/kline/${encodeURIComponent(props.symbol.code)}/?${query}`, { credentials: 'include' })
     const payload = await reply.json()
     if (!reply.ok) throw new Error(payload.error || '行情历史不可用')
     if (version !== drawVersion || key !== chartKey() || streamGenerationAtStart !== streamGeneration) {
@@ -626,7 +627,7 @@ function connectRealtime({ reconcileHistory = false } = {}) {
   if (reconcileHistory) markHistoryReconcileNeeded()
   realtimeDataStatus.value = ''
   setRealtimeStatus('connecting')
-  const url = `http://127.0.0.1:8003/api/realtime/market-stream/${encodeURIComponent(props.symbol.code)}/?period=${encodeURIComponent(props.period)}`
+  const url = `${API_BASE}/api/realtime/market-stream/${encodeURIComponent(props.symbol.code)}/?period=${encodeURIComponent(props.period)}`
   const source = new EventSource(url, { withCredentials: true })
   eventSource = source
   const handle = event => {
