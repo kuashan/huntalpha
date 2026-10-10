@@ -57,17 +57,36 @@ staging 部署准备，并验证生产配置、统一公开行情、K 线、实�
 
 ## ARM64 隔离 staging 验收
 
-以下证据已在 Oracle aarch64 真机、独立镜像和全新 staging SQLite 卷上完成：
+以下证据已在 Oracle aarch64 真机、独立镜像和独立 staging SQLite 卷上完成：
 
-- 镜像 `siftalpha-task009:c8df985` 构建成功，包含 ARM64 Python 依赖、Vue
-  构建和 Django `collectstatic`。
+- 镜像 `siftalpha-task009:node-runtime-20261010` 构建成功，包含 ARM64
+  Python 依赖、Vue 构建、Django `collectstatic` 和公式运行所需的 Node.js
+  18.20.4；运行时保持单 Gunicorn worker。
 - 容器仅绑定服务器 loopback 临时端口，`/healthz/` 和首页均返回 HTTP 200，
   未登录会话返回 HTTP 401，容器状态为 `running/healthy`。
 - 使用临时 staging 账户和真实公开行情，`SZ.002315` 日线返回 3636 根 K
-  线；缠论返回 221 条线、20 个标记和 7 个绘图项；实时 SSE 握手返回 HTTP
-  200。
+  线；缠论返回 221 条线、20 个标记和 439 个绘图点；实时 SSE 握手返回
+  HTTP 200。
 - 容器内 `python manage.py check_python_indicators` 返回 `CHANLUN: ok`，
   `migrate --check` 没有待执行迁移。
+
+## 已授权的 staging 数据恢复
+
+本次仅对 Task 009 staging 数据卷执行了选择性、幂等恢复；Windows 本地正式
+数据库以只读方式使用，没有被修改，也没有把数据库或源码加入 Git：
+
+- Formula：4 条；仅在服务端保留 source，未向浏览器、日志或仓库输出。
+- MarketSymbol：CN 5,347、HK 3,777、US 13,046；原有 Crypto 2 条保留。
+- `siftalpha_admin` 自选：4 条；staging 原有用户全部保留。
+- 搜索、报价、日线 K 线、4 条私有指标绘图、缠论和实时 SSE 均已通过
+  staging 内部验证。
+- 恢复前后均有仓库外 SQLite 备份，最终 staging 备份的
+  `integrity_check` 为 `ok`；备份路径和 SHA-256 保留在本次交付报告中，
+  不进入 Git。
+
+此前真实失败原因是 staging 运行时没有安装 `node`，导致通达信公式子进程
+无法启动；本次只在运行镜像中补充 Node.js，并增加部署契约测试，没有修改
+公式引擎或私有公式内容。
 
 ## 未完成的公开 staging 验收
 
@@ -81,10 +100,11 @@ SiftAlpha staging 证据。
 
 ## 数据与回滚边界
 
-- 未执行本地正式数据库迁移、导入、清理或修改；未读取、导出或提交 Formula
-  source、Session、密钥或用户数据。
-- 本任务的 staging 迁移（如执行）只能针对新建的远程 staging SQLite 卷，
-  不得使用正式本地数据库或既有生产卷。
+- 未执行本地正式数据库迁移、导入、清理或修改；本次仅按用户批准对独立
+  staging SQLite 卷做了选择性恢复。未读取、导出或提交 Formula source、
+  Session、密钥或用户数据。
+- staging 恢复使用目标用户的账号映射和唯一约束，不复制旧 `user_id`，不覆盖
+  staging 账号，不迁移 CalibrationDataset。
 - 正式数据库、备份、日志、私有指标源码和凭据不得进入 Git。
 - 不得改动现有 Coolify 项目、反向代理、Cloudflare Tunnel、WireGuard、
   Xray、交易服务或生产 Agent。

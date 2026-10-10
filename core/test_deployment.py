@@ -47,3 +47,8 @@ class DeploymentContractTests(SimpleTestCase):
         self.assertIn("gunicorn", dockerfile)
         self.assertIn("healthcheck.py", dockerfile)
         self.assertIn("/healthz/", healthcheck)
+
+    def test_formula_runtime_includes_node(self):
+        dockerfile = (self.base_dir / "Dockerfile").read_text(encoding="utf-8") if (self.base_dir / "Dockerfile").exists() else ""
+        self.assertIn("nodejs", dockerfile)
+        self.assertIn("RUN node --version", dockerfile)

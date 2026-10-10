@@ -19,7 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libjpeg62-turbo-dev zlib1g-dev ca-certificates \
+    && apt-get install -y --no-install-recommends build-essential libjpeg62-turbo-dev zlib1g-dev ca-certificates nodejs \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
@@ -29,6 +29,7 @@ RUN DJANGO_SECRET_KEY=build-only-secret \
     DJANGO_DEBUG=0 \
     HUNTALPHA_ALLOWED_HOSTS=127.0.0.1,localhost \
     python manage.py collectstatic --noinput
+RUN node --version
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python", "docker/healthcheck.py"]
