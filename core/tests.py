@@ -835,7 +835,7 @@ class RealMarketDataApiTests(TestCase):
             'amount': 10_000,
         }]
         with patch('core.views.history_bars', return_value=(bars, None, None)), patch(
-            'core.views.subprocess.run', side_effect=FileNotFoundError
+            'core.python_indicators.subprocess.run', side_effect=FileNotFoundError
         ):
             response = self.client.get('/api/indicator-render/CHANLUN/SH.600519/?period=日线&count=100')
         self.assertEqual(response.status_code, 503)
@@ -855,12 +855,33 @@ class RealMarketDataApiTests(TestCase):
         }]
         failure = subprocess.CalledProcessError(1, ['python', '-c', 'probe'])
         with patch('core.views.history_bars', return_value=(bars, None, None)), patch(
-            'core.views.subprocess.run', side_effect=failure
+            'core.python_indicators.subprocess.run', side_effect=failure
         ):
             response = self.client.get('/api/indicator-render/CHANLUN/SH.600519/?period=日线&count=100')
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()['code'], 'chanlun_runtime_unavailable')
         self.assertNotIn('path', response.json())
+
+    def test_chanlun_uses_extended_calculation_window_and_market_timezone(self):
+        self.client.force_login(self.make_user())
+        bars = [{
+            'time': 1_704_159_000,
+            'open': 10,
+            'high': 11,
+            'low': 9,
+            'close': 10,
+            'volume': 1_000,
+            'amount': 10_000,
+        }]
+        result = {'lines': [], 'sticks': [], 'markers': [], 'fixedTexts': [], 'engine': 'chan.py'}
+        with patch('core.views.history_bars', return_value=(bars, None, None)) as history, \
+             patch('core.views.run_python_indicator', return_value=result) as runner:
+            formula_run_registry.clear()
+            response = self.client.get('/api/indicator-render/CHANLUN/SZ.002315/?period=日线&count=100')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(history.call_args.kwargs['calculation_limit'], 5000)
+        self.assertEqual(runner.call_args.kwargs['market_timezone'], 'Asia/Shanghai')
+        self.assertEqual(response.json()['engine'], 'chan.py')
 
     def test_chanlun_ohlc_normalization_keeps_close_inside_engine_envelope(self):
         from .chan_runner import normalized_ohlc
@@ -1353,7 +1374,7 @@ class SiftAlphaBrandHeaderContractTests(SimpleTestCase):
         task_lines = worklog_source.splitlines()
         task_005_1_3 = next(index for index, line in enumerate(task_lines) if line.startswith('### Task 005.1.3'))
         task_005_1_4 = next(index for index, line in enumerate(task_lines) if line.startswith('### Task 005.1.4'))
-        self.assertIn('状态：`IN_PROGRESS`', '\n'.join(task_lines[task_005_1_3:task_005_1_4]))
+        self.assertIn('状态：`ACCEPTED`', '\n'.join(task_lines[task_005_1_3:task_005_1_4]))
         self.assertIn('状态：`IN_PROGRESS`', '\n'.join(task_lines[task_005_1_4:]))
         self.assertIn('Provider-neutral realtime architecture', '\n'.join(task_lines[task_005_1_3:task_005_1_4]))
 

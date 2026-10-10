@@ -1,12 +1,37 @@
 """Server-only adapter for the vendored chan.py structural engine (MIT)."""
 import json
 import math
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def apply_child_resource_limits():
+    """Apply limits from the child environment, never from a parent preexec hook."""
+    if os.name == "nt":
+        return
+    try:
+        import resource
+        cpu_seconds = max(1, int(os.environ.get("HUNTALPHA_INDICATOR_CPU_LIMIT_SECONDS", "0")))
+        memory_bytes = max(0, int(os.environ.get("HUNTALPHA_INDICATOR_MEMORY_LIMIT_BYTES", "0")))
+        if cpu_seconds:
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
+        if memory_bytes and hasattr(resource, "RLIMIT_AS"):
+            resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+    except (ImportError, OSError, ValueError):
+        # Timeout and bounded parent-side output validation remain active if
+        # the host does not expose POSIX resource limits.
+        return
+
+
+if __name__ == "__main__":
+    apply_child_resource_limits()
+
 sys.path.insert(0, str(ROOT / "vendor" / "chan.py-main"))
 
 from Chan import CChan  # noqa: E402
@@ -56,14 +81,29 @@ def normalized_ohlc(bar):
     return open_price, max(high_price, open_price, close_price), min(low_price, open_price, close_price), close_price
 
 
-def run(raw_bars, period="日线"):
+def epoch_to_chan_time(timestamp, timezone_name="UTC"):
+    """Build a deterministic Chan.py time value from a provider epoch.
+
+    The calendar fields use the instrument's exchange timezone, never the
+    host's local timezone.  Chan.py stores a timestamp on ``CTime`` using a
+    naive datetime, so assign the original epoch after constructing the local
+    market fields.  The vendored algorithm remains unchanged; only the
+    adapter's input normalization is deterministic across Windows and Linux.
+    """
+    epoch = int(timestamp)
+    date = datetime.fromtimestamp(epoch, tz=ZoneInfo(str(timezone_name or "UTC")))
+    chan_time = CTime(date.year, date.month, date.day, date.hour, date.minute, auto=False)
+    chan_time.ts = epoch
+    return chan_time
+
+
+def run(raw_bars, period="日线", market_timezone="UTC"):
     kl_type = PERIOD_TYPES.get(period, KL_TYPE.K_DAY)
     units = []
     for bar in raw_bars:
         open_price, high_price, low_price, close_price = normalized_ohlc(bar)
-        date = datetime.fromtimestamp(int(bar["time"]))
         units.append(CKLine_Unit({
-            DATA_FIELD.FIELD_TIME: CTime(date.year, date.month, date.day, date.hour, date.minute),
+            DATA_FIELD.FIELD_TIME: epoch_to_chan_time(bar["time"], market_timezone),
             DATA_FIELD.FIELD_OPEN: open_price,
             DATA_FIELD.FIELD_HIGH: high_price,
             DATA_FIELD.FIELD_LOW: low_price,
@@ -104,7 +144,7 @@ def run(raw_bars, period="日线"):
 if __name__ == "__main__":
     request = json.load(sys.stdin)
     if isinstance(request, dict):
-        result = run(request["bars"], request.get("period", "日线"))
+        result = run(request["bars"], request.get("period", "日线"), request.get("market_timezone", "UTC"))
     else:
         result = run(request)
     print(json.dumps(result, ensure_ascii=False))
