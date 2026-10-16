@@ -37,11 +37,11 @@
 
 ### Task 013 — SiftAlpha 正式版 V1.0.0 极简底部标识（优先于 Task 011）
 
-状态：`IN_PROGRESS / PR #36 OPEN / BUILD_PENDING`；规格：[`docs/tasks/013-website-version-and-release-records.md`](tasks/013-website-version-and-release-records.md)。
+状态：`IMPLEMENTED / REVIEW_PENDING / NOT_MERGED / NOT_DEPLOYED`；规格：[`docs/tasks/013-website-version-and-release-records.md`](tasks/013-website-version-and-release-records.md)。
 
 **2026-10-16 用户最终更正并批准**：从当前站点直接以正式产品版本 **SiftAlpha.com • V1.0.0** 持续完善，不在网页显示 DEV/staging/测试版。主交易页和个人中心底部使用同一小型静态版本文字；**不可以点击版本号，不要网页更新记录、弹窗、发布历史页或发布管理系统**。版本值单一维护，未来升级须再获用户确认。当前 Access、环境保护和真实构建/备份事实保持不变，不能用版本号替代工程发布/恢复核验。
 
-**2026-10-16 代码进展：** 已创建 [PR #36](https://github.com/kuashan/huntalpha/pull/36)，以已验收 PR #34 分支为基线，仅涉及两页面、一份共用版本组件及静态测试。远端源文件静态断言 9/9 PASS；真实 `npm run build`、Node 测试、网页展示及合并/部署均未完成。必须先检查再验收，禁止把代码提交当成线上已经更新。
+**2026-10-16 代码与构建进展：** 已创建 [PR #36](https://github.com/kuashan/huntalpha/pull/36)，以已验收 PR #34 分支为基线，仅涉及两页面、一份共用版本组件及静态测试。静态断言 9/9 PASS；Oracle **隔离临时目录**核对 PR #36 前端源文件 33/33、依赖和 Vite 配置，`npm ci`、`npm run build`、专用 Node/指标/实时/图表测试均 PASS；真实 PR #34→PR #36 四文件的 `git diff --check` PASS。PR #36 已有实际测试评论作为证据。**尚未通过桌面/手机线上浏览器验收，未部署、未合并，也没有该 SHA 的 GitHub Actions CI 记录**。不得把代码实现等同正式上线。
 
 **用户批准规则（全项目）**：任何助手或 Codex 主动提出的新功能、额外优化、界面入口、扩大范围等，必须先与用户讨论、取得明确确认，然后才能开发；不得自行实现。具体边界同步见 `AGENTS.md` 第 6.1 节。
 
