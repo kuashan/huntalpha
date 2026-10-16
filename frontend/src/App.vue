@@ -7,6 +7,7 @@ import AiAnalysis from './components/AiAnalysis.vue'
 import HuntAlphaLogo from './components/HuntAlphaLogo.vue'
 import AccountPopover from './components/AccountPopover.vue'
 import PersonalCenter from './components/PersonalCenter.vue'
+import SiteVersionFooter from './components/SiteVersionFooter.vue'
 import { commonIndicators, markets } from './data/marketData'
 import { languages, locale, setLocale, t } from './i18n'
 const API_BASE = 'http://127.0.0.1:8003'
@@ -291,6 +292,7 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); stopMarketIndexRefresh
         <div class="labels"><span>{{ t('main') }}{{ mainInstalled.map(item => item.name).join(' · ') || t('candle') }}</span></div><MarketChart v-if="selected" :symbol="selected" :period="period" :installed-indicators="installedIndicators" :market-color-tokens="marketColorTokens" /><div v-else class="catalog-empty">{{ catalogStatusText }}</div><footer>{{ t('disclaimer') }}</footer>
       </section></div>
     <IndicatorManager ref="manager" :main="mainInstalled" :sub="subInstalled" :visitor="visitor" @add="addIndicator" @remove="removeIndicator" />
+    <SiteVersionFooter />
   </main>
 </template>
 
