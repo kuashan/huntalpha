@@ -35,11 +35,13 @@
 
 已批准：Django Admin「通达信公式编辑器」改为「公式管理器」，含「通达信公式」「固定公式」。4 条私有 Formula 及其运行机制不变；固定 Python 指标在代码中注册、服务器执行，后台只读元数据并能启停；保留现有 CHANLUN 与 Chan.py，FREE/PRO 都可使用；不提供网页 Python 源码编辑功能。
 
-### Task 013 — 网站版本与发布溯源
+### Task 013 — SiftAlpha 正式版 V1.0.0 极简底部标识（优先于 Task 011）
 
 状态：`READY_FOR_CODEX`；规格：[`docs/tasks/013-website-version-and-release-records.md`](tasks/013-website-version-and-release-records.md)。
 
-已批准：网站底部统一轻量版本显示，主交易页及个人中心一致，点击查看真实更新记录；SemVer x.y.z；区分 DEV/staging 与正式版；正式记录需含发布日、更新内容、commit、tag、制品标识、数据库备份和回滚兼容性；`V1.0.0` 仅示例，不能伪造已经正式发布。
+**2026-10-16 用户最终更正并批准**：从当前站点直接以正式产品版本 **SiftAlpha.com • V1.0.0** 持续完善，不在网页显示 DEV/staging/测试版。主交易页和个人中心底部使用同一小型静态版本文字；**不可以点击版本号，不要网页更新记录、弹窗、发布历史页或发布管理系统**。版本值单一维护，未来升级须再获用户确认。当前 Access、环境保护和真实构建/备份事实保持不变，不能用版本号替代工程发布/恢复核验。
+
+**用户批准规则（全项目）**：任何助手或 Codex 主动提出的新功能、额外优化、界面入口、扩大范围等，必须先与用户讨论、取得明确确认，然后才能开发；不得自行实现。具体边界同步见 `AGENTS.md` 第 6.1 节。
 
 ### 相关未合并 PR
 
@@ -239,11 +241,11 @@ python manage.py backup_local_db
 
 ## 暂缓事项
 
-### Oracle Cloud / 正式服务器部署
+### Oracle 站点的正式版本定位与工程安全核验
 
-状态：`DEFERRED`
+状态：`SITE_RUNNING / OPERATIONS_REVIEW_PENDING`
 
-当前优先继续完善产品。正式公网部署前仍需解决 production security/config blockers，包括 DEBUG/ALLOWED_HOSTS、数据库、静态文件、CSRF/安全 Cookie/HTTPS/HSTS、邮件、内部 API 地址和真实权益/计费配置等。
+现有 `siftalpha.com` 通过 Cloudflare Access 访问 Oracle Task 009 容器，PR #34 已经在现有站点运行并完成 8/8 浏览器验收。**用户决定把网站作为 V1.0.0 正式产品持续完善**，不再使用网页测试版标签；但这不代表已经移除 Access 或所有正式运营安全条件都经过验证。任何公网开放、配置变更、发布/回滚操作都应独立征得明确批准。此前发现 ARM64 Longbridge 固定版本安装失败、npm 高危依赖告警，仍需另行审查，不得擅自扩大 Task 013。
 
 ---
 
