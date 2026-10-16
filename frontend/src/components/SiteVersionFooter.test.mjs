@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-const root = new URL('../', import.meta.url)
 const footer = readFileSync(new URL('./SiteVersionFooter.vue', import.meta.url), 'utf8')
 const trading = readFileSync(new URL('../App.vue', import.meta.url), 'utf8')
 const account = readFileSync(new URL('./PersonalCenter.vue', import.meta.url), 'utf8')
