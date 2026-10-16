@@ -1,6 +1,6 @@
 # Task 013 — SiftAlpha 正式版本号 V1.0.0（最小范围）
 
-Status: `READY_FOR_CODEX`
+Status: `IN_PROGRESS`（代码 PR #36 已提交；真实构建与网页验收待完成）
 
 ## 用户最终确认（2026-10-16，覆盖此前版本管理草案）
 
@@ -47,16 +47,27 @@ Status: `READY_FOR_CODEX`
 
 阅读 `AGENTS.md` 与真实 Git HEAD；本任务已获批准，仅在独立分支实现，提交/Push、报告新 PR。**合并、部署、开放 Cloudflare Access 或进行额外功能开发仍必须逐项获得用户确认**。若发现与实际生产安全、构建、依赖或数据迁移有关的阻塞，明确报告，不得自行扩大范围。
 
+## Implementation Progress — 2026-10-16
+
+- Code PR: [#36](https://github.com/kuashan/huntalpha/pull/36)（Draft / OPEN，基于已通过浏览器验收的 PR #34 分支；不涉及 PR #35 文档分支的代码合并）
+- Branch: `feat/013-official-v1-footer-20261016`
+- HEAD: `2dcef7b7d43877f32b9bf88ff6bedf1a8cfe5a60`
+- 变更范围：`App.vue`、`PersonalCenter.vue`、新增共用 `SiteVersionFooter.vue`、静态回归测试；不涉及后端、数据库或服务器部署。
+- 检查：连接器读取真实源文件，9 项静态契约断言 PASS；与 PR #34 对比仅 4 个文件，diff 新增行无尾随空白。
+- **尚未通过的要求**：在真实隔离 checkout 运行 `node src/components/SiteVersionFooter.test.mjs`、`npm run build`、`git diff --check`；桌面/手机实际布局及上线后显示仍待独立授权的部署验收。
+- 无 GitHub Actions/Checks 记录。不得宣布 CI PASS、代码已被合并或网站已更新。
+- 完成真实构建验证并提交报告后，再根据仓库任务流程评估 `IMPLEMENTED`；未获用户批准不得合并或部署。
+
 ## Codex Completion Report
 
-- Branch:
-- Commit:
-- Push:
-- Summary:
-- Files changed:
-- Checks run:
-- Unresolved issues / scope deviations:
-- PR:
+- Branch: `feat/013-official-v1-footer-20261016`
+- Commit: `2dcef7b7d43877f32b9bf88ff6bedf1a8cfe5a60`
+- Push: 已通过 GitHub 提交
+- Summary: 共用、不可点击的正式 `V1.0.0` 底部版本文字
+- Files changed: 4（仅前端）
+- Checks run: 9 项源码静态契约通过；真实 build/test 待执行
+- Unresolved issues / scope deviations: 隔离构建、浏览器验收尚待完成；未扩大产品范围
+- PR: [#36](https://github.com/kuashan/huntalpha/pull/36)
 
 ## Review
 
