@@ -15,6 +15,39 @@
 
 ## 当前进行中
 
+## 2026-10-16 — 已批准的新功能与 PR 状态（未合并）
+
+### Task 010 — 全市场自选 / 统一搜索 / 紧凑市场卡片
+
+状态：`IMPLEMENTED / PENDING_REVIEW / NOT_MERGED`（PR [#34](https://github.com/kuashan/huntalpha/pull/34)，HEAD `97d4c57dc71a368b1a463b09b9b4acb4a1a868f9`，查询于 2026-10-16）
+
+已有 PR 实现：四市场自选默认全显、跨市场真实证券目录搜索与代码精确匹配优先、证券名称/代码/市场标识、选中证券与顶部市场高亮同步、搜索/市场切换不错误清空图表、四市场卡片约 70px。Codex 报告 217 项 `core` tests 和前端构建通过；真实浏览器验收、代码审查及合并仍待完成。**不要重复开发，不得将未合并工作写成正式完成**。
+
+### Task 011 — FREE / PRO 真实会员与冻结自选
+
+状态：`READY_FOR_CODEX`；规格：[`docs/tasks/011-free-pro-membership-watchlist-freeze.md`](tasks/011-free-pro-membership-watchlist-freeze.md)。
+
+已批准：新注册默认 FREE；后台仅真正的 superuser 可改 FREE/PRO；后端账户权益为 FREE 10 / PRO 20；PRO 降级 FREE 时按原 `created_at,id` 顺序前 10 活动、其余冻结不删除；删一个活动自动解冻最早冻结；升级后按原顺序恢复。前台徽章和个人中心以服务器等级为准；不引入支付及其他 PRO 权益。需兼容 PR #34 的统一自选。
+
+### Task 012 — 公式管理器 / 固定公式
+
+状态：`READY_FOR_CODEX`；规格：[`docs/tasks/012-formula-manager-fixed-indicators.md`](tasks/012-formula-manager-fixed-indicators.md)。
+
+已批准：Django Admin「通达信公式编辑器」改为「公式管理器」，含「通达信公式」「固定公式」。4 条私有 Formula 及其运行机制不变；固定 Python 指标在代码中注册、服务器执行，后台只读元数据并能启停；保留现有 CHANLUN 与 Chan.py，FREE/PRO 都可使用；不提供网页 Python 源码编辑功能。
+
+### Task 013 — 网站版本与发布溯源
+
+状态：`READY_FOR_CODEX`；规格：[`docs/tasks/013-website-version-and-release-records.md`](tasks/013-website-version-and-release-records.md)。
+
+已批准：网站底部统一轻量版本显示，主交易页及个人中心一致，点击查看真实更新记录；SemVer x.y.z；区分 DEV/staging 与正式版；正式记录需含发布日、更新内容、commit、tag、制品标识、数据库备份和回滚兼容性；`V1.0.0` 仅示例，不能伪造已经正式发布。
+
+### 相关未合并 PR
+
+PR [#33](https://github.com/kuashan/huntalpha/pull/33) 为 Oracle staging 部署，PR [#26](https://github.com/kuashan/huntalpha/pull/26) 为 Coinbase 历史开发；继续保持隔离，不能因上述任务自动合并、覆盖或重新开发。新任务从真实远端 HEAD 开工并评估 PR #34 的集成点。
+
+---
+
+
 ### Task 006 — SLTD 对齐的统一行情基础设施
 
 状态：`IMPLEMENTED_AND_VERIFIED`（分支 `codex/006-unified-marketdata-siftalpha`，待审查；未推送、未合并）
