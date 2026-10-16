@@ -12,7 +12,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError, OperationalError, transaction
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.core.exceptions import ValidationError
 from django.http import JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
@@ -1022,6 +1022,51 @@ def symbols(request, market):
     start = (page - 1) * limit
     items = list(queryset[start:start + limit])
     return _catalog_response(request, market, items, query=query, page=page, limit=limit, total=total, mode="search")
+
+
+@require_GET
+@api_terminal_required
+def symbol_search(request):
+    """Search the active, real catalog across every supported market."""
+    query = request.GET.get("q", "").strip()
+    if not query:
+        return json({"error": "请输入证券名称或代码"}, 400)
+    if len(query) > 80:
+        return json({"error": "搜索内容过长"}, 400)
+    limit, page, error = _parse_catalog_paging(request)
+    if error:
+        return json({"error": error}, 400)
+
+    stock_markets = tuple(market for market in SUPPORTED_MARKETS if market != "crypto")
+    valid_types = Q(market__in=stock_markets, security_type="STOCK") | Q(
+        market="crypto", security_type="CRYPTO_SPOT"
+    )
+    queryset = MarketSymbol.objects.filter(active=True).filter(valid_types).filter(
+        Q(code__icontains=query) | Q(name__icontains=query)
+    ).annotate(
+        exact_code_rank=Case(
+            When(code__iexact=query, then=Value(0)),
+            default=Value(1),
+            output_field=IntegerField(),
+        )
+    ).order_by("exact_code_rank", "name", "code")
+    total = queryset.count()
+    start = (page - 1) * limit
+    items = list(queryset[start:start + limit])
+    totals = _watchlist_totals(request)
+    watchlisted_codes = _watchlisted_codes(request, items)
+    return json({
+        "query": query,
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "mode": "search",
+        "market_scope": list(SUPPORTED_MARKETS),
+        "items": [_catalog_item_data(request, item, watchlisted_codes) for item in items],
+        "watchlist_total": totals["total"],
+        "watchlist_limit": totals["limit"],
+        "watchlist_remaining": totals["remaining"],
+    })
 
 
 @require_GET

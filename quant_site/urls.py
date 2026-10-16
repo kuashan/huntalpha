@@ -43,6 +43,7 @@ urlpatterns = [
     path('api/markets/', views.markets),
     path('api/market-index-snapshots/', views.market_index_snapshots),
     path('api/market-leaders/<str:market>/', views.market_leaders),
+    path('api/symbol-search/', views.symbol_search),
     path('api/symbols/<str:market>/', views.symbols),
     path('api/indicators/', views.indicators),
     path('api/indicator-render/<str:code>/<str:symbol>/', views.indicator_render),
