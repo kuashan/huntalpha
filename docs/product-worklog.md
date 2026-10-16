@@ -19,9 +19,9 @@
 
 ### Task 010 — 全市场自选 / 统一搜索 / 紧凑市场卡片
 
-状态：`IMPLEMENTED / PENDING_REVIEW / NOT_MERGED`（PR [#34](https://github.com/kuashan/huntalpha/pull/34)，HEAD `97d4c57dc71a368b1a463b09b9b4acb4a1a868f9`，查询于 2026-10-16）
+状态：`BROWSER_ACCEPTED / MERGE_PENDING / NOT_MERGED`（PR [#34](https://github.com/kuashan/huntalpha/pull/34)，HEAD `97d4c57dc71a368b1a463b09b9b4acb4a1a868f9`，查询于 2026-10-16）
 
-已有 PR 实现：四市场自选默认全显、跨市场真实证券目录搜索与代码精确匹配优先、证券名称/代码/市场标识、选中证券与顶部市场高亮同步、搜索/市场切换不错误清空图表、四市场卡片约 70px。Codex 报告 217 项 `core` tests 和前端构建通过；真实浏览器验收、代码审查及合并仍待完成。**不要重复开发，不得将未合并工作写成正式完成**。
+已有 PR 实现：四市场自选默认全显、跨市场真实证券目录搜索与代码精确匹配优先、证券名称/代码/市场标识、选中证券与顶部市场高亮同步、搜索/市场切换不错误清空图表、四市场卡片约 70px。Codex 报告 217 项 `core` tests 和前端构建通过；**2026-10-16 用户已完成 8/8 浏览器验收 PASS**：四市场全局自选、跨市场搜索、精确代码优先、证券/市场同步、切换不清空图表、桌面/手机紧凑布局、原有行情与指标无回归，以及自选新增→刷新仍保留→取消收藏→数量同步、K 线保留。验收记录见 [PR #34 评论](https://github.com/kuashan/huntalpha/pull/34)。远端此 SHA 没有 GitHub Actions/Checks 记录，不能宣称 CI 已通过；后续仍需明确合并授权，PR 尚未合并。**不要重复开发，不得将未合并工作写成正式完成**。
 
 ### Task 011 — FREE / PRO 真实会员与冻结自选
 
