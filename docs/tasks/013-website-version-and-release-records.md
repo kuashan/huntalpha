@@ -1,6 +1,6 @@
 # Task 013 — SiftAlpha 正式版本号 V1.0.0（最小范围）
 
-Status: `IN_PROGRESS`（代码 PR #36 已提交；真实构建与网页验收待完成）
+Status: `IMPLEMENTED`（PR #36 代码与隔离构建已验证；待用户网页验收/合并）
 
 ## 用户最终确认（2026-10-16，覆盖此前版本管理草案）
 
@@ -37,11 +37,11 @@ Status: `IN_PROGRESS`（代码 PR #36 已提交；真实构建与网页验收待
 
 - [ ] 主交易页面最底部显示 **SiftAlpha.com • V1.0.0**。
 - [ ] 个人中心最底部显示**相同**文本。
-- [ ] 版本号不可点击；不存在网页更新记录 UI。
-- [ ] 版本值唯一维护且后续可明确更新，不在多个位置散落版本字面量。
+- [x] 版本号不可点击；不存在网页更新记录 UI（源码与专用 Node 测试验证）。
+- [x] 版本值唯一维护且后续可明确更新，不在多个位置散落版本字面量（专用组件/测试验证）。
 - [ ] 桌面/手机不遮挡内容，保留现有行情、图表、账户与指标功能。
-- [ ] 没有引入额外功能、后端 API、数据迁移或未获批准的优化。
-- [ ] `npm run build`、相关自动测试、`git diff --check` 真实执行并报告；如后端未修改，不做无意义的后端重构。
+- [x] 没有引入额外功能、后端 API、数据迁移或未获批准的优化（Git diff 仅前端 4 个文件）。
+- [x] `npm run build`、版本号 Node 测试、indicators/realtime/chart 测试、与 PR #34 精确基线的 `git diff --check`：隔离执行 PASS；后端未修改。
 
 ## 执行纪律
 
@@ -54,9 +54,9 @@ Status: `IN_PROGRESS`（代码 PR #36 已提交；真实构建与网页验收待
 - HEAD: `2dcef7b7d43877f32b9bf88ff6bedf1a8cfe5a60`
 - 变更范围：`App.vue`、`PersonalCenter.vue`、新增共用 `SiteVersionFooter.vue`、静态回归测试；不涉及后端、数据库或服务器部署。
 - 检查：连接器读取真实源文件，9 项静态契约断言 PASS；与 PR #34 对比仅 4 个文件，diff 新增行无尾随空白。
-- **尚未通过的要求**：在真实隔离 checkout 运行 `node src/components/SiteVersionFooter.test.mjs`、`npm run build`、`git diff --check`；桌面/手机实际布局及上线后显示仍待独立授权的部署验收。
+- **2026-10-16 构建与测试已完成**：Oracle 独立临时副本对齐 PR #36 的 `frontend/src` 33/33 Git blob、`package.json`、`package-lock.json`、`vite.config.js`；`npm ci`、`npm run build`、专用 Node 测试、`test:indicators`、`test:realtime`、`test:chart` 全部 PASS；精确 PR #34→PR #36 四文件 `git diff --check` PASS。构建没有在已部署容器中运行；证据见 PR #36 评论。
 - 无 GitHub Actions/Checks 记录。不得宣布 CI PASS、代码已被合并或网站已更新。
-- 完成真实构建验证并提交报告后，再根据仓库任务流程评估 `IMPLEMENTED`；未获用户批准不得合并或部署。
+- 代码及真实构建已核验，状态为 `IMPLEMENTED / REVIEW_PENDING`。**桌面/手机真实浏览器显示及部署后验收尚未完成**；未获用户批准不得合并或部署。
 
 ## Codex Completion Report
 
@@ -65,8 +65,8 @@ Status: `IN_PROGRESS`（代码 PR #36 已提交；真实构建与网页验收待
 - Push: 已通过 GitHub 提交
 - Summary: 共用、不可点击的正式 `V1.0.0` 底部版本文字
 - Files changed: 4（仅前端）
-- Checks run: 9 项源码静态契约通过；真实 build/test 待执行
-- Unresolved issues / scope deviations: 隔离构建、浏览器验收尚待完成；未扩大产品范围
+- Checks run: 9 项源码静态契约 PASS；33/33 前端源码核对 PASS；`npm ci`/`npm run build`/专用 Node 测试/indicator/realtime/chart tests/`git diff --check` PASS（隔离环境）。
+- Unresolved issues / scope deviations: 真实浏览器桌面/手机显示尚待授权部署后验收；本 SHA 无 GitHub Actions CI；未扩大产品范围
 - PR: [#36](https://github.com/kuashan/huntalpha/pull/36)
 
 ## Review
