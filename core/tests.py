@@ -683,6 +683,57 @@ class SymbolCatalogApiTests(TestCase):
         code_search = self.client.get('/api/symbols/cn/?q=60006&limit=10')
         self.assertEqual([item['code'] for item in code_search.json()['items']], ['SH.60006'])
 
+    def test_unified_search_covers_all_markets_and_prioritizes_exact_code(self):
+        user = get_user_model().objects.get(username='catalog@example.com')
+        hk = MarketSymbol.objects.create(
+            code='HK.SH.60001', name='SH.60001 reference', market='hk', exchange='HK_MAINBOARD',
+            security_type='STOCK', provider='public-market', provider_symbol='HK.SH.60001',
+        )
+        us = MarketSymbol.objects.create(
+            code='US.TEST1', name='Alpha Systems', market='us', exchange='NASDAQ', security_type='STOCK',
+            provider='public-market', provider_symbol='US.TEST1',
+        )
+        crypto = MarketSymbol.objects.create(
+            code='CC.BTC-USD', name='Alpha Bitcoin', market='crypto', exchange='COINBASE',
+            security_type='CRYPTO_SPOT', provider='coinbase', provider_symbol='BTC-USD',
+        )
+        exact = MarketSymbol.objects.get(code='SH.60001')
+        exact.name = 'Exact Alpha'
+        exact.save(update_fields=['name'])
+        WatchlistEntry.objects.create(user=user, symbol=crypto)
+        WatchlistEntry.objects.create(user=user, symbol=hk)
+
+        response = self.client.get('/api/symbol-search/?q=sh.60001&limit=10&page=1')
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['mode'], 'search')
+        self.assertEqual(payload['total'], 2)
+        self.assertEqual(payload['items'][0]['code'], exact.code)
+        self.assertEqual(payload['market_scope'], ['cn', 'hk', 'us', 'crypto'])
+        self.assertEqual({item['market'] for item in payload['items']}, {'cn', 'hk'})
+        self.assertTrue(payload['items'][1]['watchlisted'])
+        self.assertNotIn('formula_source', payload['items'][0])
+
+        cross_market = self.client.get('/api/symbol-search/?q=Alpha&limit=10&page=1').json()
+        self.assertEqual(
+            {(item['code'], item['market']) for item in cross_market['items']},
+            {(exact.code, 'cn'), (us.code, 'us'), (crypto.code, 'crypto')},
+        )
+        self.assertTrue(next(item for item in cross_market['items'] if item['code'] == crypto.code)['watchlisted'])
+
+    def test_unified_search_requires_query_and_supports_pagination(self):
+        for index in range(3):
+            MarketSymbol.objects.create(
+                code=f'US.PAGE{index}', name=f'Unified paging {index}', market='us', exchange='NASDAQ',
+                security_type='STOCK', provider='public-market', provider_symbol=f'US.PAGE{index}',
+            )
+        missing_query = self.client.get('/api/symbol-search/')
+        self.assertEqual(missing_query.status_code, 400)
+        page = self.client.get('/api/symbol-search/?q=Unified%20paging&limit=2&page=2')
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.json()['total'], 3)
+        self.assertEqual([item['code'] for item in page.json()['items']], ['US.PAGE2'])
+
     def test_empty_search_returns_top_five_and_crypto_is_unavailable(self):
         response = self.client.get('/api/symbols/cn/')
         self.assertEqual(response.json()['mode'], 'leaders')
@@ -1228,7 +1279,8 @@ class MarketIndexSnapshotTests(SimpleTestCase):
         self.assertNotIn("/api/kline/", app_source)
         self.assertNotIn("/api/indicator-render/", app_source)
         self.assertNotIn("https://api.exchange.coinbase.com", app_source)
-        self.assertIn(".markets{grid-template-columns:repeat(4,minmax(0,1fr));min-height:100px}", app_source)
+        self.assertIn(".markets{grid-template-columns:repeat(4,minmax(0,1fr));min-height:70px}", app_source)
+        self.assertIn(".market-card{min-height:70px", app_source)
         self.assertIn("@media(max-width:800px){.markets{grid-template-columns:repeat(2,minmax(0,1fr))}", app_source)
         self.assertIn("index.updated_at ? `更新时间：${index.updated_at}` : status", app_source)
         self.assertIn("const providerLabel = provider =>", app_source)
@@ -1278,10 +1330,17 @@ class SiftAlphaBrandHeaderContractTests(SimpleTestCase):
     def test_branding_keeps_task_004_and_004_1_runtime_contracts(self):
         self.assertIn("visibleMarkets", self.app_source)
         self.assertIn("/api/market-index-snapshots/", self.app_source)
-        self.assertIn("const endpoint = search ? `symbols/${market.value.code}/` : 'watchlist/'", self.app_source)
+        self.assertIn("const endpoint = search ? 'symbol-search/' : 'watchlist/'", self.app_source)
+        self.assertIn("const params = new URLSearchParams(search ? { limit: '10', page: '1', q: search } : {})", self.app_source)
+        self.assertIn("function selectSymbol(item)", self.app_source)
+        self.assertIn("market.value = markets.find(candidate => candidate.code === item.market) || market.value", self.app_source)
+        self.assertIn("{{ marketName(item.market) }}", self.app_source)
+        self.assertIn('@click="selectSymbol(item)"', self.app_source)
+        self.assertIn("function switchMarket(item) { market.value = item }", self.app_source)
+        self.assertNotIn("watch(market,", self.app_source)
         self.assertIn("toggleWatchlist", self.app_source)
         self.assertIn("@click.stop=\"toggleWatchlist(item)\"", self.app_source)
-        self.assertIn("`${API_BASE}/api/${endpoint}?${params}`", self.app_source)
+        self.assertIn("`${API_BASE}/api/${endpoint}${params.size ? `?${params}` : ''}`", self.app_source)
 
     def test_account_tier_badge_is_embedded_and_supports_free_and_pro(self):
         self.assertIn("AccountPopover", self.app_source)
@@ -1455,6 +1514,22 @@ class WatchlistModelAndApiTests(TestCase):
         self.client.force_login(self.user_b)
         other = self.client.get("/api/watchlist/?market=us").json()
         self.assertEqual([item["code"] for item in other["items"]], [self.us_symbols[1].code])
+
+    def test_get_without_market_returns_all_four_market_entries(self):
+        crypto = MarketSymbol.objects.create(
+            code="CC.BTC-USD", name="Bitcoin", market="crypto", exchange="COINBASE",
+            security_type="CRYPTO_SPOT", provider="coinbase", provider_symbol="BTC-USD",
+        )
+        symbols = [self.cn_symbols[0], self.hk_symbols[0], self.us_symbols[0], crypto]
+        WatchlistEntry.objects.bulk_create([WatchlistEntry(user=self.user_a, symbol=symbol) for symbol in symbols])
+        self.client.force_login(self.user_a)
+
+        payload = self.client.get("/api/watchlist/").json()
+
+        self.assertEqual(payload["total"], 4)
+        self.assertEqual(payload["limit"], 10)
+        self.assertEqual({item["market"] for item in payload["items"]}, {"cn", "hk", "us", "crypto"})
+        self.assertEqual({item["code"] for item in payload["items"]}, {symbol.code for symbol in symbols})
 
     def test_post_requires_csrf_and_creates_only_real_active_stock(self):
         self.client.force_login(self.user_a)
