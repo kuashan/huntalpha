@@ -1,12 +1,8 @@
 """Task 011: persisted membership and reversible global watchlist freezing."""
 import json
-from datetime import timedelta
-from types import SimpleNamespace
-
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.test import Client, RequestFactory, TestCase
-from django.utils import timezone
 
 from .admin import AccountMembershipInline, MembershipUserAdmin
 from .models import AccountMembership, MarketSymbol, WatchlistEntry
@@ -136,6 +132,7 @@ class MembershipAndFrozenWatchlistTests(TestCase):
         self.assertEqual(user_admin.account_tier_display(self.member), "FREE")
         self.assertNotIn(AccountMembership, admin.site._registry)
         AccountMembership.objects.filter(user=self.member).update(tier="pro")
+        self.member.refresh_from_db()  # Clear any cached reverse OneToOne object.
         self.assertEqual(user_admin.account_tier_display(self.member), "PRO")
 
     def test_tier_does_not_change_user_staff_or_superuser_flags(self):
