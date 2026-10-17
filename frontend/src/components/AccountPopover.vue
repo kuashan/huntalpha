@@ -44,7 +44,7 @@ function clearTimers() {
 }
 
 function loadSummary() {
-  if (summaryLoaded.value || loading.value) return
+  if (loading.value) return
   loading.value = true
   summaryError.value = ''
   fetch(`${API_BASE}/api/account/summary/`, { credentials: 'include' })
