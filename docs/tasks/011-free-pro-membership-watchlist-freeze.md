@@ -72,3 +72,13 @@ Status: `IN_PROGRESS / VALIDATION_PENDING`（独立开发分支已经实现主�
 - 两项既有 Django W042 AutoField 警告来自未修改的 AccountProfile、MarketSymbol；Task011 新 AccountMembership 使用与当前项目一致的 AutoField，没有新增迁移差异。
 - **尚待**：精确代码/前端全量验证、完整 Django 套件、后台浏览器验收及正式数据库独立备份/迁移规划。不能因为上述隔离 PASS 而声明生产已更新。
 - **禁止合并、部署、迁移或修改 Cloudflare、其他容器**，待正式审核和用户单独批准。
+
+## Task 011 production API address blocker — 2026-10-17
+
+- 用户明确要求只使用正式线上网站，并批准将前端 API 地址修复作为 Task 011 必需的上线修复。
+- Codex 在精确 PR #38 旧提交 `66b8e6ed1299ce8363c0203eb227fd03fe0d2fcd` 上验证：Django core 225/225 PASS、migrations / check / production frontend build PASS；但发现编译后静态文件仍将请求发向访客计算机的 `http://127.0.0.1:8003`，因此**中止正式备份/迁移/部署**。生产仍运行 Task 013 PR36 镜像，没有动数据库。
+- 本次只调整前端 API 请求地址（不会改变业务 API、会员额度、指标权限或图表逻辑）：`frontend/src/apiBase.js` 在正式生产构建中固定使用**当前域名同源的** `/api/...`；本地 Vite 开发通过 `vite.config.js` 的 `/api` 代理访问本地 Django，可在本地开发时使用 `VITE_API_BASE_URL` 覆盖。包括登录、访客、会员摘要、个人中心、自选、行情、SSE、图表和指标在内的七个 Vue 组件都复用同一个 API_BASE。
+- Oracle **只读**探测现有网站本机访问 `/api/csrf/` 返回 200 JSON、未登录 `/api/auth/session/` 返回 401 JSON、`/api/indicators/` 返回 401 JSON，说明 Django 当前同源 /api 端点存在；这不是已认证浏览器验收。
+- 新增 `frontend/src/apiBase.test.mjs`：3/3 PASS，核对生产同源强制、开发覆盖和七个 Vue 组件禁止本机 URL。
+- 在旧 staging 只读副本加上当前 API 修复文件的**隔离混合源码**执行 `npm ci --ignore-scripts`、`npm run build` PASS；设置 `VITE_API_BASE_URL=http://127.0.0.1:8003` 后生产构建产物不包含该本机 URL：PASS。**这不等于精确 PR SHA 全源码构建、正式上线验收或 Django 全量回归**。
+- 后续 Codex 必须在 PR #38 **最终 HEAD** 重跑 Django 完整测试、迁移检查、前端精确构建和静态产物检查；通过后按用户已批准的正式站部署流程先创建并核验数据库备份与回滚计划，再迁移、部署。任何失败停止。未经本次批准不得扩展到 Task 012、Cloudflare 配置或其他服务。
