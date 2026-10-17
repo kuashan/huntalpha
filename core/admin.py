@@ -41,7 +41,7 @@ class AccountMembershipInline(admin.StackedInline):
 
     model = AccountMembership
     fields = ("tier",)
-    extra = 0
+    extra = 1
     max_num = 1
     can_delete = False
 
