@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import viteConfig from '../vite.config.js'
 
 const load = relative => readFileSync(new URL(relative, import.meta.url), 'utf8')
 
@@ -38,6 +39,15 @@ test('all seven website API consumers use shared base, never hardcoded loopback'
     assert.match(source, /\$\{API_BASE\}\/api\//, file)
     assert.doesNotMatch(source, /https?:\/\/(?:127\.0\.0\.1|localhost):8003/, file)
   }
+})
+
+test('production assets use Django static URL while development assets stay at root', () => {
+  const resolve = command => typeof viteConfig === 'function'
+    ? viteConfig({ command, mode: command === 'build' ? 'production' : 'development' })
+    : viteConfig
+
+  assert.equal(resolve('build').base, '/static/')
+  assert.equal(resolve('serve').base, '/')
 })
 
 test('Vite local server proxies relative /api requests, not production JS', () => {
