@@ -93,3 +93,17 @@ class ProductionRuntimeContractTests(SimpleTestCase):
         self.assertIn("nodejs", dockerfile)
         self.assertNotIn("migrate", dockerfile.lower())
         self.assertIn("/healthz/", healthcheck)
+
+
+class ReleaseWorkflowContractTests(SimpleTestCase):
+    def test_release_workflow_verifier_accepts_only_the_safe_arm64_pipeline(self):
+        """A changed workflow must retain its no-deploy release-build boundary."""
+        base_dir = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            [sys.executable, "scripts/verify_web_release_workflow.py"],
+            cwd=base_dir,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
