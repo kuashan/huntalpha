@@ -75,3 +75,55 @@ jobs:
           fetch-depth: 0
       - name: Check whitespace in Task 012 changes
         run: git diff --check ${{ github.event.pull_request.base.sha || 'ebd23f4248219fb70fe457ac800d5603fbf47ef1' }} HEAD
+
+
+  arm64-image-smoke:
+    name: ARM64 image build and isolated database smoke
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Confirm genuine ARM64 runner
+        run: test "$(uname -m)" = aarch64
+      - name: Build candidate image without publishing
+        run: docker build --tag siftalpha-task012-candidate:ci .
+      - name: Migrate an isolated disposable database
+        run: |
+          docker volume create task012-ci-data
+          docker run --rm \
+            -e DJANGO_SECRET_KEY=isolated-ci-only-not-production \
+            -e DJANGO_DEBUG=0 \
+            -e HUNTALPHA_ALLOWED_HOSTS=127.0.0.1,localhost \
+            -e HUNTALPHA_DATABASE_PATH=/data/ci.sqlite3 \
+            -v task012-ci-data:/data \
+            --entrypoint python \
+            siftalpha-task012-candidate:ci manage.py migrate --noinput
+      - name: Start candidate and probe health
+        run: |
+          docker run --detach --name task012-ci-web \
+            -p 127.0.0.1:18092:8000 \
+            -e DJANGO_SECRET_KEY=isolated-ci-only-not-production \
+            -e DJANGO_DEBUG=0 \
+            -e HUNTALPHA_ALLOWED_HOSTS=127.0.0.1,localhost \
+            -e HUNTALPHA_DATABASE_PATH=/data/ci.sqlite3 \
+            -v task012-ci-data:/data \
+            siftalpha-task012-candidate:ci
+          ok=0
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18092/healthz/ | grep -q '"status": "ok"'; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ok" -eq 1
+          curl --fail --silent --output /dev/null http://127.0.0.1:18092/
+          docker exec task012-ci-web python manage.py check_python_indicators
+      - name: Remove only isolated CI assets
+        if: always()
+        run: |
+          docker rm --force task012-ci-web 2>/dev/null || true
+          docker volume rm --force task012-ci-data 2>/dev/null || true
