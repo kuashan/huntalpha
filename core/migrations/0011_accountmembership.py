@@ -29,7 +29,7 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="AccountMembership",
             fields=[
-                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("id", models.AutoField(primary_key=True, serialize=False)),
                 ("tier", models.CharField(choices=[("free", "FREE"), ("pro", "PRO")], default="free", max_length=4, verbose_name="会员等级")),
                 ("user", models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name="account_membership", to=settings.AUTH_USER_MODEL, verbose_name="用户")),
             ],
