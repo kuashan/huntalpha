@@ -47,7 +47,7 @@ from .realtime import (
 from .realtime.formula_scheduler import FormulaRunRegistry, calculation_input_fingerprint
 from .realtime.provider import REALTIME_PERIOD_SUBTYPES
 from .symbol_catalog import COINBASE_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
-from .watchlist import account_tier_payload, watchlist_limit_for_user
+from .watchlist import account_tier_payload, active_watchlist_entry_ids, watchlist_limit_for_user
 from .python_indicators import (
     PythonIndicatorExecutionError,
     PythonIndicatorRuntimeUnavailable,
@@ -193,8 +193,8 @@ def auth_session(request):
 @api_account_required
 def account_summary(request):
     tier = account_tier_payload(request.user)
-    total = WatchlistEntry.objects.filter(user=request.user).count()
     limit = watchlist_limit_for_user(request.user)
+    total = min(WatchlistEntry.objects.filter(user=request.user).count(), limit)
     profile = AccountProfile.objects.filter(user=request.user).first()
     return json({
         "user": {
@@ -393,7 +393,11 @@ def _watchlist_get(request):
             "error": "登录或注册后使用自选功能",
             **totals,
         })
-    entries = WatchlistEntry.objects.select_related("symbol").filter(user=request.user)
+    entries = (
+        WatchlistEntry.objects.select_related("symbol")
+        .filter(user=request.user, pk__in=active_watchlist_entry_ids(request.user))
+        .order_by("created_at", "id")
+    )
     if market:
         entries = entries.filter(symbol__market=market)
     return json({
@@ -426,10 +430,12 @@ def _watchlist_create(request):
                 user=locked_user, symbol=symbol
             ).first()
             if entry is not None:
+                totals = _watchlist_totals_for_user(locked_user)
+                # A frozen duplicate must NOT appear active or change ordering.
+                if not WatchlistEntry.objects.filter(pk__in=active_watchlist_entry_ids(locked_user), pk=entry.pk).exists():
+                    return json({"error": "自选已满", "code": "watchlist_limit_reached", **totals}, 409)
                 return json({
-                    "status": "already_exists",
-                    "item": watchlist_item_data(entry),
-                    **_watchlist_totals_for_user(locked_user),
+                    "status": "already_exists", "item": watchlist_item_data(entry), **totals,
                 })
             totals = _watchlist_totals_for_user(locked_user)
             if totals["total"] >= totals["limit"]:
@@ -451,10 +457,11 @@ def _watchlist_create(request):
             user=request.user, symbol=symbol
         ).first()
         if entry is not None:
+            totals = _watchlist_totals(request)
+            if not WatchlistEntry.objects.filter(pk__in=active_watchlist_entry_ids(request.user), pk=entry.pk).exists():
+                return json({"error": "自选已满", "code": "watchlist_limit_reached", **totals}, 409)
             return json({
-                "status": "already_exists",
-                "item": watchlist_item_data(entry),
-                **_watchlist_totals(request),
+                "status": "already_exists", "item": watchlist_item_data(entry), **totals,
             })
         return _watchlist_error("无法创建自选", "watchlist_write_conflict", request, 409)
     except OperationalError:
@@ -850,7 +857,8 @@ def _watchlist_totals_for_user(user):
     if not user.is_authenticated:
         return {"total": 0, "limit": 0, "remaining": 0}
     limit = watchlist_limit_for_user(user)
-    total = WatchlistEntry.objects.filter(user=user).count()
+    # Report active entries; never count frozen rows as spare capacity.
+    total = min(WatchlistEntry.objects.filter(user=user).count(), limit)
     return {"total": total, "limit": limit, "remaining": max(limit - total, 0)}
 
 
@@ -866,7 +874,9 @@ def _watchlisted_codes(request, items):
     codes = [item.code for item in items]
     return set(
         WatchlistEntry.objects.filter(
-            user=request.user, symbol__code__in=codes
+            user=request.user,
+            pk__in=active_watchlist_entry_ids(request.user),
+            symbol__code__in=codes,
         ).values_list("symbol__code", flat=True)
     )
 
