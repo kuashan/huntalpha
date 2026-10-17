@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+readonly CONFIG_PATH=/etc/siftalpha-web-admin.conf
+readonly LIB_PATH=/usr/local/libexec/siftalpha-web-admin/siftalpha-web-admin-lib.sh
+
+[[ "${EUID}" -eq 0 ]] || { printf 'siftalpha-web-admin: root execution is required\n' >&2; exit 1; }
+[[ -r "$CONFIG_PATH" && -r "$LIB_PATH" ]] || { printf 'siftalpha-web-admin: installation is incomplete\n' >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$LIB_PATH"
+load_config "$CONFIG_PATH"
+web_admin_main "$@"

@@ -1,0 +1,27 @@
+# Root-owned deployment configuration. Replace every path/checksum after a
+# read-only inventory of the existing website. Never commit the installed file.
+IMAGE_REPOSITORY=ghcr.io/kuashan/siftalpha-web
+GITHUB_REPOSITORY=kuashan/huntalpha
+GITHUB_WORKFLOW_NAME='SiftAlpha Web CI and ARM64'
+GITHUB_SIGNER_WORKFLOW=kuashan/huntalpha/.github/workflows/siftalpha-web-arm64.yml
+RELEASE_BRANCH=release/siftalpha-web-v1
+LEGACY_CONTAINER=siftalpha-task011-ebd23f4
+COMPOSE_CONTAINER=siftalpha-web-compose
+DATA_DIR=/srv/siftalpha/task009-data-c8df985
+DATABASE_PATH=/srv/siftalpha/task009-data-c8df985/db.sqlite3
+LOOPBACK_PORT=127.0.0.1:19091
+COMPOSE_FILE=/srv/siftalpha/web-deployment/compose.yaml
+COMPOSE_TEMPLATE=/usr/local/libexec/siftalpha-web-admin/compose.yaml.template
+ENV_FILE=/etc/siftalpha-web-admin.env
+STATE_DIR=/var/lib/siftalpha-web-admin
+BACKUP_DIR=/var/lib/siftalpha-web-admin/backups
+ROLLBACK_DIR=/var/lib/siftalpha-web-admin/rollbacks
+RECOVERY_DIR=/var/lib/siftalpha-web-admin/recovery-checks
+DOCKER_CONFIG_DIR=/var/lib/siftalpha-web-admin/ghcr-docker-config
+GITHUB_TOKEN_FILE=/etc/siftalpha-web-admin.github-token
+GH_BIN=/usr/local/libexec/siftalpha-web-admin/gh
+# Set to the fixed SHA-256 of the root-owned GitHub CLI binary before preflight.
+GH_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+DOCKER_BIN=/usr/bin/docker
+CURL_BIN=/usr/bin/curl
+PYTHON_BIN=/usr/bin/python3
