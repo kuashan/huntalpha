@@ -18,6 +18,7 @@ check_sources() {
   for file in \
     "$SCRIPT_DIR/siftalpha-web-admin" \
     "$SCRIPT_DIR/lib/siftalpha-web-admin-lib.sh" \
+    "$SCRIPT_DIR/lib/verify_buildkit_provenance.py" \
     "$SCRIPT_DIR/compose.yaml.template" \
     "$SCRIPT_DIR/siftalpha-web-admin.conf.example" \
     "$SCRIPT_DIR/rdc-agent-sudoers"; do
@@ -36,6 +37,7 @@ install_files() {
   install -d -o root -g root -m 0700 "$STATE_PATH" "$STATE_PATH/backups" "$STATE_PATH/rollbacks" "$STATE_PATH/recovery-checks" "$STATE_PATH/ghcr-docker-config"
   install -o root -g root -m 0750 "$SCRIPT_DIR/siftalpha-web-admin" "$BIN_PATH"
   install -o root -g root -m 0750 "$SCRIPT_DIR/lib/siftalpha-web-admin-lib.sh" "$LIB_DIR/siftalpha-web-admin-lib.sh"
+  install -o root -g root -m 0750 "$SCRIPT_DIR/lib/verify_buildkit_provenance.py" "$LIB_DIR/verify_buildkit_provenance.py"
   install -o root -g root -m 0640 "$SCRIPT_DIR/compose.yaml.template" "$LIB_DIR/compose.yaml.template"
   if [[ ! -e "$CONFIG_PATH" ]]; then
     install -o root -g root -m 0600 "$SCRIPT_DIR/siftalpha-web-admin.conf.example" "$CONFIG_PATH"

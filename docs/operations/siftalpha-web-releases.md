@@ -24,13 +24,16 @@ GitHub Actions Run 收集完整 Commit、Run ID、Run URL、镜像地址和不�
    `release/siftalpha-web-v1`，且状态为成功；
 2. 该 Run 下载的 build manifest 将同一个 Commit、Run ID、Digest 和 `linux/arm64`
    绑定在一起；
-3. provenance attestation 对同一个 OCI Digest、仓库、workflow 与 source ref 验证成功；
-4. 本地镜像 manifest 是 `linux/arm64`，并且 OCI source/revision/run-id labels 与
-   Actions 记录相符。
+3. 从 GHCR 读取的 BuildKit OCI SLSA provenance 确实作为 attestation manifest 关联到
+   同一个 OCI Digest 的 `linux/arm64` 镜像；
+4. 本地镜像 manifest 是 `linux/arm64`，并且 OCI source/revision/run-id/ref labels 与
+  Actions 记录相符。
 
-OCI labels are only a locator，不能单独证明镜像来源。GitHub Actions Run、build
-manifest、provenance attestation、Digest 或 Commit 任一缺失、不一致或无法验证时，
-`preflight` 必须失败，不得部署。
+OCI labels are only a locator，不能单独证明镜像来源。BuildKit OCI provenance
+(`buildkit-oci-slsa`) 是构建过程记录，不是 GitHub 官方的加密签名证明；BuildKit
+provenance is not GitHub official encrypted signature proof. 它必须与 GitHub Actions Run、build
+manifest、Digest、Commit、分支、标签和 ARM64 manifest 交叉核对。任一来源缺失、
+不一致或无法从 GHCR 读取时，`preflight` 必须失败，不得部署。
 
 ## 未来的受控部署步骤
 

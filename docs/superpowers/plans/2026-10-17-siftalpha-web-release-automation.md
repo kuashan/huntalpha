@@ -26,7 +26,7 @@
 ## Review Focus
 
 1. A source commit that has the website business tree but lacks the Task 009 runtime files must fail the parity contract rather than silently building a different runtime; Task 1 owns this test.
-2. A mutable tag, another GHCR repository, malformed digest, non-ARM64 manifest, OCI revision mismatch, or missing/mismatched GitHub Actions Run, manifest artifact or provenance attestation must be rejected before deployment; Tasks 2 and 3 own these tests.
+2. A mutable tag, another GHCR repository, malformed digest, non-ARM64 manifest, OCI revision mismatch, or missing/mismatched GitHub Actions Run, manifest artifact or BuildKit OCI provenance must be rejected before deployment; Tasks 2 and 3 own these tests.
 3. An SQLite backup that passes an integrity check but cannot be restored must fail preflight; Task 3 restores it into a root-only temporary database and checks it again.
 4. A first Compose migration whose health probe fails must retain and restart the original `docker run` container with its original local image, configuration, and data volume; the candidate Compose container name must differ from the legacy name; Task 3 owns the isolated Docker contract test.
 5. A caller that supplies an extra command, path, image name, environment variable, or direct Docker command must not gain broader host control; Tasks 3 and 4 pin the strict parser and Socket-denial checks.
@@ -109,11 +109,11 @@ git commit -m "build: make SiftAlpha web runtime reproducible"
 
 **Interfaces:**
 - Consumes: Task 1 Dockerfile and health endpoint.
-- Produces: a GitHub Actions run on `push` to `release/siftalpha-web-v1`, with `IMAGE`, `DIGEST`, `SOURCE_COMMIT`, `RUN_ID`, `RUN_URL`, `PLATFORM=linux/arm64` and attestation metadata in its summary/manifest artifact.
+- Produces: a GitHub Actions run on `push` to `release/siftalpha-web-v1`, with `IMAGE`, `DIGEST`, `SOURCE_COMMIT`, `RUN_ID`, `RUN_URL`, `PLATFORM=linux/arm64` and BuildKit OCI provenance metadata in its summary/manifest artifact.
 
 - [ ] **Step 1: Write workflow source-contract tests**
 
-Extend `core/test_deployment.py` and implement `scripts/verify_web_release_workflow.py` to assert that the workflow: triggers only from `push` to `release/siftalpha-web-v1` in phase one; has no deploy/SSH/server steps; uses Buildx with `linux/arm64`; uses `packages: write`, `attestations: write`, and `id-token: write`; publishes only `ghcr.io/kuashan/siftalpha-web`; emits full SHA tags but records a Digest; attaches OCI source/revision/version/run-id/ref labels; produces provenance; and does not use `latest`.
+Extend `core/test_deployment.py` and implement `scripts/verify_web_release_workflow.py` to assert that the workflow: triggers only from `push` to `release/siftalpha-web-v1` in phase one; has no deploy/SSH/server steps; uses Buildx with `linux/arm64`; uses only `packages: write`; publishes only `ghcr.io/kuashan/siftalpha-web`; emits full SHA tags but records a Digest; attaches OCI source/revision/version/run-id/ref labels; produces `provenance: mode=max` and verifies the GHCR OCI provenance; and does not use `latest`.
 
 - [ ] **Step 2: Run workflow contract checks and verify they fail before the workflow exists**
 
@@ -123,7 +123,7 @@ Expected: FAIL because `.github/workflows/siftalpha-web-arm64.yml` is absent.
 
 - [ ] **Step 3: Implement the phase-one push workflow**
 
-Create the workflow with checkout, Python/Django checks, Node `npm ci`/build/tests, Buildx ARM64 build/push and GitHub provenance attestation. Do not add `workflow_dispatch` in this phase. Supply labels derived from `github.sha`, `github.run_id`, `github.server_url`, `github.repository`, `github.workflow`, `github.ref_name` and the fixed V1.0.0 version. Upload a JSON build-manifest artifact containing exactly the image repository, Digest, full commit SHA, Run ID, Run URL, ref and platform; write the same non-secret facts to `$GITHUB_STEP_SUMMARY`.
+Create the workflow with checkout, Python/Django checks, Node `npm ci`/build/tests, Buildx ARM64 build/push with `provenance: mode=max`, and an explicit `docker buildx imagetools inspect` OCI provenance check. Do not add `workflow_dispatch` in this phase. Supply labels derived from `github.sha`, `github.run_id`, `github.server_url`, `github.repository`, `github.workflow`, `github.ref_name` and the fixed V1.0.0 version. Upload a JSON build-manifest artifact containing the image repository, Digest, full commit SHA, Run ID, Run URL, ref, source ref, workflow, tags and platform; write the same non-secret facts to `$GITHUB_STEP_SUMMARY`. BuildKit provenance is not GitHub's encrypted signature attestation and must be documented as a cross-checkable build record only.
 
 - [ ] **Step 4: Verify static workflow contracts locally**
 
@@ -155,7 +155,7 @@ git commit -m "ci: build SiftAlpha web ARM64 release images"
 
 - [ ] **Step 1: Write fake-Docker and SQLite contract tests**
 
-Create `deployment/web-admin/tests/test_web_admin.sh` for Ubuntu/GitHub Actions. With a fake Docker/Compose/Curl/GitHub CLI command path and temporary root-like directories, test: allowed commands parse; extra arguments and bad digests reject; an external repository/tag cannot reach a Docker invocation; direct environment override cannot change configured paths; valid preflight verifies ARM64 plus matching OCI source/revision/run-id fields, a successful fixed-workflow Actions record, exact build-manifest metadata, and provenance attestation; missing or mismatched trusted-source evidence rejects; backup copies a SQLite fixture via Python `sqlite3.Connection.backup()`; restore-check opens a separate restored fixture and passes integrity; backup failure removes `.partial`; and failed first adoption restores the retained legacy container without deleting its data bind or its distinct legacy container name.
+Create `deployment/web-admin/tests/test_web_admin.sh` for Ubuntu/GitHub Actions. With a fake Docker/Compose/Curl/GitHub CLI command path and temporary root-like directories, test: allowed commands parse; extra arguments and bad digests reject; an external repository/tag cannot reach a Docker invocation; direct environment override cannot change configured paths; valid preflight verifies ARM64 plus matching OCI source/revision/run-id/ref fields, a successful fixed-workflow Actions record, exact build-manifest metadata and tags, and linked BuildKit OCI provenance; missing, mismatched or forged trusted-source evidence rejects; backup copies a SQLite fixture via Python `sqlite3.Connection.backup()`; restore-check opens a separate restored fixture and passes integrity; backup failure removes `.partial`; and failed first adoption restores the retained legacy container without deleting its data bind or its distinct legacy container name.
 
 - [ ] **Step 2: Run the shell contract test and verify it fails before the tool exists**
 
@@ -167,7 +167,7 @@ Expected: FAIL because the tool/library/config template is absent.
 
 Implement a small Bash dispatcher that sources only `/etc/siftalpha-web-admin.conf`, sets a fixed PATH and umask, and invokes Docker with argument arrays. Its parser accepts only `status`, `health`, `preflight <digest>`, `deploy <digest>` and `rollback`; digest matching is exactly `^sha256:[0-9a-f]{64}$`. The configuration fixes `IMAGE_REPOSITORY=ghcr.io/kuashan/siftalpha-web`, the production data bind, `127.0.0.1:19091`, distinct legacy and Compose container names, backup/rollback directories, root env-file path, root-only GitHub API token file and fixed-checksum GitHub CLI path; no caller-provided configuration is accepted.
 
-Implement preflight trusted-source/label/architecture/disk/health/data checks and root-only temporary backup/restore verification. Trusted source verification must call the fixed GitHub CLI against the fixed repository and workflow, authenticate only with the root-only token file, and fail closed unless the GitHub Actions Run, downloaded manifest and provenance attestation all bind the same Digest, Commit and Run ID. Implement deployment snapshots that preserve the original legacy `docker run` container and local image. On first Compose cutover failure, stop/remove only the candidate Compose container and restart that untouched legacy container. Never run migrations, cleanup, or volume deletion. The installer must create files with the modes specified by the design, run `visudo -cf` on the staged sudoers file, and have a `--check` mode that does not change server state.
+Implement preflight trusted-source/label/architecture/disk/health/data checks and root-only temporary backup/restore verification. Trusted source verification must call the fixed GitHub CLI against the fixed repository and workflow, authenticate only with the root-only token file, and fail closed unless the GitHub Actions Run, downloaded manifest, GHCR image index and linked BuildKit OCI provenance all bind the same Digest, Commit, Run ID, branch and ARM64 manifest. Implement deployment snapshots that preserve the original legacy `docker run` container and local image. On first Compose cutover failure, stop/remove only the candidate Compose container and restart that untouched legacy container. Never run migrations, cleanup, or volume deletion. The installer must create files with the modes specified by the design, run `visudo -cf` on the staged sudoers file, and have a `--check` mode that does not change server state.
 
 - [ ] **Step 4: Run Linux tool tests and static safety scan**
 
@@ -199,7 +199,7 @@ git commit -m "ops: add least-privilege SiftAlpha web admin tool"
 
 - [ ] **Step 1: Write the runbook and its source-contract test**
 
-Document the exact future sequence: retrieve successful run metadata; compare user-supplied Digest with the GitHub Actions Run, manifest artifact and cryptographically verified provenance (OCI labels are only a locator); obtain separate user deployment approval; run preflight; record backup/snapshot; deploy; run health; perform user browser acceptance; use rollback only with separate approval. Document first-adoption legacy rollback with different legacy/Compose container names and explicitly state that no migration or database restore is automatic. Add a source contract in `core/test_deployment.py` that requires these safety words/commands and bans `latest` deployment examples.
+Document the exact future sequence: retrieve successful run metadata; compare user-supplied Digest with the GitHub Actions Run, manifest artifact, GHCR image index and linked BuildKit OCI provenance (OCI labels are only a locator); obtain separate user deployment approval; run preflight; record backup/snapshot; deploy; run health; perform user browser acceptance; use rollback only with separate approval. Document first-adoption legacy rollback with different legacy/Compose container names and explicitly state that no migration or database restore is automatic. Add a source contract in `core/test_deployment.py` that requires these safety words/commands and bans `latest` deployment examples. State clearly that BuildKit provenance is not GitHub's encrypted signature proof.
 
 - [ ] **Step 2: Run all local regression checks**
 
@@ -228,11 +228,11 @@ Expected: every implementation file and the final operator documentation is comm
 
 Run: `git push origin release/siftalpha-web-v1`
 
-Expected: the release-branch push starts `SiftAlpha Web CI and ARM64`; record its actual successful Run ID, full source commit, GHCR image address and immutable Digest. Confirm the exact Commit, Run ID, build manifest and provenance attestation cross-reference one another. A failed or unverifiable build stops this plan before any server-side installation.
+Expected: the release-branch push starts `SiftAlpha Web CI and ARM64`; record its actual successful Run ID, full source commit, GHCR image address and immutable Digest. Confirm the exact Commit, Run ID, build manifest, GHCR image index, linked ARM64 attestation manifest and BuildKit OCI provenance cross-reference one another. A failed or unverifiable build stops this plan before any server-side installation.
 
 - [ ] **Step 5: Install only the management capability and validate it without a website cutover**
 
-On Oracle, after user approval for this implementation phase, install the root-owned tool/config/templates with the existing website configuration manually verified. Do not call `deploy` or `rollback`. Verify: modes/owners and `visudo -cf`; `rdc-agent` can call web-admin `status` and `health`; `rdc-agent docker ps` remains denied; malformed/foreign Digest and missing/mismatched trusted source evidence reject; valid built Digest preflight verifies architecture, Actions Run, manifest, provenance and root-only backup/restore check; before/after inventories prove SiftAlpha website, Crypto, Options Monitor, Cloudflare and all other containers remained running and unchanged.
+On Oracle, after user approval for this implementation phase, install the root-owned tool/config/templates with the existing website configuration manually verified. Do not call `deploy` or `rollback`. Verify: modes/owners and `visudo -cf`; `rdc-agent` can call web-admin `status` and `health`; `rdc-agent docker ps` remains denied; malformed/foreign Digest and missing/mismatched trusted source evidence reject; valid built Digest preflight verifies architecture, Actions Run, manifest, GHCR-linked BuildKit OCI provenance and root-only backup/restore check; before/after inventories prove SiftAlpha website, Crypto, Options Monitor, Cloudflare and all other containers remained running and unchanged.
 
 Record server-only evidence in the completion report, not in Git: root-only file paths/modes, test result, current website container identity, Actions Run ID, commit, image Digest, preflight result, and confirmation that no deployment occurred.
 
@@ -244,7 +244,7 @@ Record server-only evidence in the completion report, not in Git: root-only file
 - [ ] `python manage.py makemigrations --check` reports no changes.
 - [ ] `npm ci`, all three existing frontend test scripts and `npm run build` pass.
 - [ ] Production runtime regression proves `/`, `/account`, `/account/` and their generated static asset entry work, not just `/healthz/`.
-- [ ] GitHub Actions produces one actual successful `linux/arm64` GHCR image with full Commit, Run ID/URL, Digest, build manifest and provenance attestation, all mutually consistent.
+- [ ] GitHub Actions produces one actual successful `linux/arm64` GHCR image with full Commit, Run ID/URL, Digest, build manifest and linked BuildKit OCI provenance, all mutually consistent; the report explicitly states this is not GitHub's encrypted signature proof.
 - [ ] `rdc-agent` can call only the website admin tool; direct Docker Socket access remains denied.
 - [ ] Valid/invalid preflight and SQLite backup/restore checks pass without a website restart.
 - [ ] No production container replacement, database migration, actual rollback, Cloudflare change, Crypto change, or business-code change occurred.

@@ -11,6 +11,7 @@ readonly SIFTALPHA_IMAGE_REPOSITORY='ghcr.io/kuashan/siftalpha-web'
 readonly SIFTALPHA_GITHUB_REPOSITORY='kuashan/huntalpha'
 readonly SIFTALPHA_RELEASE_BRANCH='release/siftalpha-web-v1'
 readonly SIFTALPHA_WORKFLOW_NAME='SiftAlpha Web CI and ARM64'
+readonly SIFTALPHA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die() { printf 'siftalpha-web-admin: %s\n' "$*" >&2; return 1; }
 
@@ -25,7 +26,7 @@ load_config() {
   local config_path="$1"
   [[ -r "$config_path" ]] || { die "configuration is unreadable"; return 1; }
   # Clear all deploy-sensitive values before sourcing the root-owned config.
-  unset IMAGE_REPOSITORY GITHUB_REPOSITORY GITHUB_WORKFLOW_NAME GITHUB_SIGNER_WORKFLOW RELEASE_BRANCH
+  unset IMAGE_REPOSITORY GITHUB_REPOSITORY GITHUB_WORKFLOW_NAME RELEASE_BRANCH
   unset LEGACY_CONTAINER COMPOSE_CONTAINER DATA_DIR DATABASE_PATH LOOPBACK_PORT COMPOSE_FILE COMPOSE_TEMPLATE ENV_FILE
   unset STATE_DIR BACKUP_DIR ROLLBACK_DIR RECOVERY_DIR DOCKER_CONFIG_DIR GITHUB_TOKEN_FILE GH_BIN GH_SHA256
   unset DOCKER_BIN CURL_BIN PYTHON_BIN
@@ -36,7 +37,7 @@ load_config() {
 
 validate_config() {
   local name
-  for name in IMAGE_REPOSITORY GITHUB_REPOSITORY GITHUB_WORKFLOW_NAME GITHUB_SIGNER_WORKFLOW RELEASE_BRANCH \
+  for name in IMAGE_REPOSITORY GITHUB_REPOSITORY GITHUB_WORKFLOW_NAME RELEASE_BRANCH \
     LEGACY_CONTAINER COMPOSE_CONTAINER DATA_DIR DATABASE_PATH LOOPBACK_PORT COMPOSE_FILE COMPOSE_TEMPLATE ENV_FILE \
     STATE_DIR BACKUP_DIR ROLLBACK_DIR RECOVERY_DIR DOCKER_CONFIG_DIR GITHUB_TOKEN_FILE GH_BIN GH_SHA256 DOCKER_BIN CURL_BIN PYTHON_BIN; do
     require_value "$name" || return 1
@@ -113,7 +114,7 @@ verify_gh_binary() {
 }
 
 verify_trusted_source() {
-  local digest="$1" image run_id run_json temp_dir manifest_file token
+  local digest="$1" image run_id run_json temp_dir manifest_file oci_manifest_file oci_provenance_file token
   image="$(candidate_image "$digest")"
   verify_gh_binary || return 1
   token="$(<"$GITHUB_TOKEN_FILE")"
@@ -122,6 +123,8 @@ verify_trusted_source() {
   temp_dir="$(mktemp -d "$RECOVERY_DIR/provenance.XXXXXX")"
   run_json="$temp_dir/run.json"
   manifest_file="$temp_dir/siftalpha-web-build-manifest.json"
+  oci_manifest_file="$temp_dir/oci-manifest.json"
+  oci_provenance_file="$temp_dir/oci-provenance.json"
   "$DOCKER_BIN" pull "$image" >/dev/null || { cleanup_provenance "$temp_dir"; return 1; }
   run_id="$(image_label "$image" 'io.siftalpha.build.run-id')"
   [[ "$run_id" =~ ^[0-9]+$ ]] || { die 'OCI run-id label is invalid'; cleanup_provenance "$temp_dir"; return 1; }
@@ -145,6 +148,10 @@ if manifest.get("source_commit") != run.get("head_sha"):
     raise SystemExit("build manifest commit mismatch")
 if manifest.get("image") != "ghcr.io/kuashan/siftalpha-web" or manifest.get("platform") != "linux/arm64" or manifest.get("ref") != branch:
     raise SystemExit("build manifest identity mismatch")
+if manifest.get("source_ref") != f"refs/heads/{branch}" or manifest.get("workflow") != workflow_name:
+    raise SystemExit("build manifest workflow identity mismatch")
+if manifest.get("run_url") != run.get("html_url"):
+    raise SystemExit("build manifest Run URL mismatch")
 PY
   then
     cleanup_provenance "$temp_dir"
@@ -158,9 +165,14 @@ print(json.loads(open(sys.argv[1], encoding="utf-8").read())["head_sha"])
 PY
 )" || { cleanup_provenance "$temp_dir"; return 1; }
   verify_oci_labels "$image" "$expected_commit" "$run_id" || { cleanup_provenance "$temp_dir"; return 1; }
-  GH_TOKEN="$token" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" attestation verify "oci://$image" \
-    --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_SIGNER_WORKFLOW" \
-    --source-ref "refs/heads/$RELEASE_BRANCH" --format json >/dev/null || { cleanup_provenance "$temp_dir"; return 1; }
+  "$DOCKER_BIN" buildx imagetools inspect "$image" --format '{{json .Manifest}}' > "$oci_manifest_file" \
+    || { die 'cannot read OCI image index from GHCR'; cleanup_provenance "$temp_dir"; return 1; }
+  "$DOCKER_BIN" buildx imagetools inspect "$image" --format '{{json .Provenance.SLSA}}' > "$oci_provenance_file" \
+    || { die 'cannot read BuildKit OCI provenance from GHCR'; cleanup_provenance "$temp_dir"; return 1; }
+  "$PYTHON_BIN" "$SIFTALPHA_LIB_DIR/verify_buildkit_provenance.py" \
+    "$manifest_file" "$oci_manifest_file" "$oci_provenance_file" "$digest" "$expected_commit" "$run_id" \
+    "refs/heads/$RELEASE_BRANCH" "$GITHUB_WORKFLOW_NAME" \
+    || { cleanup_provenance "$temp_dir"; return 1; }
   printf 'trusted source: commit=%s run_id=%s digest=%s\n' "$expected_commit" "$run_id" "$digest"
   cleanup_provenance "$temp_dir"
 }

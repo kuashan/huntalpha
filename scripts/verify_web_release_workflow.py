@@ -24,8 +24,6 @@ def main():
     for fragment in (
         "release/siftalpha-web-v1",
         "packages: write",
-        "attestations: write",
-        "id-token: write",
         "docker/setup-qemu-action@v3",
         "docker/setup-buildx-action@v3",
         "platforms: linux/arm64",
@@ -36,7 +34,10 @@ def main():
         "org.opencontainers.image.revision=${{ github.sha }}",
         "io.siftalpha.build.run-id=${{ github.run_id }}",
         "io.siftalpha.build.ref=${{ github.ref_name }}",
-        "actions/attest-build-provenance@v2",
+        "provenance: mode=max",
+        "Verify OCI BuildKit provenance",
+        "docker buildx imagetools inspect",
+        "verify_buildkit_provenance.py",
         "siftalpha-web-build-manifest",
         "$GITHUB_STEP_SUMMARY",
         "DIGEST",
@@ -44,11 +45,17 @@ def main():
         "RUN_ID",
         "RUN_URL",
         "PLATFORM",
+        "SOURCE_REF",
+        "WORKFLOW_NAME",
+        "buildkit-oci-slsa",
         "push: true",
     ):
         require(source, fragment)
     for fragment in (
         "workflow_dispatch",
+        "attestations: write",
+        "id-token: write",
+        "actions/attest-build-provenance@v2",
         "ssh ",
         "appleboy/ssh",
         "cloudflare",

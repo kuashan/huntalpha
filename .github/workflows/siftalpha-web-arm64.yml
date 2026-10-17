@@ -8,8 +8,6 @@ on:
 permissions:
   contents: read
   packages: write
-  attestations: write
-  id-token: write
 
 jobs:
   build-arm64:
@@ -20,6 +18,8 @@ jobs:
       SOURCE_COMMIT: ${{ github.sha }}
       RUN_ID: ${{ github.run_id }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      WORKFLOW_NAME: SiftAlpha Web CI and ARM64
+      SOURCE_REF: refs/heads/release/siftalpha-web-v1
     steps:
       - uses: actions/checkout@v4
 
@@ -87,17 +87,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
 
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/siftalpha-web
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
-
-      - name: Write immutable build manifest
+      - name: Verify OCI BuildKit provenance
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           python - <<'PY'
           import json
@@ -111,7 +106,47 @@ jobs:
               "run_id": os.environ["RUN_ID"],
               "run_url": os.environ["RUN_URL"],
               "ref": "release/siftalpha-web-v1",
+              "source_ref": os.environ["SOURCE_REF"],
+              "workflow": os.environ["WORKFLOW_NAME"],
               "platform": os.environ["PLATFORM"],
+              "tags": [tag for tag in os.environ["IMAGE_TAGS"].splitlines() if tag],
+              "provenance": "buildkit-oci-slsa",
+          }
+          Path("siftalpha-web-build-manifest.json").write_text(
+              json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+          mkdir -p "$RUNNER_TEMP/siftalpha-provenance"
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --format '{{json .Manifest}}' > "$RUNNER_TEMP/siftalpha-provenance/manifest.json"
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --format '{{json .Provenance.SLSA}}' > "$RUNNER_TEMP/siftalpha-provenance/provenance.json"
+          python deployment/web-admin/lib/verify_buildkit_provenance.py \
+            "siftalpha-web-build-manifest.json" \
+            "$RUNNER_TEMP/siftalpha-provenance/manifest.json" \
+            "$RUNNER_TEMP/siftalpha-provenance/provenance.json" \
+            "$DIGEST" "$SOURCE_COMMIT" "$RUN_ID" "$SOURCE_REF" "$WORKFLOW_NAME"
+
+      - name: Write immutable build manifest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          record = {
+              "image": os.environ["IMAGE"],
+              "digest": os.environ["DIGEST"],
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "run_id": os.environ["RUN_ID"],
+              "run_url": os.environ["RUN_URL"],
+              "ref": "release/siftalpha-web-v1",
+              "source_ref": os.environ["SOURCE_REF"],
+              "workflow": os.environ["WORKFLOW_NAME"],
+              "platform": os.environ["PLATFORM"],
+              "tags": [tag for tag in os.environ["IMAGE_TAGS"].splitlines() if tag],
+              "provenance": "buildkit-oci-slsa",
           }
           Path("siftalpha-web-build-manifest.json").write_text(
               json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -124,7 +159,9 @@ jobs:
             echo "SOURCE_COMMIT=$SOURCE_COMMIT"
             echo "RUN_ID=$RUN_ID"
             echo "RUN_URL=$RUN_URL"
+            echo "SOURCE_REF=$SOURCE_REF"
             echo "PLATFORM=$PLATFORM"
+            echo "PROVENANCE=buildkit-oci-slsa"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload immutable build manifest

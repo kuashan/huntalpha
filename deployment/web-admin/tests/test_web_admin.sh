@@ -35,13 +35,20 @@ set -Eeuo pipefail
 case "${1:-}" in
   pull) exit 0 ;;
   buildx)
-    printf '{"manifests":[{"platform":{"architecture":"arm64","os":"linux"}}]}\n'
+    if [[ "$*" == *".Manifest"* ]]; then
+      printf '{"digest":"%s","manifests":[{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","platform":{"architecture":"arm64","os":"linux"}},{"digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","annotations":{"vnd.docker.reference.type":"attestation-manifest","vnd.docker.reference.digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"platform":{"architecture":"unknown","os":"unknown"}}]}\n' "$FAKE_DIGEST"
+    elif [[ "$*" == *".Provenance.SLSA"* ]]; then
+      [[ "${FAKE_GH_MODE:-ok}" == provenance-fail ]] && exit 1
+      printf '{"buildType":"https://mobyproject.org/buildkit@v1","invocation":{},"metadata":{}}\n'
+    else
+      printf '{"manifests":[{"platform":{"architecture":"arm64","os":"linux"}}]}\n'
+    fi
     exit 0 ;;
   image)
     case "${4:-}" in
-      '{{ index .Config.Labels "org.opencontainers.image.source" }}') printf 'https://github.com/kuashan/huntalpha\n' ;;
-      '{{ index .Config.Labels "org.opencontainers.image.revision" }}') printf '%s\n' "$FAKE_COMMIT" ;;
-      '{{ index .Config.Labels "io.siftalpha.build.run-id" }}') printf '%s\n' "$FAKE_RUN_ID" ;;
+      '{{ index .Config.Labels "org.opencontainers.image.source" }}') [[ "${FAKE_GH_MODE:-ok}" == label-mismatch ]] && printf 'https://github.com/evil/repository\n' || printf 'https://github.com/kuashan/huntalpha\n' ;;
+      '{{ index .Config.Labels "org.opencontainers.image.revision" }}') [[ "${FAKE_GH_MODE:-ok}" == label-mismatch ]] && printf 'deadbeef\n' || printf '%s\n' "$FAKE_COMMIT" ;;
+      '{{ index .Config.Labels "io.siftalpha.build.run-id" }}') [[ "${FAKE_GH_MODE:-ok}" == label-mismatch ]] && printf '999999\n' || printf '%s\n' "$FAKE_RUN_ID" ;;
       '{{ index .Config.Labels "io.siftalpha.build.ref" }}') printf 'release/siftalpha-web-v1\n' ;;
       '{{ index .Config.Labels "org.opencontainers.image.version" }}') printf 'V1.0.0\n' ;;
       *) printf 'arm64\n' ;;
@@ -78,7 +85,7 @@ set -Eeuo pipefail
 case "${1:-}" in
   api)
     [[ "${FAKE_GH_MODE:-ok}" == run-mismatch ]] && { printf '{"conclusion":"failure"}\n'; exit 0; }
-    printf '{"status":"completed","conclusion":"success","head_sha":"%s","head_branch":"release/siftalpha-web-v1","name":"SiftAlpha Web CI and ARM64"}\n' "$FAKE_COMMIT"
+    printf '{"status":"completed","conclusion":"success","head_sha":"%s","head_branch":"release/siftalpha-web-v1","name":"SiftAlpha Web CI and ARM64","html_url":"https://github.com/kuashan/huntalpha/actions/runs/%s"}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
     ;;
   run)
     destination=""
@@ -86,12 +93,10 @@ case "${1:-}" in
       [[ "${!i}" == --dir ]] && { j=$((i + 1)); destination="${!j}"; }
     done
     mkdir -p "$destination"
+    [[ "${FAKE_GH_MODE:-ok}" == manifest-missing ]] && exit 0
     [[ "${FAKE_GH_MODE:-ok}" == manifest-mismatch ]] && digest='sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' || digest="$FAKE_DIGEST"
-    printf '{"image":"ghcr.io/kuashan/siftalpha-web","digest":"%s","source_commit":"%s","run_id":"%s","run_url":"https://github.com/kuashan/huntalpha/actions/runs/%s","ref":"release/siftalpha-web-v1","platform":"linux/arm64"}\n' "$digest" "$FAKE_COMMIT" "$FAKE_RUN_ID" "$FAKE_RUN_ID" > "$destination/siftalpha-web-build-manifest.json"
-    ;;
-  attestation)
-    [[ "${FAKE_GH_MODE:-ok}" == attestation-fail ]] && exit 1
-    printf '[]\n'
+    [[ "${FAKE_GH_MODE:-ok}" == metadata-forged ]] && record_commit='deadbeef' || record_commit="$FAKE_COMMIT"
+    printf '{"image":"ghcr.io/kuashan/siftalpha-web","digest":"%s","source_commit":"%s","run_id":"%s","run_url":"https://github.com/kuashan/huntalpha/actions/runs/%s","ref":"release/siftalpha-web-v1","source_ref":"refs/heads/release/siftalpha-web-v1","workflow":"SiftAlpha Web CI and ARM64","platform":"linux/arm64","tags":["sha-%s","v1.0.0-sha-%s"],"provenance":"buildkit-oci-slsa"}\n' "$digest" "$record_commit" "$FAKE_RUN_ID" "$FAKE_RUN_ID" "$record_commit" "$record_commit" > "$destination/siftalpha-web-build-manifest.json"
     ;;
   *) exit 1 ;;
 esac
@@ -103,7 +108,6 @@ cat > "$TEST_ROOT/web-admin.conf" <<EOF
 IMAGE_REPOSITORY=ghcr.io/kuashan/siftalpha-web
 GITHUB_REPOSITORY=kuashan/huntalpha
 GITHUB_WORKFLOW_NAME='SiftAlpha Web CI and ARM64'
-GITHUB_SIGNER_WORKFLOW=kuashan/huntalpha/.github/workflows/siftalpha-web-arm64.yml
 RELEASE_BRANCH=release/siftalpha-web-v1
 LEGACY_CONTAINER=siftalpha-task011-ebd23f4
 COMPOSE_CONTAINER=siftalpha-web-compose
@@ -158,7 +162,13 @@ load_config "$TEST_ROOT/web-admin.conf"
 assert_ok preflight_candidate "$FAKE_DIGEST"
 export FAKE_GH_MODE=manifest-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
-export FAKE_GH_MODE=attestation-fail
+export FAKE_GH_MODE=manifest-missing
+assert_fail preflight_candidate "$FAKE_DIGEST"
+export FAKE_GH_MODE=metadata-forged
+assert_fail preflight_candidate "$FAKE_DIGEST"
+export FAKE_GH_MODE=label-mismatch
+assert_fail preflight_candidate "$FAKE_DIGEST"
+export FAKE_GH_MODE=provenance-fail
 assert_fail preflight_candidate "$FAKE_DIGEST"
 export FAKE_GH_MODE=run-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"

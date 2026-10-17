@@ -110,8 +110,8 @@ GitHub ARM64 构建和网站专用最小权限工具；仍未批准替换/重启
 | 推送到 `release/siftalpha-web-v1` | Django、前端、ARM64 镜像与 provenance 校验 | 是 | 否 |
 | `workflow_dispatch` | 第一阶段不依赖；进入默认分支后另行评估 | 否 | 否 |
 
-fork PR 不取得包写入权限。第一阶段工作流仅在可信发布分支使用 `contents: read`、
-`packages: write`、`attestations: write` 与 `id-token: write`；没有 deploy 权限、
+fork PR 不取得包写入权限。第一阶段工作流仅在可信发布分支使用 `contents: read` 与
+`packages: write`；没有 deploy 权限、
 服务器凭据、Cloudflare 凭据或任何数据库凭据。Buildx 使用 `linux/arm64`；镜像推送至
 `ghcr.io/kuashan/siftalpha-web`，并至少创建两个可追溯标签：
 
@@ -127,17 +127,19 @@ ghcr.io/kuashan/siftalpha-web@sha256:<64 lowercase hexadecimal characters>
 ```
 
 工作流必须把完整 Git Commit、GitHub Actions Run ID、Run URL、workflow 名、发布
-分支、平台和 Digest 同时写入 job summary、构建 manifest artifact 和 OCI labels；
-同时发布 GitHub build provenance attestation。`preflight` 只接受固定 GHCR 仓库的
-Digest，并核对 ARM64 manifest 与 OCI source/revision/run-id labels。
+分支、平台、标签和 Digest 同时写入 job summary、构建 manifest artifact 和 OCI labels；
+并以 `provenance: mode=max` 发布 BuildKit OCI SLSA provenance。`preflight` 只接受固定
+GHCR 仓库的 Digest，并核对 ARM64 manifest 与 OCI source/revision/run-id/ref labels。
 
-正式候选还必须通过三方来源证明，不能只相信 OCI 标签：根权限工具从 GitHub API
+正式候选还必须通过多来源交叉核验，不能只相信 OCI 标签：根权限工具从 GitHub API
 读取对应 Actions Run（同一仓库、固定 workflow、`success` 结论、相同 head SHA 和
-发布分支），下载该 Run 生成的不可变 build manifest 并核对 Digest/Commit/Run ID，
-再使用 root-owned、固定校验和的 GitHub CLI 执行 provenance attestation verification。
-用于此只读核验的 GitHub 凭据只可放在 root-only token file；GitHub CLI、token、Run
-record、manifest 或 attestation 任一不可用、不一致或无法验证时，`preflight` 与
-`deploy` 必须 fail closed。标签仅用于候选定位，绝不能单独构成部署来源证明。
+发布分支），下载该 Run 生成的不可变 build manifest 并核对 Digest/Commit/Run ID/标签，
+再从 GHCR 读取同一 Digest 的 OCI image index，确认 `linux/arm64` manifest 关联了
+BuildKit provenance attestation，并解析其 SLSA provenance。用于此只读核验的 GitHub
+凭据只可放在 root-only token file；GitHub CLI、token、Run record、manifest、OCI
+provenance 或任一关联关系不可用、不一致时，`preflight` 与 `deploy` 必须 fail closed。
+BuildKit provenance 是构建过程记录，不是 GitHub 官方的加密签名证明；它不能被描述
+为签名或不可伪造的供应链证明。标签仅用于候选定位，绝不能单独构成部署来源证明。
 
 ## 服务器受控部署边界
 
@@ -197,8 +199,8 @@ rollback
   `/healthz/`、登录页以及配置好的
   无副作用 API probes，接受明确的预期认证状态，拒绝 5xx 和不符合契约的响应。
 - `preflight`：验证 Digest 格式、固定 GHCR 仓库、远端/本地 ARM64 manifest、
-  OCI source/revision/run-id labels，以及 GitHub Actions Run、manifest artifact 与
-  provenance attestation 的三方来源证明；可用磁盘、现有容器健康、数据卷可读、备份目录
+  OCI source/revision/run-id/ref labels，以及 GitHub Actions Run、manifest artifact 与
+  BuildKit OCI provenance 的多来源交叉证明；可用磁盘、现有容器健康、数据卷可读、备份目录
   与 SQLite `integrity_check`。它还必须用 `sqlite3.Connection.backup()` 创建
   root-only 临时副本、从该副本实际恢复到独立临时数据库、再次运行完整性检查，
   然后安全删除临时检查文件；不输出数据库内容。它可以拉取候选镜像到本地缓存，
@@ -261,8 +263,8 @@ Cloudflare Tunnel、Access、DNS、反向代理和任何其他容器均不在此
 
 1. GitHub Actions 在 ARM64 成功执行 Django、前端与镜像构建，并报告真实 Run ID、
    Commit、镜像地址和不可变 Digest。
-2. 构建镜像的 OCI revision 与触发提交一致，且 GitHub Actions Run、build manifest
-   与 provenance attestation 三方均绑定相同 Commit/Run ID/Digest，才可在 Oracle
+2. 构建镜像的 OCI revision 与触发提交一致，且 GitHub Actions Run、build manifest、
+   GHCR Digest、ARM64 manifest 与 BuildKit OCI provenance 均绑定相同 Commit/Run ID/分支，才可在 Oracle
    ARM64 通过 `preflight` 验证；未使用 `latest` 部署。
 3. `rdc-agent` 可以运行网站 `status`；直接 `docker ps` 继续因 Docker Socket
    权限不足而失败。
@@ -279,9 +281,9 @@ Cloudflare Tunnel、Access、DNS、反向代理和任何其他容器均不在此
 
 实施严格按以下顺序进行：先将运行层、Actions 工作流、受控工具和操作手册全部在
 发布分支提交；随后一次性 push 该精确提交并等待 GitHub Actions ARM64 构建。只有
-同一成功 Run 的完整 Commit、Run ID、build manifest、provenance attestation 与
+同一成功 Run 的完整 Commit、Run ID、build manifest、BuildKit OCI provenance 与
 不可变 Digest 相互一致，才可进入服务器工具安装和隔离验收。OCI 标签仅作候选定位，
-不能替代该来源证明。
+不能替代交叉核验；BuildKit provenance 也不是 GitHub 官方加密签名证明。
 
 服务器侧安装仅写入 root-owned 工具、配置模板、sudoers 和状态目录，不调用
 `deploy`、`rollback` 或 Compose 切换。首次实际切换仍需要单独用户授权，并必须使用
@@ -293,7 +295,7 @@ Cloudflare Tunnel、Access、DNS、反向代理和任何其他容器均不在此
 
 - 当前线上源代码未完全进入 `main`。在发布分支稳定后，必须由单独的审查/合并
   工作整理现有 PR 链；在此之前，`release/siftalpha-web-v1` 是唯一部署候选事实源。
-- GHCR 包的可见性、服务器拉取凭据及只读 GitHub provenance verification token 须在
+- GHCR 包的可见性、服务器拉取凭据及只读 GitHub API token 须在
   实施时以最小权限验证。不能将 PAT、`GITHUB_TOKEN`、Docker config 或任何凭据提交
   进仓库；若 root-only token 或固定校验和 GitHub CLI 不可用，工具必须拒绝部署。
 - 当前手动容器需要一次受控 adoption 才能切换为 root-owned Compose 管理；该动作

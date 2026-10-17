@@ -148,7 +148,9 @@ class WebReleaseRunbookContractTests(SimpleTestCase):
         required_phrases = (
             "GitHub Actions Run",
             "build manifest",
-            "provenance attestation",
+            "BuildKit OCI provenance",
+            "buildkit-oci-slsa",
+            "provenance is not GitHub official encrypted signature proof",
             "OCI labels are only a locator",
             "separate user deployment approval",
             "preflight",

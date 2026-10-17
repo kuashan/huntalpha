@@ -3,7 +3,6 @@
 IMAGE_REPOSITORY=ghcr.io/kuashan/siftalpha-web
 GITHUB_REPOSITORY=kuashan/huntalpha
 GITHUB_WORKFLOW_NAME='SiftAlpha Web CI and ARM64'
-GITHUB_SIGNER_WORKFLOW=kuashan/huntalpha/.github/workflows/siftalpha-web-arm64.yml
 RELEASE_BRANCH=release/siftalpha-web-v1
 LEGACY_CONTAINER=siftalpha-task011-ebd23f4
 COMPOSE_CONTAINER=siftalpha-web-compose
