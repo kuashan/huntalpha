@@ -1,4 +1,5 @@
 <script setup>
+import { API_BASE } from '../apiBase'
 import { computed, ref } from 'vue'
 import { languages, locale, setLocale, t } from '../i18n'
 import HuntAlphaLogo from './HuntAlphaLogo.vue'
@@ -26,23 +27,23 @@ async function submit() {
   pending.value = true
   try {
     const endpoint = mode.value === 'login' ? 'login' : 'register'
-    const reply = await fetch(`http://127.0.0.1:8003/api/auth/${endpoint}/`, {
+    const reply = await fetch(`${API_BASE}/api/auth/${endpoint}/`, {
       method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: email.value, password: password.value, name: name.value }),
     })
     const data = await reply.json()
     if (!reply.ok) { error.value = data.error || '暂时无法完成请求'; return }
     emit('authenticated', data.user)
-  } catch { error.value = '无法连接本地服务，请确认后端正在运行。' } finally { pending.value = false }
+  } catch { error.value = '无法连接网站服务，请稍后重试。' } finally { pending.value = false }
 }
 async function enterGuest() {
   error.value = ''; pending.value = true
   try {
-    const reply = await fetch('http://127.0.0.1:8003/api/auth/guest/', { method: 'POST', credentials: 'include' })
+    const reply = await fetch(`${API_BASE}/api/auth/guest/`, { method: 'POST', credentials: 'include' })
     const data = await reply.json()
     if (!reply.ok) { error.value = data.error || '暂时无法进入访客模式'; return }
     emit('authenticated', { ...data.user, visitor: true })
-  } catch { error.value = '无法连接本地服务，请确认后端正在运行。' } finally { pending.value = false }
+  } catch { error.value = '无法连接网站服务，请稍后重试。' } finally { pending.value = false }
 }
 </script>
 
