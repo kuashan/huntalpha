@@ -1,11 +1,15 @@
 from django.conf import settings
+from .models import AccountMembership
 
 
 def resolve_account_tier(user):
-    """Return the real account tier, without inferring Pro from user flags."""
-    # The repository has no persisted subscription/entitlement model yet. Do
-    # not infer Pro from staff, superuser, username, or any other proxy.
-    return "free" if getattr(user, "is_authenticated", False) else None
+    """Use the database entitlement only; missing legacy rows default to FREE."""
+    if not getattr(user, "is_authenticated", False):
+        return None
+    # A fresh query avoids retaining a stale PRO tier if an admin downgrades
+    # the account while the user's session is still active.
+    tier = AccountMembership.objects.filter(user_id=user.pk).values_list("tier", flat=True).first()
+    return tier if tier in {AccountMembership.Tier.FREE, AccountMembership.Tier.PRO} else AccountMembership.Tier.FREE
 
 
 def resolve_watchlist_limit(user):
