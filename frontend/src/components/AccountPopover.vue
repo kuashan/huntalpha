@@ -1,8 +1,8 @@
 <script setup>
+import { API_BASE } from '../apiBase'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AccountTierBadge from './AccountTierBadge.vue'
 
-const API_BASE = 'http://127.0.0.1:8003'
 const props = defineProps({
   user: { type: Object, required: true },
   watchlistTotal: { type: Number, default: null },
