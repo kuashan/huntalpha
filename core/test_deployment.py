@@ -84,6 +84,28 @@ class ProductionRuntimeContractTests(SimpleTestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("HUNTALPHA_ALLOWED_HOSTS", result.stderr)
 
+    def test_debug_runtime_uses_non_manifest_static_storage(self):
+        """Local/test admin templates must not require a prebuilt production manifest."""
+        environment = os.environ.copy()
+        environment.update({
+            "DJANGO_SECRET_KEY": "test-secret",
+            "DJANGO_DEBUG": "1",
+        })
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from django.conf import settings; print(settings.STORAGES['staticfiles']['BACKEND'])",
+            ],
+            cwd=self.base_dir,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "django.contrib.staticfiles.storage.StaticFilesStorage")
+
     def test_container_artifacts_have_operational_runtime_contracts(self):
         """The image must run Gunicorn and check Django without migrations."""
         dockerfile = (self.base_dir / "deployment" / "web" / "Dockerfile").read_text(encoding="utf-8")
@@ -107,3 +129,30 @@ class ReleaseWorkflowContractTests(SimpleTestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+
+class WebReleaseRunbookContractTests(SimpleTestCase):
+    def test_runbook_requires_immutable_provenance_and_explicit_approval(self):
+        """Operators must not treat a registry label or tag as deployment authority."""
+        base_dir = Path(__file__).resolve().parents[1]
+        runbook = (base_dir / "docs" / "operations" / "siftalpha-web-releases.md").read_text(encoding="utf-8")
+        required_phrases = (
+            "GitHub Actions Run",
+            "build manifest",
+            "provenance attestation",
+            "OCI labels are only a locator",
+            "separate user deployment approval",
+            "preflight",
+            "sqlite3.Connection.backup()",
+            "first-adoption",
+            "legacy",
+            "Compose",
+            "different container names",
+            "does not run migrations",
+            "does not restore the database automatically",
+            "rollback only with separate approval",
+        )
+        for phrase in required_phrases:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, runbook)
+        self.assertNotIn("latest", runbook.lower())

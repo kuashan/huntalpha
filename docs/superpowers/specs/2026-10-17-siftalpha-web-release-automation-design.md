@@ -273,6 +273,20 @@ Cloudflare Tunnel、Access、DNS、反向代理和任何其他容器均不在此
 7. Crypto、Options Monitor、Coolify、Cloudflare、VPN、Agent 及其他容器名称、
    镜像、网络和运行状态保持不变。
 
+## 实施顺序与证据门槛
+
+实施严格按以下顺序进行：先将运行层、Actions 工作流、受控工具和操作手册全部在
+发布分支提交；随后一次性 push 该精确提交并等待 GitHub Actions ARM64 构建。只有
+同一成功 Run 的完整 Commit、Run ID、build manifest、provenance attestation 与
+不可变 Digest 相互一致，才可进入服务器工具安装和隔离验收。OCI 标签仅作候选定位，
+不能替代该来源证明。
+
+服务器侧安装仅写入 root-owned 工具、配置模板、sudoers 和状态目录，不调用
+`deploy`、`rollback` 或 Compose 切换。首次实际切换仍需要单独用户授权，并必须使用
+不同于 legacy `docker run` 容器的 Compose 容器名；原容器和本地镜像在验证窗口内保留。
+任何缺失的 GitHub 核验 token、固定校验和 CLI、映像来源证明或健康前置条件都会阻止
+预检与部署，而不是降低校验强度。
+
 ## 已知风险与后续决策
 
 - 当前线上源代码未完全进入 `main`。在发布分支稳定后，必须由单独的审查/合并
