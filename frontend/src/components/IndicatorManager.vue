@@ -1,4 +1,5 @@
 <script setup>
+import { API_BASE } from '../apiBase'
 import { computed, onMounted, ref } from 'vue'
 import { t } from '../i18n'
 
@@ -9,7 +10,7 @@ const commonItems = computed(() => items.value.filter(item => item.common))
 const installedItems = computed(() => items.value.filter(item => !item.common))
 const mainItems = computed(() => installedItems.value.filter(item => item.placement === 'main'))
 const subItems = computed(() => installedItems.value.filter(item => item.placement === 'sub'))
-async function load() { try { const reply = await fetch('http://127.0.0.1:8003/api/indicators/', { credentials: 'include' }); const data = await reply.json(); if (reply.ok) items.value = data.items; else message.value = data.error || '指标库暂不可用。' } catch { message.value = '指标库暂不可用。' } }
+async function load() { try { const reply = await fetch(`${API_BASE}/api/indicators/`, { credentials: 'include' }); const data = await reply.json(); if (reply.ok) items.value = data.items; else message.value = data.error || '指标库暂不可用。' } catch { message.value = '指标库暂不可用。' } }
 function selected(item) { return (item.placement === 'main' ? props.main : props.sub).some(current => current.code === item.code) }
 function blocked(item) { return props.visitor && !item.visitor_available }
 function toggle(item) { if (blocked(item)) { message.value = '访客模式仅可启用 MA、BOLL、VOL、MACD、KDJ、RSI；已安装公式仅供预览。'; return }; if (selected(item)) return emit('remove', item); if (item.placement === 'sub' && props.sub.length >= 3) { message.value = '副图最多同时展示 3 个指标，请先移除一个。'; return } message.value = ''; emit('add', item) }

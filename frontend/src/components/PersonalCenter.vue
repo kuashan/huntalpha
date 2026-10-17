@@ -1,9 +1,9 @@
 <script setup>
+import { API_BASE } from '../apiBase'
 import { computed, onMounted, ref } from 'vue'
 import AccountTierBadge from './AccountTierBadge.vue'
 import SiteVersionFooter from './SiteVersionFooter.vue'
 
-const API_BASE = 'http://127.0.0.1:8003'
 const sections = [
   { key: 'overview', label: '概览' },
   { key: 'profile', label: '个人资料' },

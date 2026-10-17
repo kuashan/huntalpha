@@ -165,3 +165,30 @@ class AccountProfile(models.Model):
 
     def __str__(self):
         return f"账户 {self.user_id}"
+
+
+class AccountMembership(models.Model):
+    """The authoritative persisted FREE/PRO tier, independent of staff flags."""
+
+    id = models.AutoField(primary_key=True)
+
+    class Tier(models.TextChoices):
+        FREE = "free", "FREE"
+        PRO = "pro", "PRO"
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="account_membership",
+        verbose_name="用户",
+    )
+    tier = models.CharField(
+        "会员等级", max_length=4, choices=Tier.choices, default=Tier.FREE
+    )
+
+    class Meta:
+        verbose_name = "会员等级"
+        verbose_name_plural = "会员等级"
+
+    def __str__(self):
+        return f"{self.user_id} · {self.tier.upper()}"

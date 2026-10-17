@@ -1,4 +1,5 @@
 <script setup>
+import { API_BASE } from './apiBase'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import MarketChart from './components/MarketChart.vue'
 import IndicatorManager from './components/IndicatorManager.vue'
@@ -10,7 +11,6 @@ import PersonalCenter from './components/PersonalCenter.vue'
 import SiteVersionFooter from './components/SiteVersionFooter.vue'
 import { commonIndicators, markets } from './data/marketData'
 import { languages, locale, setLocale, t } from './i18n'
-const API_BASE = 'http://127.0.0.1:8003'
 const market = ref(markets[0]); const query = ref(''); const symbols = ref([]); const selected = ref(null); const period = ref('日线'); const mainInstalled = ref([]); const subInstalled = ref([]); const manager = ref(null)
 const user = ref(null); const visitor = ref(false); const checkingSession = ref(true); const quotes = ref({})
 const priceColorMode = ref('cn'); let initialPreferencesApplied = false
@@ -188,6 +188,8 @@ async function toggleWatchlist(item) {
     }
     applyWatchlistMutation(payload.item || item, !wasWatchlisted, payload)
     watchlistError.value = ''
+    // The next oldest frozen entry becomes active after a deletion.
+    if (wasWatchlisted && !query.value.trim()) await loadSymbols()
   } catch (error) {
     watchlistError.value = error.message || (wasWatchlisted ? t('watchlistRemoveFailed') : t('watchlistAddFailed'))
   }

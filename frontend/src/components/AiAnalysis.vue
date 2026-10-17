@@ -1,10 +1,11 @@
 <script setup>
+import { API_BASE } from '../apiBase'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 const props = defineProps({ code: String, name: String, market: String })
 const loading = ref(true); const error = ref(''); const stock = ref(null); const market = ref(null); let timer
 const taskId = item => item?.task_id || item?.accepted?.[0]?.task_id
-async function status(id) { const reply = await fetch(`http://127.0.0.1:8003/api/ai-analysis/status/${id}/`, { credentials: 'include' }); const data = await reply.json(); if (!reply.ok) throw new Error(data.error || '任务查询失败'); return data }
-async function begin() { try { const reply = await fetch('http://127.0.0.1:8003/api/ai-analysis/', { method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ code:props.code, name:props.name, market:props.market }) }); const data = await reply.json(); if (!reply.ok) throw new Error(data.error || '无法提交分析'); stock.value = { taskId: taskId(data.stock_task), status:'pending' }; market.value = { taskId: taskId(data.market_task), status:'pending', warning:data.market_error }; timer = window.setInterval(refresh, 2500); await refresh() } catch (cause) { error.value = cause.message } finally { loading.value = false } }
+async function status(id) { const reply = await fetch(`${API_BASE}/api/ai-analysis/status/${id}/`, { credentials: 'include' }); const data = await reply.json(); if (!reply.ok) throw new Error(data.error || '任务查询失败'); return data }
+async function begin() { try { const reply = await fetch(`${API_BASE}/api/ai-analysis/`, { method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ code:props.code, name:props.name, market:props.market }) }); const data = await reply.json(); if (!reply.ok) throw new Error(data.error || '无法提交分析'); stock.value = { taskId: taskId(data.stock_task), status:'pending' }; market.value = { taskId: taskId(data.market_task), status:'pending', warning:data.market_error }; timer = window.setInterval(refresh, 2500); await refresh() } catch (cause) { error.value = cause.message } finally { loading.value = false } }
 async function refresh() { try { for (const item of [stock.value, market.value]) if (item?.taskId && !['completed','failed','cancelled'].includes(item.status)) Object.assign(item, await status(item.taskId)) } catch (cause) { error.value = cause.message; clearInterval(timer) } }
 onMounted(begin); onBeforeUnmount(() => clearInterval(timer))
 </script>

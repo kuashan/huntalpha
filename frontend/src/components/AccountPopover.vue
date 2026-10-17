@@ -1,8 +1,8 @@
 <script setup>
+import { API_BASE } from '../apiBase'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AccountTierBadge from './AccountTierBadge.vue'
 
-const API_BASE = 'http://127.0.0.1:8003'
 const props = defineProps({
   user: { type: Object, required: true },
   watchlistTotal: { type: Number, default: null },
@@ -24,6 +24,7 @@ const identity = computed(() => summary.value?.user || props.user || {})
 const membership = computed(() => summary.value?.membership || null)
 const aiBeans = computed(() => summary.value?.ai_beans || null)
 const watchlist = computed(() => {
+  if (summary.value?.watchlist) return summary.value.watchlist
   if (props.watchlistTotal !== null && props.watchlistLimit !== null) {
     return {
       total: props.watchlistTotal,
@@ -44,7 +45,7 @@ function clearTimers() {
 }
 
 function loadSummary() {
-  if (summaryLoaded.value || loading.value) return
+  if (loading.value) return
   loading.value = true
   summaryError.value = ''
   fetch(`${API_BASE}/api/account/summary/`, { credentials: 'include' })
@@ -137,9 +138,9 @@ onBeforeUnmount(() => {
       @focus="handleFocus"
     >
       <AccountTierBadge
-        :tier="user.tier"
-        :tier-label="user.tier_label"
-        :watchlist-limit="user.watchlist_limit"
+        :tier="membership?.tier || user.tier"
+        :tier-label="membership?.tier_label || user.tier_label"
+        :watchlist-limit="summary?.watchlist?.limit ?? user.watchlist_limit"
         :user-name="user.name"
         :avatar-url="user.avatar_url"
       />

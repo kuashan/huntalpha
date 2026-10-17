@@ -1,11 +1,15 @@
 from django.conf import settings
+from .models import AccountMembership
 
 
 def resolve_account_tier(user):
-    """Return the real account tier, without inferring Pro from user flags."""
-    # The repository has no persisted subscription/entitlement model yet. Do
-    # not infer Pro from staff, superuser, username, or any other proxy.
-    return "free" if getattr(user, "is_authenticated", False) else None
+    """Use the database entitlement only; missing legacy rows default to FREE."""
+    if not getattr(user, "is_authenticated", False):
+        return None
+    # A fresh query avoids retaining a stale PRO tier if an admin downgrades
+    # the account while the user's session is still active.
+    tier = AccountMembership.objects.filter(user_id=user.pk).values_list("tier", flat=True).first()
+    return tier if tier in {AccountMembership.Tier.FREE, AccountMembership.Tier.PRO} else AccountMembership.Tier.FREE
 
 
 def resolve_watchlist_limit(user):
@@ -30,3 +34,20 @@ def account_tier_payload(user):
 def watchlist_limit_for_user(user):
     """Backward-compatible watchlist quota entry point."""
     return resolve_watchlist_limit(user)
+
+
+def active_watchlist_entry_ids(user):
+    """Ordered, account-global active entries; frozen rows stay in the database.
+
+    The slice is made *before* any market or search filter, so changing markets
+    cannot unfreeze extra records or consume another market's quota.
+    """
+    from .models import WatchlistEntry
+
+    if not getattr(user, "is_authenticated", False):
+        return WatchlistEntry.objects.none().values("pk")
+    return (
+        WatchlistEntry.objects.filter(user_id=user.pk)
+        .order_by("created_at", "id")
+        .values("pk")[:resolve_watchlist_limit(user)]
+    )
