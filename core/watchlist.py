@@ -34,3 +34,20 @@ def account_tier_payload(user):
 def watchlist_limit_for_user(user):
     """Backward-compatible watchlist quota entry point."""
     return resolve_watchlist_limit(user)
+
+
+def active_watchlist_entry_ids(user):
+    """Ordered, account-global active entries; frozen rows stay in the database.
+
+    The slice is made *before* any market or search filter, so changing markets
+    cannot unfreeze extra records or consume another market's quota.
+    """
+    from .models import WatchlistEntry
+
+    if not getattr(user, "is_authenticated", False):
+        return WatchlistEntry.objects.none().values("pk")
+    return (
+        WatchlistEntry.objects.filter(user_id=user.pk)
+        .order_by("created_at", "id")
+        .values("pk")[:resolve_watchlist_limit(user)]
+    )
