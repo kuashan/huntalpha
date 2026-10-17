@@ -1345,9 +1345,15 @@ class SiftAlphaBrandHeaderContractTests(SimpleTestCase):
     def test_account_tier_badge_is_embedded_and_supports_free_and_pro(self):
         self.assertIn("AccountPopover", self.app_source)
         self.assertIn("<AccountTierBadge", self.popover_source)
-        self.assertIn(":tier=\"user.tier\"", self.popover_source)
-        self.assertIn(":tier-label=\"user.tier_label\"", self.popover_source)
-        self.assertIn(":watchlist-limit=\"user.watchlist_limit\"", self.popover_source)
+        # Task 011: prefer the latest server membership summary but keep the
+        # session payload as fallback before the summary request finishes.
+        self.assertIn(':tier="membership?.tier || user.tier"', self.popover_source)
+        self.assertIn(':tier-label="membership?.tier_label || user.tier_label"', self.popover_source)
+        self.assertIn(':watchlist-limit="summary?.watchlist?.limit ?? user.watchlist_limit"', self.popover_source)
+        self.assertIn('const membership = computed(() => summary.value?.membership || null)', self.popover_source)
+        self.assertNotIn(':tier="user.tier"', self.popover_source)
+        self.assertNotIn(':tier-label="user.tier_label"', self.popover_source)
+        self.assertNotIn(':watchlist-limit="user.watchlist_limit"', self.popover_source)
         self.assertIn(":user-name=\"user.name\"", self.popover_source)
         self.assertIn(":avatar-url=\"user.avatar_url\"", self.popover_source)
         self.assertIn("account-trigger", self.popover_source)
