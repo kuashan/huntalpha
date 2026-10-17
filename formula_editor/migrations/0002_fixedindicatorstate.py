@@ -1,11 +1,9 @@
-# Task 012: new state-only table. Never modify existing Formula rows or sources.
+# Task 012: state-only table, existing Formula rows are untouched.
 from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    initial = True
-
-    dependencies = []
+    dependencies = [("formula_editor", "0001_initial")]
 
     operations = [
         migrations.CreateModel(
