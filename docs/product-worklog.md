@@ -33,7 +33,11 @@
 
 状态：`READY_FOR_CODEX`；规格：[`docs/tasks/012-formula-manager-fixed-indicators.md`](tasks/012-formula-manager-fixed-indicators.md)。
 
-已批准：Django Admin「通达信公式编辑器」改为「公式管理器」，含「通达信公式」「固定公式」。4 条私有 Formula 及其运行机制不变；固定 Python 指标在代码中注册、服务器执行，后台只读元数据并能启停；保留现有 CHANLUN 与 Chan.py，FREE/PRO 都可使用；不提供网页 Python 源码编辑功能。
+已批准：Django Admin「通达信公式编辑器」改为「公式管理器」，含「通达信公式」「固定公式」。4 条私有 Formula 及其运行机制不变；固定 Python 指标在代码中注册、服务器执行，后台只读元数据并能启停；保留现有 CHANLUN 与 Chan.py。**2026-10-17 用户更新会员权益**：已登录 FREE 可添加/移除 MA、MACD、BOLL、VOL、KDJ、RSI 六个原有基础指标及免费 CHANLUN；已登录 PRO 还可使用其他已启用的私人通达信公式和固定公式；访客维持原六个基础指标，不额外开放缠论。实际权限在后端验证，不能仅锁定按钮。网站前台所有用户只能添加/移除已授权指标，任何 FREE/PRO/访客都不得查看源码；既有受限 Django Admin 私人公式后台管理继续保留。暂不新增策略自动交易或网页代码编辑。
+
+### Task 014 — K 线操作体验 / 私人公式加载性能
+
+状态：`014-A BASELINE_PARTIAL / PAUSED_BY_USER`；`014-B NOT_STARTED`。2026-10-17 用户提出参考 SiftAlpha Crypto 图表操作手感及预装指标展示。已只读核对两套图表并完成独立临时目录合成公式测试（非真实私人公式响应速度），记录于 [PR #37](https://github.com/kuashan/huntalpha/pull/37)。**用户最新明确表示暂时不让 Codex 测量私人公式实际响应速度**，因此取消本阶段真实浏览器测速交接，不启动性能优化或缓存重构。后续须经用户再次指令才恢复。Task 012 的预装固定公式与会员授权另按独立任务实施，不以 Crypto 策略自动交易逻辑替换网站指标。
 
 ### Task 013 — SiftAlpha 正式版 V1.0.0 极简底部标识（优先于 Task 011）
 
@@ -196,8 +200,10 @@ Task 005.1.3 已完成 review、合并和浏览器验收，状态为 `ACCEPTED`�
 当前已批准的明确权益：
 - Watchlist：Free=10，Pro=20，账户全局共享。
 
+已确定的指标权益（见 Task 012）：
+- FREE 可使用六个基础指标 + CHANLUN；PRO 可使用后台启用的其他私人通达信和固定公式；网页全部用户无权查看源码。
+
 尚未定稿：
-- 私有指标额度
 - 策略信号额度
 - AI 分析额度
 - 高级 Scanner
