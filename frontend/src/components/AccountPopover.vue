@@ -137,9 +137,9 @@ onBeforeUnmount(() => {
       @focus="handleFocus"
     >
       <AccountTierBadge
-        :tier="user.tier"
-        :tier-label="user.tier_label"
-        :watchlist-limit="user.watchlist_limit"
+        :tier="membership?.tier || user.tier"
+        :tier-label="membership?.tier_label || user.tier_label"
+        :watchlist-limit="membership?.tier ? (membership.tier === 'pro' ? 20 : 10) : user.watchlist_limit"
         :user-name="user.name"
         :avatar-url="user.avatar_url"
       />
