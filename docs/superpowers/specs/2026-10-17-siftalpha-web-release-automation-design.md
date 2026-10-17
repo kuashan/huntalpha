@@ -84,10 +84,12 @@ GitHub ARM64 构建和网站专用最小权限工具；仍未批准替换/重启
 
 - Node 22 阶段执行现有前端 `npm ci` 和生产构建；生产静态资源继续使用 Django
   的 `/static/` 前缀。
-- Python 3.11 slim Bookworm 运行阶段保留既有 `requirements.txt` 的安装方式、
-  Node.js 运行时、`collectstatic`、Gunicorn 单 worker 和已有 healthcheck。
+- Python 3.11 slim Trixie 运行阶段保留既有 `requirements.txt` 的安装方式、
+  Node.js 运行时、`collectstatic`、Gunicorn 单 worker 和已有 healthcheck。选择
+  Trixie 是为了在 ARM64 构建中继续保留 `longbridge==5.2.0`，不降低 SDK 版本。
 - 继续使用项目现有依赖版本，特别是不改写或“升级修复” `longbridge==5.2.0` 的
-  安装语义。
+  安装语义；镜像构建阶段必须执行 `from longbridge.openapi import Config` 导入检查，
+  以便在产生镜像前验证安装结果。
 - 构建元数据写入 OCI labels：`org.opencontainers.image.source`、
   `org.opencontainers.image.revision`、`org.opencontainers.image.version` 和
   `org.opencontainers.image.created`。

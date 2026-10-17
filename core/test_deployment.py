@@ -116,6 +116,15 @@ class ProductionRuntimeContractTests(SimpleTestCase):
         self.assertNotIn("migrate", dockerfile.lower())
         self.assertIn("/healthz/", healthcheck)
 
+    def test_arm64_runtime_uses_python_trixie_for_longbridge_5_2(self):
+        """The ARM64 runtime must use the distribution that exposes the retained SDK pin."""
+        dockerfile = (self.base_dir / "deployment" / "web" / "Dockerfile").read_text(encoding="utf-8")
+        requirements = (self.base_dir / "requirements.txt").read_text(encoding="utf-8")
+        self.assertIn("FROM python:3.11-slim-trixie AS runtime", dockerfile)
+        self.assertNotIn("FROM python:3.11-slim-bookworm AS runtime", dockerfile)
+        self.assertIn("from longbridge.openapi import Config", dockerfile)
+        self.assertIn("longbridge==5.2.0", requirements)
+
 
 class ReleaseWorkflowContractTests(SimpleTestCase):
     def test_release_workflow_verifier_accepts_only_the_safe_arm64_pipeline(self):

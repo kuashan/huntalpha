@@ -13,7 +13,7 @@ COPY frontend/ ./
 ENV VITE_APP_BASE_URL=/static/
 RUN npm run build
 
-FROM python:3.11-slim-bookworm AS runtime
+FROM python:3.11-slim-trixie AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 WORKDIR /app
@@ -22,6 +22,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+RUN python -c "from longbridge.openapi import Config; print('longbridge: import ok')"
 COPY . ./
 COPY --from=frontend-build /src/frontend/dist ./frontend/dist
 RUN DJANGO_SECRET_KEY=build-only-secret \
