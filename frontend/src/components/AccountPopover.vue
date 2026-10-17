@@ -24,6 +24,7 @@ const identity = computed(() => summary.value?.user || props.user || {})
 const membership = computed(() => summary.value?.membership || null)
 const aiBeans = computed(() => summary.value?.ai_beans || null)
 const watchlist = computed(() => {
+  if (summary.value?.watchlist) return summary.value.watchlist
   if (props.watchlistTotal !== null && props.watchlistLimit !== null) {
     return {
       total: props.watchlistTotal,
@@ -139,7 +140,7 @@ onBeforeUnmount(() => {
       <AccountTierBadge
         :tier="membership?.tier || user.tier"
         :tier-label="membership?.tier_label || user.tier_label"
-        :watchlist-limit="membership?.tier ? (membership.tier === 'pro' ? 20 : 10) : user.watchlist_limit"
+        :watchlist-limit="summary?.watchlist?.limit ?? user.watchlist_limit"
         :user-name="user.name"
         :avatar-url="user.avatar_url"
       />
