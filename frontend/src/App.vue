@@ -188,6 +188,8 @@ async function toggleWatchlist(item) {
     }
     applyWatchlistMutation(payload.item || item, !wasWatchlisted, payload)
     watchlistError.value = ''
+    // The next oldest frozen entry becomes active after a deletion.
+    if (wasWatchlisted && !query.value.trim()) await loadSymbols()
   } catch (error) {
     watchlistError.value = error.message || (wasWatchlisted ? t('watchlistRemoveFailed') : t('watchlistAddFailed'))
   }
