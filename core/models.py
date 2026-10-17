@@ -170,6 +170,8 @@ class AccountProfile(models.Model):
 class AccountMembership(models.Model):
     """The authoritative persisted FREE/PRO tier, independent of staff flags."""
 
+    id = models.AutoField(primary_key=True)
+
     class Tier(models.TextChoices):
         FREE = "free", "FREE"
         PRO = "pro", "PRO"
