@@ -1,6 +1,7 @@
 """Task 011: persisted membership and reversible global watchlist freezing."""
 import json
 from django.contrib import admin
+from django.contrib.auth.models import Permission
 from django.contrib.auth import get_user_model
 from django.test import Client, RequestFactory, TestCase
 
@@ -134,6 +135,40 @@ class MembershipAndFrozenWatchlistTests(TestCase):
         AccountMembership.objects.filter(user=self.member).update(tier="pro")
         self.member.refresh_from_db()  # Clear any cached reverse OneToOne object.
         self.assertEqual(user_admin.account_tier_display(self.member), "PRO")
+
+
+    def test_actual_admin_edit_grants_pro_only_to_superuser(self):
+        url = f"/admin/auth/user/{self.member.pk}/change/"
+        membership = AccountMembership.objects.get(user=self.member)
+        base = {
+            "username": self.member.username,
+            "email": self.member.email,
+            "first_name": self.member.first_name,
+            "last_name": self.member.last_name,
+            "is_active": "on",
+            "date_joined_0": self.member.date_joined.strftime("%Y-%m-%d"),
+            "date_joined_1": self.member.date_joined.strftime("%H:%M:%S"),
+            "account_membership-TOTAL_FORMS": "1",
+            "account_membership-INITIAL_FORMS": "1",
+            "account_membership-MIN_NUM_FORMS": "0",
+            "account_membership-MAX_NUM_FORMS": "1",
+            "account_membership-0-id": str(membership.pk),
+            "account_membership-0-user": str(self.member.pk),
+            "account_membership-0-tier": "pro",
+            "_save": "Save",
+        }
+        self.client.force_login(self.superuser)
+        self.assertEqual(self.client.get(url).status_code, 200)
+        promoted = self.client.post(url, base)
+        self.assertEqual(promoted.status_code, 302, promoted.content[:1000])
+        self.assertEqual(AccountMembership.objects.get(user=self.member).tier, "pro")
+
+        self.staff.user_permissions.add(Permission.objects.get(codename="change_user", content_type__app_label="auth"))
+        self.client.force_login(self.staff)
+        forged = self.client.post(url, {**base, "account_membership-0-tier": "free"})
+        # Staff can modify permitted User fields but forged inline inputs are ignored.
+        self.assertIn(forged.status_code, {200, 302, 403})
+        self.assertEqual(AccountMembership.objects.get(user=self.member).tier, "pro")
 
     def test_tier_does_not_change_user_staff_or_superuser_flags(self):
         old = (self.member.is_staff, self.member.is_superuser)
