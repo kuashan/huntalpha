@@ -137,7 +137,10 @@ class FixedFormulaAndEntitlementTests(TestCase):
             self.assertTrue(is_fixed_indicator_enabled(definition))
             self.assertFalse(self.catalog(self.free)["REGISTERED_TEST"]["allowed"])
             self.assertTrue(self.catalog(self.pro)["REGISTERED_TEST"]["allowed"])
-            self.assertEqual(self.client.get("/api/indicator-render/REGISTERED_TEST/SH.TEST/").status_code, 403)
+            self.client.force_login(self.free)
+            with mock.patch("core.views.history_bars") as history:
+                self.assertEqual(self.client.get("/api/indicator-render/REGISTERED_TEST/SH.TEST/").status_code, 403)
+                history.assert_not_called()
 
     def test_staff_cannot_toggle_fixed_indicator_without_model_permission(self):
         self.client.force_login(self.staff)
@@ -160,3 +163,15 @@ class FixedFormulaAndEntitlementTests(TestCase):
             response = self.client.get("/api/indicator-render/SYNTHETIC_PRIVATE/SH.TEST/")
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["code"], "indicator_not_allowed")
+
+    def test_fixed_disabled_during_calculation_never_returns_a_result(self):
+        self.client.force_login(self.free)
+        bars = [{"time": 1700000000, "open": 10, "high": 11, "low": 9, "close": 10, "volume": 1}]
+        def disable(*args, **kwargs):
+            FixedIndicatorState.objects.update_or_create(code="CHANLUN", defaults={"enabled": False})
+            return {"lines": [], "sticks": [], "markers": [], "engine": "chan.py"}
+        with mock.patch("core.views.history_bars", return_value=(bars, None, None)), \
+             mock.patch("core.views.run_python_indicator", side_effect=disable):
+            response = self.client.get("/api/indicator-render/CHANLUN/SH.TEST/?period=日线")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "fixed_indicator_disabled")
