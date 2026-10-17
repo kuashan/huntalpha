@@ -73,6 +73,10 @@ candidate_image() {
   printf '%s@%s\n' "$IMAGE_REPOSITORY" "$digest"
 }
 
+docker_cli() {
+  DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$DOCKER_BIN" "$@"
+}
+
 ensure_state_directories() {
   mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR"
   chmod 700 "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR"
@@ -80,12 +84,12 @@ ensure_state_directories() {
 
 image_label() {
   local image="$1" label="$2"
-  "$DOCKER_BIN" image inspect --format "{{ index .Config.Labels \"$label\" }}" "$image"
+  docker_cli image inspect --format "{{ index .Config.Labels \"$label\" }}" "$image"
 }
 
 verify_arm64_image() {
   local image="$1" manifest
-  manifest="$($DOCKER_BIN buildx imagetools inspect "$image" --raw)" || { die 'cannot inspect image manifest'; return 1; }
+  manifest="$(docker_cli buildx imagetools inspect "$image" --raw)" || { die 'cannot inspect image manifest'; return 1; }
   "$PYTHON_BIN" - "$manifest" <<'PY'
 import json
 import sys
@@ -125,7 +129,7 @@ verify_trusted_source() {
   manifest_file="$temp_dir/siftalpha-web-build-manifest.json"
   oci_manifest_file="$temp_dir/oci-manifest.json"
   oci_provenance_file="$temp_dir/oci-provenance.json"
-  "$DOCKER_BIN" pull "$image" >/dev/null || { cleanup_provenance "$temp_dir"; return 1; }
+  docker_cli pull "$image" >/dev/null || { cleanup_provenance "$temp_dir"; return 1; }
   run_id="$(image_label "$image" 'io.siftalpha.build.run-id')"
   [[ "$run_id" =~ ^[0-9]+$ ]] || { die 'OCI run-id label is invalid'; cleanup_provenance "$temp_dir"; return 1; }
   GH_TOKEN="$token" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$run_json" || { cleanup_provenance "$temp_dir"; return 1; }
@@ -165,9 +169,9 @@ print(json.loads(open(sys.argv[1], encoding="utf-8").read())["head_sha"])
 PY
 )" || { cleanup_provenance "$temp_dir"; return 1; }
   verify_oci_labels "$image" "$expected_commit" "$run_id" || { cleanup_provenance "$temp_dir"; return 1; }
-  "$DOCKER_BIN" buildx imagetools inspect "$image" --format '{{json .Manifest}}' > "$oci_manifest_file" \
+  docker_cli buildx imagetools inspect "$image" --format '{{json .Manifest}}' > "$oci_manifest_file" \
     || { die 'cannot read OCI image index from GHCR'; cleanup_provenance "$temp_dir"; return 1; }
-  "$DOCKER_BIN" buildx imagetools inspect "$image" --format '{{json .Provenance.SLSA}}' > "$oci_provenance_file" \
+  docker_cli buildx imagetools inspect "$image" --format '{{json .Provenance.SLSA}}' > "$oci_provenance_file" \
     || { die 'cannot read BuildKit OCI provenance from GHCR'; cleanup_provenance "$temp_dir"; return 1; }
   "$PYTHON_BIN" "$SIFTALPHA_LIB_DIR/verify_buildkit_provenance.py" \
     "$manifest_file" "$oci_manifest_file" "$oci_provenance_file" "$digest" "$expected_commit" "$run_id" \
@@ -254,9 +258,9 @@ health_check() {
 }
 
 current_container() {
-  if "$DOCKER_BIN" container inspect "$COMPOSE_CONTAINER" >/dev/null 2>&1; then
+  if docker_cli container inspect "$COMPOSE_CONTAINER" >/dev/null 2>&1; then
     printf '%s\n' "$COMPOSE_CONTAINER"
-  elif "$DOCKER_BIN" container inspect "$LEGACY_CONTAINER" >/dev/null 2>&1; then
+  elif docker_cli container inspect "$LEGACY_CONTAINER" >/dev/null 2>&1; then
     printf '%s\n' "$LEGACY_CONTAINER"
   else
     die 'neither fixed website container exists'
@@ -272,8 +276,8 @@ snapshot_current_runtime() {
   else
     runtime='compose'
   fi
-  config_image="$($DOCKER_BIN inspect --format '{{.Config.Image}}' "$container")" || { die 'cannot inspect current website image'; return 1; }
-  image_id="$($DOCKER_BIN inspect --format '{{.Image}}' "$container")" || { die 'cannot inspect current website image ID'; return 1; }
+  config_image="$(docker_cli inspect --format '{{.Config.Image}}' "$container")" || { die 'cannot inspect current website image'; return 1; }
+  image_id="$(docker_cli inspect --format '{{.Image}}' "$container")" || { die 'cannot inspect current website image ID'; return 1; }
   [[ -n "$config_image" && -n "$image_id" ]] || { die 'current website image metadata is empty'; return 1; }
   snapshot="$(mktemp -d "$ROLLBACK_DIR/siftalpha-web.XXXXXX")" || { die 'cannot create deployment snapshot'; return 1; }
   chmod 700 "$snapshot"
@@ -313,14 +317,14 @@ restore_snapshot() {
   case "$runtime" in
     legacy)
       [[ "$(snapshot_value "$snapshot" container)" == "$LEGACY_CONTAINER" ]] || { die 'legacy snapshot container mismatch'; return 1; }
-      "$DOCKER_BIN" rm -f "$COMPOSE_CONTAINER" >/dev/null 2>&1 || true
-      "$DOCKER_BIN" start "$LEGACY_CONTAINER" || { die 'cannot restart retained legacy website container'; return 1; }
+      docker_cli rm -f "$COMPOSE_CONTAINER" >/dev/null 2>&1 || true
+      docker_cli start "$LEGACY_CONTAINER" || { die 'cannot restart retained legacy website container'; return 1; }
       ;;
     compose)
       image="$(snapshot_value "$snapshot" config_image)" || return 1
       [[ "$image" == "$IMAGE_REPOSITORY"@sha256:* ]] || { die 'Compose snapshot image is not immutable'; return 1; }
       render_compose "${image#*@}" || return 1
-      "$DOCKER_BIN" compose -f "$COMPOSE_FILE" --project-name siftalpha-web up -d --force-recreate || { die 'cannot restore prior Compose website service'; return 1; }
+      docker_cli compose -f "$COMPOSE_FILE" --project-name siftalpha-web up -d --force-recreate || { die 'cannot restore prior Compose website service'; return 1; }
       ;;
     *) die 'deployment snapshot runtime is invalid'; return 1 ;;
   esac
@@ -331,8 +335,8 @@ restore_snapshot() {
 status() {
   local container image state
   container="$(current_container)"
-  state="$($DOCKER_BIN inspect --format '{{.State.Status}}' "$container")"
-  image="$($DOCKER_BIN inspect --format '{{.Config.Image}}' "$container")"
+  state="$(docker_cli inspect --format '{{.State.Status}}' "$container")"
+  image="$(docker_cli inspect --format '{{.Config.Image}}' "$container")"
   printf 'container: %s\nstate: %s\nimage: %s\nport: %s\n' "$container" "$state" "$image" "$LOOPBACK_PORT"
 }
 
@@ -377,16 +381,16 @@ PY
 first_compose_cutover() {
   local digest="$1"
   render_compose "$digest"
-  "$DOCKER_BIN" stop "$LEGACY_CONTAINER"
-  if ! "$DOCKER_BIN" compose -f "$COMPOSE_FILE" --project-name siftalpha-web up -d --force-recreate; then
-    "$DOCKER_BIN" rm -f "$COMPOSE_CONTAINER" || true
-    "$DOCKER_BIN" start "$LEGACY_CONTAINER"
+  docker_cli stop "$LEGACY_CONTAINER"
+  if ! docker_cli compose -f "$COMPOSE_FILE" --project-name siftalpha-web up -d --force-recreate; then
+    docker_cli rm -f "$COMPOSE_CONTAINER" || true
+    docker_cli start "$LEGACY_CONTAINER"
     die 'candidate Compose service failed; legacy container was restarted'
     return 1
   fi
   if ! health_check; then
-    "$DOCKER_BIN" rm -f "$COMPOSE_CONTAINER" || true
-    "$DOCKER_BIN" start "$LEGACY_CONTAINER"
+    docker_cli rm -f "$COMPOSE_CONTAINER" || true
+    docker_cli start "$LEGACY_CONTAINER"
     die 'candidate Compose service was unhealthy; legacy container was restarted'
     return 1
   fi
@@ -399,7 +403,7 @@ deploy_candidate() {
   if [[ ! -f "$COMPOSE_FILE" ]]; then
     first_compose_cutover "$digest" || return 1
   else
-    if ! render_compose "$digest" || ! "$DOCKER_BIN" compose -f "$COMPOSE_FILE" --project-name siftalpha-web up -d --force-recreate || ! health_check; then
+    if ! render_compose "$digest" || ! docker_cli compose -f "$COMPOSE_FILE" --project-name siftalpha-web up -d --force-recreate || ! health_check; then
       restore_snapshot "$(latest_snapshot)" || return 1
       die 'candidate Compose service failed; prior website service was restored'
       return 1
