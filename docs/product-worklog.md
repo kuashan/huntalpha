@@ -25,9 +25,11 @@
 
 ### Task 011 — FREE / PRO 真实会员与冻结自选
 
-状态：`READY_FOR_CODEX`；规格：[`docs/tasks/011-free-pro-membership-watchlist-freeze.md`](tasks/011-free-pro-membership-watchlist-freeze.md)。
+状态：`IN_PROGRESS / ISOLATED_TESTED / NOT_MERGED / NOT_DEPLOYED`。独立代码 [PR #38](https://github.com/kuashan/huntalpha/pull/38)（以 PR #36 的代码为 stacked base），提交 `6ad4d23d51ef941f92d85babdf2ea773d010ecb0`，待完整审查、CI、浏览器验收和正式迁移授权；规格：[`docs/tasks/011-free-pro-membership-watchlist-freeze.md`](tasks/011-free-pro-membership-watchlist-freeze.md)。
 
 已批准：新注册默认 FREE；后台仅真正的 superuser 可改 FREE/PRO；后端账户权益为 FREE 10 / PRO 20；PRO 降级 FREE 时按原 `created_at,id` 顺序前 10 活动、其余冻结不删除；删一个活动自动解冻最早冻结；升级后按原顺序恢复。前台徽章和个人中心以服务器等级为准；不引入支付及其他 PRO 权益。需兼容 PR #34 的统一自选。
+
+**2026-10-17 开工结果：** 已写入持久化会员模型与新用户 FREE 信号、旧用户迁移、Django 超管编辑、冻结自选 API/界面同步；独立临时环境新旧自选测试 21/21 PASS、模拟旧数据库带 12 自选/4 条合成公式迁移保留 PASS、前端 staging overlay 构建 PASS。**尚未进行正式数据库迁移、线上部署或 PR 合并**，不应视为已上线。
 
 ### Task 012 — 公式管理器 / 固定公式
 
@@ -41,11 +43,11 @@
 
 ### Task 013 — SiftAlpha 正式版 V1.0.0 极简底部标识（优先于 Task 011）
 
-状态：`IMPLEMENTED / REVIEW_PENDING / NOT_MERGED / NOT_DEPLOYED`；规格：[`docs/tasks/013-website-version-and-release-records.md`](tasks/013-website-version-and-release-records.md)。
+状态：`USER_REPORTED_DEPLOYED_AND_ACCEPTED / PR_NOT_MERGED`。**2026-10-17 用户明确表示 Codex 已完成 V1.0.0 部署并验收通过**；此结论是用户报告，非本轮额外技术验证。GitHub [PR #36](https://github.com/kuashan/huntalpha/pull/36) 仍未合并，正式发布记录需要保留实际 SHA 与回滚证据。规格：[`docs/tasks/013-website-version-and-release-records.md`](tasks/013-website-version-and-release-records.md)。
 
 **2026-10-16 用户最终更正并批准**：从当前站点直接以正式产品版本 **SiftAlpha.com • V1.0.0** 持续完善，不在网页显示 DEV/staging/测试版。主交易页和个人中心底部使用同一小型静态版本文字；**不可以点击版本号，不要网页更新记录、弹窗、发布历史页或发布管理系统**。版本值单一维护，未来升级须再获用户确认。当前 Access、环境保护和真实构建/备份事实保持不变，不能用版本号替代工程发布/恢复核验。
 
-**2026-10-16 代码与构建进展：** 已创建 [PR #36](https://github.com/kuashan/huntalpha/pull/36)，以已验收 PR #34 分支为基线，仅涉及两页面、一份共用版本组件及静态测试。静态断言 9/9 PASS；Oracle **隔离临时目录**核对 PR #36 前端源文件 33/33、依赖和 Vite 配置，`npm ci`、`npm run build`、专用 Node/指标/实时/图表测试均 PASS；真实 PR #34→PR #36 四文件的 `git diff --check` PASS。PR #36 已有实际测试评论作为证据。**尚未通过桌面/手机线上浏览器验收，未部署、未合并，也没有该 SHA 的 GitHub Actions CI 记录**。不得把代码实现等同正式上线。
+**2026-10-16 代码与构建进展：** 已创建 [PR #36](https://github.com/kuashan/huntalpha/pull/36)，以已验收 PR #34 分支为基线，仅涉及两页面、一份共用版本组件及静态测试。静态断言 9/9 PASS；Oracle **隔离临时目录**核对 PR #36 前端源文件 33/33、依赖和 Vite 配置，`npm ci`、`npm run build`、专用 Node/指标/实时/图表测试均 PASS；真实 PR #34→PR #36 四文件的 `git diff --check` PASS。PR #36 已有实际测试评论作为证据。**此处原为 2026-10-16 隔离构建阶段历史结果；2026-10-17 用户已报告由 Codex 完成线上部署和网页验收（本轮未独立复测）**。PR #36 仍未合并，也没有该 SHA 的 GitHub Actions CI 记录；不能把仅有的隔离构建证据冒充 CI 或回滚验证。
 
 **用户批准规则（全项目）**：任何助手或 Codex 主动提出的新功能、额外优化、界面入口、扩大范围等，必须先与用户讨论、取得明确确认，然后才能开发；不得自行实现。具体边界同步见 `AGENTS.md` 第 6.1 节。
 
