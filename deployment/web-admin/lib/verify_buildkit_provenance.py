@@ -15,6 +15,16 @@ def fail(message: str) -> None:
     raise SystemExit(message)
 
 
+def normalize_provenance(value):
+    # buildx exposes the predicate for current versions, while registry-level
+    # reads may still return the SLSA wrapper or the in-toto statement.
+    if isinstance(value, dict) and isinstance(value.get("SLSA"), dict):
+        value = value["SLSA"]
+    if isinstance(value, dict) and isinstance(value.get("predicate"), dict):
+        value = value["predicate"]
+    return value
+
+
 def main() -> None:
     if len(sys.argv) != 9:
         fail("usage: verify_buildkit_provenance.py build-manifest oci-manifest provenance digest commit run_id source-ref workflow")
@@ -25,7 +35,9 @@ def main() -> None:
     branch = source_ref.removeprefix("refs/heads/")
     manifest = load(build_manifest_path)
     oci_manifest = load(oci_manifest_path)
-    provenance = load(provenance_path)
+    provenance = normalize_provenance(load(provenance_path))
+    if not isinstance(provenance, dict):
+        fail("OCI provenance payload is not an object")
 
     if manifest.get("digest") != digest:
         fail("build manifest digest mismatch")
@@ -51,12 +63,25 @@ def main() -> None:
     if not linked_attestations:
         fail("BuildKit provenance attestation is not linked to the linux/arm64 manifest")
 
-    if provenance.get("buildType") != "https://mobyproject.org/buildkit@v1":
+    legacy_build_type = provenance.get("buildType")
+    v1_build_definition = provenance.get("buildDefinition")
+    if legacy_build_type == "https://mobyproject.org/buildkit@v1":
+        if not isinstance(provenance.get("invocation"), dict):
+            fail("OCI provenance invocation is missing")
+        if not isinstance(provenance.get("metadata"), dict):
+            fail("OCI provenance metadata is missing")
+    elif (
+        isinstance(v1_build_definition, dict)
+        and v1_build_definition.get("buildType")
+        == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
+        and isinstance(v1_build_definition.get("externalParameters"), dict)
+        and isinstance(v1_build_definition.get("resolvedDependencies"), list)
+        and isinstance(provenance.get("runDetails"), dict)
+    ):
+        # SLSA v1 moved BuildKit's fields under buildDefinition/runDetails.
+        pass
+    else:
         fail("OCI provenance is not BuildKit SLSA provenance")
-    if not isinstance(provenance.get("invocation"), dict):
-        fail("OCI provenance invocation is missing")
-    if not isinstance(provenance.get("metadata"), dict):
-        fail("OCI provenance metadata is missing")
 
     expected_tag = f"sha-{commit}"
     version_tag = f"v1.0.0-sha-{commit}"

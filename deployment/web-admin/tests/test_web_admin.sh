@@ -39,7 +39,11 @@ case "${1:-}" in
       printf '{"digest":"%s","manifests":[{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","platform":{"architecture":"arm64","os":"linux"}},{"digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","annotations":{"vnd.docker.reference.type":"attestation-manifest","vnd.docker.reference.digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"platform":{"architecture":"unknown","os":"unknown"}}]}\n' "$FAKE_DIGEST"
     elif [[ "$*" == *".Provenance.SLSA"* ]]; then
       [[ "${FAKE_GH_MODE:-ok}" == provenance-fail ]] && exit 1
-      printf '{"buildType":"https://mobyproject.org/buildkit@v1","invocation":{},"metadata":{}}\n'
+      if [[ "${FAKE_PROVENANCE_VERSION:-v1}" == v0.2 ]]; then
+        printf '{"buildType":"https://mobyproject.org/buildkit@v1","invocation":{},"metadata":{}}\n'
+      else
+        printf '{"buildDefinition":{"buildType":"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md","externalParameters":{},"resolvedDependencies":[]},"runDetails":{"builder":{"id":""},"metadata":{}}}\n'
+      fi
     else
       printf '{"manifests":[{"platform":{"architecture":"arm64","os":"linux"}}]}\n'
     fi
@@ -160,6 +164,9 @@ load_config "$TEST_ROOT/web-admin.conf"
 [[ "$IMAGE_REPOSITORY" == ghcr.io/kuashan/siftalpha-web ]] || fail "environment override changed fixed repository"
 
 assert_ok preflight_candidate "$FAKE_DIGEST"
+export FAKE_PROVENANCE_VERSION=v0.2
+assert_ok preflight_candidate "$FAKE_DIGEST"
+export FAKE_PROVENANCE_VERSION=v1
 export FAKE_GH_MODE=manifest-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
 export FAKE_GH_MODE=manifest-missing
