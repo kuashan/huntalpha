@@ -129,3 +129,84 @@ jobs:
         run: |
           docker rm --force task012-ci-web 2>/dev/null || true
           docker volume rm --force task012-ci-data 2>/dev/null || true
+
+
+  upgrade-from-task011:
+    name: Existing Task011 data -> Task012 migration (synthetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DJANGO_SECRET_KEY: isolated-migration-upgrade-not-production
+    steps:
+      - name: Checkout exact Task011 production source into sandbox
+        uses: actions/checkout@v4
+        with:
+          ref: ebd23f4248219fb70fe457ac800d5603fbf47ef1
+          path: previous
+          submodules: true
+      - name: Checkout release candidate separately
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+          submodules: true
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install -r candidate/requirements.txt
+      - name: Create historical schema and synthetic user/private formulas
+        working-directory: previous
+        run: |
+          python manage.py migrate --noinput
+          python manage.py shell -c '
+          from django.contrib.auth import get_user_model
+          from core.models import AccountMembership, MarketSymbol, WatchlistEntry
+          from formula_editor.models import Formula
+          u = get_user_model().objects.create_user(username="synthetic-upgrade-ci", password="synthetic-only-not-secret")
+          AccountMembership.objects.update_or_create(user=u, defaults={"tier":"pro"})
+          symbol=MarketSymbol.objects.create(code="US.CI_ONLY",name="CI Only",market="us",security_type="stock",provider="synthetic",provider_symbol="CI_ONLY")
+          WatchlistEntry.objects.create(user=u,symbol=symbol)
+          for n in range(4):
+              Formula.objects.create(code=f"CI_FORMULA_{n}",name="Synthetic",source=f"SYNTHETIC_ONLY_{n}:MA(C,5);",placement="main")
+          assert Formula.objects.filter(code__startswith="CI_FORMULA_").count()==4
+          print("Task011 synthetic baseline created")
+          '
+      - name: Create and verify offline snapshot before migration
+        run: |
+          python - <<'PY'
+          import sqlite3, pathlib
+          src=pathlib.Path('previous/db.sqlite3')
+          dst=pathlib.Path('previous/db.before-task012.sqlite3')
+          source=sqlite3.connect(str(src))
+          backup=sqlite3.connect(str(dst))
+          source.backup(backup)
+          assert backup.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+          backup.close()
+          source.close()
+          print('Synthetic pre-migration backup integrity: ok')
+          PY
+      - name: Apply candidate schema only to synthetic old database
+        working-directory: candidate
+        env:
+          HUNTALPHA_DATABASE_PATH: ${{ github.workspace }}/previous/db.sqlite3
+        run: |
+          python manage.py migrate --noinput
+          python manage.py migrate --check
+      - name: Verify four formula sources, PRO membership and watchlist unchanged
+        working-directory: candidate
+        env:
+          HUNTALPHA_DATABASE_PATH: ${{ github.workspace }}/previous/db.sqlite3
+        run: |
+          python manage.py shell -c '
+          from django.contrib.auth import get_user_model
+          from core.models import AccountMembership, WatchlistEntry
+          from formula_editor.models import Formula, FixedIndicatorState
+          u=get_user_model().objects.get(username="synthetic-upgrade-ci")
+          assert AccountMembership.objects.get(user=u).tier=="pro"
+          assert WatchlistEntry.objects.filter(user=u,symbol__code="US.CI_ONLY").count()==1
+          for n in range(4):
+              assert Formula.objects.get(code=f"CI_FORMULA_{n}").source==f"SYNTHETIC_ONLY_{n}:MA(C,5);"
+          assert FixedIndicatorState.objects.count()==0
+          print("CI upgrade preserved 4 synthetic formulas, PRO account, watchlist; new fixed indicator table ready")
+          '
