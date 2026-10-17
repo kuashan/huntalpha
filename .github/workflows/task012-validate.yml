@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/012-formula-manager-entitlements-20261017
+      - release/task012-safe-integration-20261018
   pull_request:
     branches:
       - feat/011-free-pro-membership-watchlist-20261017
