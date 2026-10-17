@@ -2,8 +2,8 @@
 
 ## 状态与决策
 
-本设计已由用户确认，当前批准范围仅为在独立发布分支中提交本文档；尚未批准
-安装服务器工具、修改 sudoers、建立镜像包、替换容器或部署任何网站版本。
+本设计已由用户确认。用户现批准修订本设计并编写详细实施计划；尚未批准实际
+编码、安装服务器工具、修改 sudoers、建立镜像包、替换容器或部署任何网站版本。
 
 - 发布分支：`release/siftalpha-web-v1`
 - 精确基线：`ebd23f4248219fb70fe457ac800d5603fbf47ef1`
@@ -11,7 +11,9 @@
 - 运行平台：Oracle Cloud ARM64（aarch64）
 - 正式版本展示：`SiftAlpha.com • V1.0.0`
 
-发布分支暂时独立。它不合并现有 PR，也不修改 `main`；GitHub Actions 产出镜像
+发布分支暂时独立。它不合并现有 PR，也不修改 `main`；这是用户对
+`AGENTS.md`“从最新 main 创建分支”规则作出的明确、有限例外：该分支必须以当前
+用户验收且在线运行的 `ebd23f4…` 为唯一业务源码基线。GitHub Actions 产出镜像
 不等于批准部署。每次生产部署仍须由用户单独、明确批准。
 
 ## 已核实的现状
@@ -28,6 +30,11 @@
   已部署的源码提交本身没有 Dockerfile；线上构建曾依赖 Task 009 工作区中的
   Dockerfile。这阻止从精确源码提交可重复构建镜像，必须在发布分支补齐受版本
   控制的构建定义。
+- 进一步核对显示，`ebd23f4…` 也不包含当前线上容器使用的生产 settings、
+  `/healthz/` 与 healthcheck 文件。当前 V1 镜像实质上是“Task 009 已验收运行层
+  加上 `ebd23f4…` 业务树”的混合构建，不能视为可重复的 Git 基线。发布分支必须
+  只迁入这一小组非业务部署文件，并以逐文件审查和回归测试证明没有引入业务逻辑
+  变化。
 - Oracle 主机运行 Docker 29.8.1，具有现成 GHCR Crypto 镜像和受控管理工具。
   `rdc-agent` 不在 Docker 组、不能直接访问 `/var/run/docker.sock`，目前只可
   通过 sudo 调用根权限的 `/usr/local/sbin/siftalpha-crypto-admin`。
@@ -67,7 +74,11 @@
 ### Docker 构建输入
 
 发布分支新增受版本控制的 `deployment/web/Dockerfile`、`.dockerignore` 和构建
-契约测试。Dockerfile 以经过 Task 009 证明可在 ARM64 运行的多阶段模式为基础：
+契约测试。为复现线上混合运行层，实施前先从已验收的 Task 009 提交迁入且仅迁入
+以下非业务文件/语义：环境化 Django production settings、`/healthz/`、
+`docker/healthcheck.py`、WhiteNoise 静态服务与 Gunicorn 入口；迁入后逐一审查，
+不得同时携带行情、账户、公式、指标或前端业务差异。Dockerfile 以经过 Task 009
+证明可在 ARM64 运行的多阶段模式为基础：
 
 - Node 22 阶段执行现有前端 `npm ci` 和生产构建；生产静态资源继续使用 Django
   的 `/static/` 前缀。
@@ -85,17 +96,19 @@
 
 ### GitHub Actions
 
-新增 `SiftAlpha Web CI and ARM64` workflow，遵循现有 Crypto workflow 的安全
-分层：
+新增 `SiftAlpha Web CI and ARM64` workflow。第一阶段只采用发布分支 push 自动
+构建：由于 workflow 尚未进入默认分支，不把 `workflow_dispatch` 作为可靠的人工
+构建入口。它遵循现有 Crypto workflow 的安全分层：
 
 | 触发 | 校验 | GHCR 推送 | 部署 |
 | --- | --- | --- | --- |
-| 同仓库 PR | Django、前端与 Docker 构建验证 | 否 | 否 |
-| 推送到 `release/siftalpha-web-v1` | 同上 | 是 | 否 |
-| `workflow_dispatch` | 同上，按指定 ref | 是 | 否 |
+| 同仓库 PR（后续启用） | Django、前端与 Docker 构建验证 | 否 | 否 |
+| 推送到 `release/siftalpha-web-v1` | Django、前端、ARM64 镜像与 provenance 校验 | 是 | 否 |
+| `workflow_dispatch` | 第一阶段不依赖；进入默认分支后另行评估 | 否 | 否 |
 
-fork PR 不取得包写入权限。工作流只用 `contents: read`，仅在可信发布分支/手动
-构建工作中附加 `packages: write`。Buildx 使用 `linux/arm64`；镜像推送至
+fork PR 不取得包写入权限。第一阶段工作流仅在可信发布分支使用 `contents: read`、
+`packages: write`、`attestations: write` 与 `id-token: write`；没有 deploy 权限、
+服务器凭据、Cloudflare 凭据或任何数据库凭据。Buildx 使用 `linux/arm64`；镜像推送至
 `ghcr.io/kuashan/siftalpha-web`，并至少创建两个可追溯标签：
 
 ```text
@@ -109,8 +122,13 @@ ghcr.io/kuashan/siftalpha-web:v1.0.0-sha-<full-commit>
 ghcr.io/kuashan/siftalpha-web@sha256:<64 lowercase hexadecimal characters>
 ```
 
-工作流摘要、GitHub release/package metadata 和后续部署记录必须包含：Run ID、
-完整源码 SHA、镜像仓库、平台和 Digest。标签仅用于人工定位，不能作为部署输入。
+工作流必须把完整 Git Commit、GitHub Actions Run ID、Run URL、workflow 名、发布
+分支、平台和 Digest 同时写入 job summary、构建 manifest artifact 和 OCI labels；
+同时发布 GitHub build provenance attestation。`preflight` 只接受固定 GHCR 仓库的
+Digest，并核对 ARM64 manifest 与 OCI source/revision/run-id labels。ChatGPT Work
+在部署前还须从 GitHub API 核对 Run 结论为 success、head SHA 与镜像标签相同、
+job summary/manifest 的 Digest 与用户提供的 Digest 相同；可用时再验证 provenance
+attestation。标签仅用于人工定位，不能作为部署输入。
 
 ## 服务器受控部署边界
 
@@ -125,7 +143,8 @@ Work 写入：
 /etc/siftalpha-web-admin.env                        root:root 0600
 /srv/siftalpha/web-deployment/compose.yaml          root:root 0600
 /var/lib/siftalpha-web-admin/rollbacks/              root:root 0700
-/srv/siftalpha/task009-data-c8df985/backups/         root:root 0700
+/var/lib/siftalpha-web-admin/backups/                root:root 0700
+/var/lib/siftalpha-web-admin/recovery-checks/        root:root 0700
 /etc/sudoers.d/rdc-agent-siftalpha-web               root:root 0440
 ```
 
@@ -134,10 +153,17 @@ Work 写入：
 probe 路径、回滚目录和根权限环境文件路径。环境文件可含敏感值，但永远不显示、
 复制到 Git、写进命令输出或保存在普通用户目录。
 
-网站当前是手动 `docker run` 容器。首次真实部署之前需要由 root 从该容器的有效
-配置创建一次 Compose 清单，并在受控环境中逐项核对端口、挂载、运行参数和环境
-文件；不得把未过滤的 `docker inspect` 输出作为可执行 shell 命令。该“受控
-adoption”只准备配置，本任务的构建能力阶段不切换现有容器。
+网站当前是手动 `docker run` 容器。首次真实部署前，root 必须执行一次受控
+adoption：从已验证的固定字段创建 Compose 清单，并在受控环境中逐项核对端口、
+数据卷、运行参数、镜像 ID 与根权限环境文件；不得把未过滤的 `docker inspect`
+输出作为可执行 shell 命令。adoption 还要保存原容器名、原本地镜像引用/ID、原
+配置校验值及原数据卷绑定的 root-only 快照。
+
+首次真正 `deploy` 时，工具必须先拉取并校验候选镜像、创建数据库备份和配置快照，
+再停止但不删除原 `docker run` 容器，并启动 Compose 服务。若新服务未通过健康
+检查，工具必须停止/移除候选 Compose 容器后直接启动保留的原容器；这使原本地
+镜像、原配置和原数据卷可完整恢复。首次切换成功后，原容器和原本地镜像继续保留，
+直到用户在后续单独授权的维护任务中批准清理。
 
 ### `siftalpha-web-admin` 命令契约
 
@@ -157,8 +183,11 @@ rollback
 - `health`：对固定 loopback 网站执行首页、`/healthz/`、登录页以及配置好的
   无副作用 API probes，接受明确的预期认证状态，拒绝 5xx 和不符合契约的响应。
 - `preflight`：验证 Digest 格式、固定 GHCR 仓库、远端/本地 ARM64 manifest、
-  OCI source/revision labels、可用磁盘、现有容器健康、数据卷可读、备份目录与
-  SQLite `integrity_check`。它可以拉取候选镜像到本地缓存，但绝不停止或重建容器。
+  OCI source/revision/run-id labels、可用磁盘、现有容器健康、数据卷可读、备份目录
+  与 SQLite `integrity_check`。它还必须用 `sqlite3.Connection.backup()` 创建
+  root-only 临时副本、从该副本实际恢复到独立临时数据库、再次运行完整性检查，
+  然后安全删除临时检查文件；不输出数据库内容。它可以拉取候选镜像到本地缓存，
+  但绝不停止或重建容器。
 - `deploy`：仅在显式用户授权后使用。它再次执行 preflight，创建原子 SQLite
   backup（Python `sqlite3.Connection.backup()`）、SHA-256 和
   `PRAGMA integrity_check`，快照 root 配置及当前镜像引用，随后只重建固定网站
