@@ -36,6 +36,8 @@ jobs:
         run: python manage.py check
       - name: Migration definition check without production DB
         run: python manage.py makemigrations --check --dry-run
+      - name: Collect admin assets for Django staticfiles manifest
+        run: python manage.py collectstatic --noinput
       - name: Test isolated synthetic database
         run: python manage.py test core formula_editor --noinput
 
