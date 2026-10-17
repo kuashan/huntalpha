@@ -14,7 +14,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.core.exceptions import ValidationError
-from django.http import JsonResponse, StreamingHttpResponse
+from django.http import FileResponse, JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
@@ -76,6 +76,19 @@ def json(data, status=200):
     result["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
     result["Access-Control-Allow-Credentials"] = "true"
     return result
+
+
+@require_GET
+def healthz(request):
+    return JsonResponse({"status": "ok"})
+
+
+@require_GET
+def frontend_index(request):
+    index_path = settings.FRONTEND_DIST_DIR / "index.html"
+    if not index_path.is_file():
+        return JsonResponse({"error": "frontend build is not available"}, status=503)
+    return FileResponse(index_path.open("rb"), content_type="text/html")
 
 
 def user_payload(user, request=None):

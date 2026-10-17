@@ -46,6 +46,27 @@ def _load_local_env(path):
 _load_local_env(BASE_DIR / ".env")
 
 
+def _env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_list(name, default=()):
+    value = os.environ.get(name)
+    if value is None:
+        return list(default)
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _env_int(name, default=0):
+    try:
+        return max(int(os.environ.get(name, default)), 0)
+    except (TypeError, ValueError):
+        return default
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
@@ -55,9 +76,11 @@ if not SECRET_KEY:
     raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set in the environment")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = _env_bool("DJANGO_DEBUG", True)
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = _env_list("HUNTALPHA_ALLOWED_HOSTS")
+if not DEBUG and not ALLOWED_HOSTS:
+    raise ImproperlyConfigured("HUNTALPHA_ALLOWED_HOSTS must be set when DJANGO_DEBUG=0")
 
 
 # Application definition
@@ -76,6 +99,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'core.middleware.ApiCorsMiddleware',
@@ -111,7 +135,7 @@ WSGI_APPLICATION = 'quant_site.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': Path(os.environ.get('HUNTALPHA_DATABASE_PATH', str(BASE_DIR / 'db.sqlite3'))),
     }
 }
 
@@ -150,13 +174,24 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = Path(os.environ.get('HUNTALPHA_STATIC_ROOT', str(BASE_DIR / 'staticfiles')))
+FRONTEND_DIST_DIR = Path(os.environ.get('HUNTALPHA_FRONTEND_DIST_DIR', str(BASE_DIR / 'frontend' / 'dist')))
+STATICFILES_DIRS = [FRONTEND_DIST_DIR] if FRONTEND_DIST_DIR.is_dir() else []
+STORAGES = {
+    'default': {
+        'BACKEND': 'django.core.files.storage.FileSystemStorage',
+    },
+    'staticfiles': {
+        'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+    },
+}
 MEDIA_URL = '/media/'
 MEDIA_ROOT = Path(os.environ.get('HUNTALPHA_MEDIA_ROOT', str(BASE_DIR.parent / 'huntalpha-user-media')))
 
 # Local daily_stock_analysis adapter.  The browser only calls Django; AI keys
 # and the upstream analysis service remain private to the host.
-DSA_API_BASE_URL = 'http://127.0.0.1:8000'
+DSA_API_BASE_URL = os.environ.get('DSA_API_BASE_URL', 'http://127.0.0.1:8000')
 AI_CREDITS_ENFORCED = False
 
 # Watchlist quotas are configuration, not schema.  Until a real entitlement
@@ -171,8 +206,27 @@ def _watchlist_limit(name, default):
 HUNTALPHA_WATCHLIST_FREE_LIMIT = _watchlist_limit('HUNTALPHA_WATCHLIST_FREE_LIMIT', 10)
 HUNTALPHA_WATCHLIST_PRO_LIMIT = _watchlist_limit('HUNTALPHA_WATCHLIST_PRO_LIMIT', 20)
 
-# Vue's local development origin is allowed to retain Django's session cookie.
-CSRF_TRUSTED_ORIGINS = ['http://127.0.0.1:5173']
+# Local Vite development is allowed by default; production origins must be
+# supplied by the deployment environment rather than embedded in the image.
+LOCAL_FRONTEND_ORIGIN = 'http://127.0.0.1:5173'
+CSRF_TRUSTED_ORIGINS = _env_list(
+    'HUNTALPHA_CSRF_TRUSTED_ORIGINS',
+    (LOCAL_FRONTEND_ORIGIN,) if DEBUG else (),
+)
+CORS_ALLOWED_ORIGINS = _env_list(
+    'HUNTALPHA_CORS_ALLOWED_ORIGINS',
+    (LOCAL_FRONTEND_ORIGIN,) if DEBUG else (),
+)
+SESSION_COOKIE_SECURE = _env_bool('HUNTALPHA_SESSION_COOKIE_SECURE', not DEBUG)
+CSRF_COOKIE_SECURE = _env_bool('HUNTALPHA_CSRF_COOKIE_SECURE', not DEBUG)
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') if _env_bool('HUNTALPHA_TRUST_PROXY') else None
+SECURE_SSL_REDIRECT = _env_bool('HUNTALPHA_SECURE_SSL_REDIRECT')
+SECURE_HSTS_SECONDS = _env_int('HUNTALPHA_HSTS_SECONDS')
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool('HUNTALPHA_HSTS_INCLUDE_SUBDOMAINS')
+SECURE_HSTS_PRELOAD = _env_bool('HUNTALPHA_HSTS_PRELOAD')
 
 # Keep Django's built-in user and group administration visible in SimpleUI.
 SIMPLEUI_CONFIG = {'system_keep': True}
