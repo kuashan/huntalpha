@@ -10,7 +10,7 @@ class DeploymentContractTests(SimpleTestCase):
         super().setUpClass()
         cls.base_dir = Path(settings.BASE_DIR)
         cls.frontend_dir = cls.base_dir / "frontend" / "src"
-        cls.api_source = (cls.frontend_dir / "apiBase.js").read_text(encoding="utf-8") if (cls.frontend_dir / "api.js").exists() else ""
+        cls.api_source = (cls.frontend_dir / "apiBase.js").read_text(encoding="utf-8") if (cls.frontend_dir / "apiBase.js").exists() else ""
         cls.vite_source = (cls.base_dir / "frontend" / "vite.config.js").read_text(encoding="utf-8")
         cls.settings_source = (cls.base_dir / "quant_site" / "settings.py").read_text(encoding="utf-8")
 
