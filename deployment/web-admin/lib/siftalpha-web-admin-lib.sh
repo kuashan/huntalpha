@@ -87,11 +87,11 @@ docker_cli() {
 }
 
 ensure_state_directories() {
-  mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR" \
+  mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR" "$STATE_DIR/gh-cli-config" \
     || { die 'cannot create protected deployment state directories'; return 1; }
-  chmod 700 "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR" \
+  chmod 700 "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR" "$STATE_DIR/gh-cli-config" \
     || { die 'cannot secure protected deployment state directories'; return 1; }
-  [[ -d "$STATE_DIR" && -w "$STATE_DIR" && -w "$BACKUP_DIR" && -w "$ROLLBACK_DIR" && -w "$RECOVERY_DIR" ]] \
+  [[ -d "$STATE_DIR" && -w "$STATE_DIR" && -w "$BACKUP_DIR" && -w "$ROLLBACK_DIR" && -w "$RECOVERY_DIR" && -w "$STATE_DIR/gh-cli-config" ]] \
     || { die 'protected deployment state directories are not writable'; return 1; }
   command -v "$PYTHON_BIN" >/dev/null 2>&1 \
     && [[ -r "$SIFTALPHA_MIGRATION_GUARD" ]] \
@@ -134,12 +134,13 @@ verify_gh_binary() {
 }
 
 verify_trusted_source() {
-  local digest="$1" image run_id run_json temp_dir manifest_file oci_manifest_file oci_provenance_file token
+  local digest="$1" image run_id run_json temp_dir manifest_file oci_manifest_file oci_provenance_file token gh_config_dir
   image="$(candidate_image "$digest")"
   verify_gh_binary || return 1
   token="$(<"$GITHUB_TOKEN_FILE")"
   [[ -n "$token" ]] || { die 'GitHub verification token is empty'; return 1; }
   ensure_state_directories || return 1
+  gh_config_dir="$STATE_DIR/gh-cli-config"
   temp_dir="$(mktemp -d "$RECOVERY_DIR/provenance.XXXXXX")" \
     || { die 'cannot create protected provenance workspace'; return 1; }
   run_json="$temp_dir/run.json"
@@ -149,8 +150,8 @@ verify_trusted_source() {
   docker_cli pull "$image" >/dev/null || { cleanup_provenance "$temp_dir"; return 1; }
   run_id="$(image_label "$image" 'io.siftalpha.build.run-id')"
   [[ "$run_id" =~ ^[0-9]+$ ]] || { die 'OCI run-id label is invalid'; cleanup_provenance "$temp_dir"; return 1; }
-  GH_TOKEN="$token" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$run_json" || { cleanup_provenance "$temp_dir"; return 1; }
-  GH_TOKEN="$token" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" run download "$run_id" --repo "$GITHUB_REPOSITORY" --name siftalpha-web-build-manifest --dir "$temp_dir" || { cleanup_provenance "$temp_dir"; return 1; }
+  GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$run_json" || { cleanup_provenance "$temp_dir"; return 1; }
+  GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" run download "$run_id" --repo "$GITHUB_REPOSITORY" --name siftalpha-web-build-manifest --dir "$temp_dir" || { cleanup_provenance "$temp_dir"; return 1; }
   [[ -f "$manifest_file" ]] || { die 'build manifest artifact is unavailable'; cleanup_provenance "$temp_dir"; return 1; }
   if ! "$PYTHON_BIN" - "$run_json" "$manifest_file" "$digest" "$run_id" "$RELEASE_BRANCH" "$GITHUB_WORKFLOW_NAME" <<'PY'
 import json

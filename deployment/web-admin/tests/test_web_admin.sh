@@ -181,6 +181,9 @@ EOF
 cat > "$FAKE_BIN/gh" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+[[ "${GH_CONFIG_DIR:-}" == */gh-cli-config ]] || { printf 'GitHub CLI config directory is not isolated under web-admin state\n' >&2; exit 1; }
+mkdir -p "$GH_CONFIG_DIR"
+[[ -w "$GH_CONFIG_DIR" ]] || exit 1
 case "${1:-}" in
   api)
     [[ "${FAKE_GH_MODE:-ok}" == run-mismatch ]] && { printf '{"conclusion":"failure"}\n'; exit 0; }
