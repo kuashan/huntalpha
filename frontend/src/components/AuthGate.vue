@@ -11,6 +11,8 @@ const email = ref('')
 const password = ref('')
 const name = ref('')
 const confirm = ref('')
+const code = ref('')
+const verifying = ref(false)
 const error = ref('')
 const pending = ref(false)
 const streams = Array.from({ length: 27 }, (_, index) => ({
@@ -20,7 +22,7 @@ const streams = Array.from({ length: 27 }, (_, index) => ({
   code: ['SH.600519', 'HK.00700', 'US.NVDA', 'CC.BTCUSD', 'MACD  DIF  DEA', 'BOLL  MID  UPPER', 'KDJ  K  D  J', 'SZ.300750'][index % 8],
 }))
 const submitLabel = computed(() => pending.value ? '…' : mode.value === 'login' ? t('enter') : t('create'))
-function switchMode(next) { mode.value = next; error.value = '' }
+function switchMode(next) { mode.value = next; verifying.value = false; code.value = ''; error.value = '' }
 async function submit() {
   error.value = ''
   if (mode.value === 'register' && password.value !== confirm.value) { error.value = '两次输入的密码不一致'; return }
@@ -33,7 +35,41 @@ async function submit() {
     })
     const data = await reply.json()
     if (!reply.ok) { error.value = data.error || '暂时无法完成请求'; return }
+    if (mode.value === 'register') {
+      verifying.value = true
+      password.value = ''
+      confirm.value = ''
+      code.value = ''
+      return
+    }
     emit('authenticated', data.user)
+  } catch { error.value = '无法连接网站服务，请稍后重试。' } finally { pending.value = false }
+}
+async function verifyEmail() {
+  error.value = ''
+  pending.value = true
+  try {
+    const reply = await fetch(`${API_BASE}/api/auth/verify-email/`, {
+      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.value, code: code.value }),
+    })
+    const data = await reply.json()
+    if (!reply.ok) { error.value = data.error || '邮箱验证失败'; return }
+    emit('authenticated', data.user)
+  } catch { error.value = '无法连接网站服务，请稍后重试。' } finally { pending.value = false }
+}
+async function resendCode() {
+  error.value = ''
+  pending.value = true
+  try {
+    const reply = await fetch(`${API_BASE}/api/auth/resend-code/`, {
+      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.value }),
+    })
+    const data = await reply.json()
+    if (!reply.ok) { error.value = data.error || '重发失败'; return }
+    code.value = ''
+    error.value = '新验证码已发送，请查看邮箱。'
   } catch { error.value = '无法连接网站服务，请稍后重试。' } finally { pending.value = false }
 }
 async function enterGuest() {
@@ -62,7 +98,13 @@ async function enterGuest() {
     <section class="auth-card">
       <p class="eyebrow">PRIVATE RESEARCH ACCESS</p><h1>{{ mode === 'login' ? t('welcome') : t('createAccount') }}</h1><p class="sub">{{ t('research') }}</p>
       <div class="auth-tabs"><button :class="{ active: mode === 'login' }" @click="switchMode('login')">{{ t('login') }}</button><button :class="{ active: mode === 'register' }" @click="switchMode('register')">{{ t('register') }}</button></div>
-      <form @submit.prevent="submit"><label v-if="mode === 'register'">{{ t('nickname') }}<input v-model.trim="name" autocomplete="name" /></label><label>{{ t('email') }}<input v-model.trim="email" type="email" autocomplete="email" placeholder="name@example.com" required /></label><label>{{ t('password') }}<input v-model="password" type="password" :autocomplete="mode === 'login' ? 'current-password' : 'new-password'" required /></label><label v-if="mode === 'register'">{{ t('confirm') }}<input v-model="confirm" type="password" autocomplete="new-password" required /></label><p v-if="error" class="auth-error">{{ error }}</p><button class="auth-submit" :disabled="pending">{{ submitLabel }} <span>→</span></button></form>
+      <form v-if="!verifying" @submit.prevent="submit"><label v-if="mode === 'register'">{{ t('nickname') }}<input v-model.trim="name" autocomplete="name" /></label><label>{{ t('email') }}<input v-model.trim="email" type="email" autocomplete="email" placeholder="name@example.com" required /></label><label>{{ t('password') }}<input v-model="password" type="password" :autocomplete="mode === 'login' ? 'current-password' : 'new-password'" required /></label><label v-if="mode === 'register'">{{ t('confirm') }}<input v-model="confirm" type="password" autocomplete="new-password" required /></label><p v-if="error" class="auth-error">{{ error }}</p><button class="auth-submit" :disabled="pending">{{ submitLabel }} <span>→</span></button></form><form v-else class="verify-form" @submit.prevent="verifyEmail">
+        <p class="sub">验证码已发送至 {{ email }}。10 分钟内有效。</p>
+        <label>邮箱验证码<input v-model.trim="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required /></label>
+        <p v-if="error" class="auth-error">{{ error }}</p>
+        <button class="auth-submit" :disabled="pending || code.length !== 6">验证并创建 FREE 账户 <span>→</span></button>
+        <button type="button" class="guest-button" :disabled="pending" @click="resendCode">重新发送验证码（至少间隔 60 秒）</button>
+      </form>
       <button type="button" class="guest-button" :disabled="pending" @click="enterGuest">{{ t('guest') }} <span>{{ t('guestHint') }}</span></button>
     </section>
     <section class="auth-showcase" aria-label="平台能力预览"><article class="feature visual-preview"><small>01 · 结构识别</small><h2>缠论结构</h2><img src="/login-previews/chanlun-preview.png" alt="缠论结构预览"/><p>笔、线段、中枢和确认信号</p></article><article class="markets-preview"><small>可研究市场</small><div><b>A 股</b><b>美 股</b><b>港 股</b><b>加 密</b></div><p>统一图表、周期与指标工作流</p></article><article class="feature visual-preview"><small>02 · 趋势判断</small><h2>顺势而为</h2><img src="/login-previews/trend-preview.png" alt="顺势而为指标预览"/><p>趋势色带、通道与风险边界</p></article></section>
