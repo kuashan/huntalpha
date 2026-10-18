@@ -7,6 +7,7 @@ on:
     paths:
       - 'core/**'
       - 'quant_site/**'
+      - 'deployment/web-admin/**'
       - 'frontend/**'
       - '.env.example'
       - '.github/workflows/account-safety-pr.yml'
@@ -33,6 +34,11 @@ jobs:
           python manage.py check
           python manage.py makemigrations --check --dry-run
           python manage.py test core formula_editor --noinput
+      - name: Validate narrow deployment migration and secret security guards
+        run: |
+          python -m unittest discover -s deployment/web-admin/tests -p test_database_migration.py
+          bash deployment/web-admin/tests/test_web_admin.sh
+
 
   frontend:
     runs-on: ubuntu-latest
