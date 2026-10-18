@@ -13,6 +13,18 @@
 
 ---
 
+## 2026-10-18 — 正式开放前最后一项：前台公开、后台保留 Cloudflare Access
+
+状态：`DECIDED / NOT IMPLEMENTED`（用户已确认访问模式；只记录决定，尚未切换或部署）
+
+此项确定为 **SiftAlpha.com 正式向公网开放之前，最后执行的访问控制切换事项**。不代表其他上线前安全检查已通过，也不要求现在实施。
+
+- **普通用户前端公开：** `https://siftalpha.com/`、前端账户页面以及前端正常工作所必需的 API，不再要求先通过 Cloudflare Access 身份认证。用户直接看到网站，使用 SiftAlpha 自身的登录、注册或访客模式；FREE / PRO 权限仍由 Django 服务端判断。
+- **管理后台继续双重认证：** `https://siftalpha.com/admin/` 及其子路径继续受到 Cloudflare Access 保护；管理员先通过 Cloudflare Access，再使用 Django Admin 自身账号登录。不得因放开前端而一并放开后台。
+- **Cloudflare 继续代理整个网站：** 保留 Cloudflare 的网站流量入口和安全防护（区别于 Access 身份认证）；需要防止其他主机名或源站直连绕过后台保护。
+- **执行顺序：** 先完成上线前安全评估与经用户批准的必要最小整改，再将上述 Access 保护范围调整作为正式开放前的最后一步；变更前再次取得用户明确授权。调整后只验证前台无需 Access、后台仍必须 Access + Django 登录，以及没有绕过后台保护的公开入口。
+- **范围限制：** 本条仅记录上线决策；不得自行修改 Cloudflare Access/WAF、DNS、服务器防火墙、Docker、代码、部署或数据。Task 010–013、图表对齐的已验收成果保持不变，Task 014-A 继续暂停。禁止借此事项重构现有功能。
+
 ## 当前进行中
 
 ### Task 006 — SLTD 对齐的统一行情基础设施
