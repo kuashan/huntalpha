@@ -28,8 +28,15 @@ fi
 if ! grep -F 'HOME: /tmp' "$ROOT/deployment/web-admin/compose.selftest.yaml.template" >/dev/null; then
   fail "isolated candidate container must use the writable temporary home"
 fi
+if ! sed -n '/^install_files()/,/^install_rdc_write_allowance()/p' "$ROOT/deployment/web-admin/install-web-admin.sh" \
+  | grep -F 'assert_secure_config_file "$CONFIG_PATH"' >/dev/null; then
+  fail "installer must refuse an unsafe pre-existing root configuration"
+fi
 if ! sed -n '/^health_check()/,/^current_container()/p' "$LIB" | grep -F 'docker_cli exec' >/dev/null; then
   fail "self-test health checks must run inside the isolated container"
+fi
+if ! sed -n '/^rehearse_migrations()/,/^audit_deployment_event()/p' "$LIB" | grep -F 'validate-result' >/dev/null; then
+  fail "migration rehearsal must validate the exact approved database result"
 fi
 if grep -F 'ports:' "$ROOT/deployment/web-admin/compose.selftest.yaml.template" >/dev/null; then
   fail "isolated self-test containers must not publish host ports"
@@ -61,7 +68,7 @@ case "${1:-}" in
       if [[ "${FAKE_PROVENANCE_VERSION:-v1}" == v0.2 ]]; then
         printf '{"buildType":"https://mobyproject.org/buildkit@v1","invocation":{},"metadata":{}}\n'
       else
-        printf '{"buildDefinition":{"buildType":"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md","externalParameters":{},"resolvedDependencies":[]},"runDetails":{"builder":{"id":""},"metadata":{}}}\n'
+        printf '{"buildDefinition":{"buildType":"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md","externalParameters":{},"internalParameters":{"github_repository":"kuashan/huntalpha","github_workflow":"SiftAlpha Web CI and ARM64","github_workflow_ref":"kuashan/huntalpha/.github/workflows/siftalpha-web-arm64.yml@refs/heads/release/siftalpha-web-v1","github_workflow_sha":"%s","github_run_id":"%s","github_ref":"refs/heads/release/siftalpha-web-v1","github_event_name":"push"},"resolvedDependencies":[]},"runDetails":{"builder":{"id":""},"metadata":{}}}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
       fi
     else
       printf '{"manifests":[{"platform":{"architecture":"arm64","os":"linux"}}]}\n'
@@ -168,6 +175,20 @@ try:
         "INSERT INTO django_migrations (app, name, applied) VALUES (?, ?, ?)",
         ("formula_editor", "0002_fixedindicatorstate", "2026-01-01 00:01:00"),
     )
+    content_type_id = connection.execute(
+        "INSERT INTO django_content_type (app_label, model) VALUES (?, ?)",
+        ("formula_editor", "fixedindicatorstate"),
+    ).lastrowid
+    for codename, name in (
+        ("add_fixedindicatorstate", "Can add 固定公式（服务器已安装）"),
+        ("change_fixedindicatorstate", "Can change 固定公式（服务器已安装）"),
+        ("delete_fixedindicatorstate", "Can delete 固定公式（服务器已安装）"),
+        ("view_fixedindicatorstate", "Can view 固定公式（服务器已安装）"),
+    ):
+        connection.execute(
+            "INSERT INTO auth_permission (name, content_type_id, codename) VALUES (?, ?, ?)",
+            (name, content_type_id, codename),
+        )
     connection.commit()
 finally:
     connection.close()
@@ -212,7 +233,11 @@ mkdir -p "$GH_CONFIG_DIR"
 case "${1:-}" in
   api)
     [[ "${FAKE_GH_MODE:-ok}" == run-mismatch ]] && { printf '{"conclusion":"failure"}\n'; exit 0; }
-    printf '{"status":"completed","conclusion":"success","head_sha":"%s","head_branch":"release/siftalpha-web-v1","name":"SiftAlpha Web CI and ARM64","html_url":"https://github.com/kuashan/huntalpha/actions/runs/%s"}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
+    if [[ "${FAKE_GH_MODE:-ok}" == workflow-mismatch ]]; then
+      printf '{"status":"completed","conclusion":"success","head_sha":"%s","head_branch":"release/siftalpha-web-v1","name":"SiftAlpha Web CI and ARM64","workflow_id":123456,"path":".github/workflows/other.yml","html_url":"https://github.com/kuashan/huntalpha/actions/runs/%s"}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
+      exit 0
+    fi
+    printf '{"status":"completed","conclusion":"success","head_sha":"%s","head_branch":"release/siftalpha-web-v1","name":"SiftAlpha Web CI and ARM64","workflow_id":387611326,"path":".github/workflows/siftalpha-web-arm64.yml","html_url":"https://github.com/kuashan/huntalpha/actions/runs/%s"}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
     ;;
   run)
     destination=""
@@ -239,6 +264,16 @@ fi
 exec /usr/bin/chmod "$@"
 EOF
 chmod +x "$FAKE_BIN/chmod"
+cat > "$FAKE_BIN/stat" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ -n "${FAKE_STAT_UNSAFE_CONFIG:-}" && "${!#}" == "$FAKE_STAT_UNSAFE_CONFIG" ]]; then
+  printf '%s 666\n' "$EUID"
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+EOF
+chmod +x "$FAKE_BIN/stat"
 GH_SHA256="$(sha256sum "$FAKE_BIN/gh" | awk '{print $1}')"
 FAKE_CONTAINER_STATE_FILE="$TEST_ROOT/container.state"
 printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"
@@ -291,6 +326,18 @@ try:
         insert into core_watchlistentry values (1, 1, 77);
         create table formula_editor_formula (id integer primary key, code text, source text);
         insert into formula_editor_formula values (1, 'SYNTHETIC_ONLY', 'synthetic test content');
+        create table django_content_type (
+            id integer primary key autoincrement, app_label text not null,
+            model text not null, unique(app_label, model)
+        );
+        insert into django_content_type (id, app_label, model) values (1, 'auth', 'user');
+        create table auth_permission (
+            id integer primary key autoincrement, name text not null,
+            content_type_id integer not null, codename text not null,
+            unique(content_type_id, codename)
+        );
+        insert into auth_permission (id, name, content_type_id, codename)
+            values (1, 'Can view user', 1, 'view_user');
         create table django_migrations (
             id integer primary key autoincrement, app text, name text, applied text
         );
@@ -305,6 +352,19 @@ source "$LIB"
 load_config "$TEST_ROOT/web-admin.conf"
 PATH="$FAKE_BIN:$PATH"
 export PATH
+
+insecure_config="$TEST_ROOT/insecure-web-admin.conf"
+cp "$TEST_ROOT/web-admin.conf" "$insecure_config"
+printf '\n: > "%s/config-sourced"\n' "$TEST_ROOT" >> "$insecure_config"
+chmod 0666 "$insecure_config"
+FAKE_STAT_UNSAFE_CONFIG="$insecure_config"
+export FAKE_STAT_UNSAFE_CONFIG
+if load_config "$insecure_config"; then
+  fail "writable configuration was accepted"
+fi
+[[ ! -e "$TEST_ROOT/config-sourced" ]] || fail "unsafe configuration was sourced before validation"
+unset FAKE_STAT_UNSAFE_CONFIG
+load_config "$TEST_ROOT/web-admin.conf"
 
 SELF_TEST_NETWORK_NAME=web-admin-selftest-contract
 assert_ok health_check
@@ -333,7 +393,7 @@ load_config "$TEST_ROOT/web-admin.conf"
 
 assert_ok preflight_candidate "$FAKE_DIGEST"
 export FAKE_PROVENANCE_VERSION=v0.2
-assert_ok preflight_candidate "$FAKE_DIGEST"
+assert_fail preflight_candidate "$FAKE_DIGEST"
 export FAKE_PROVENANCE_VERSION=v1
 export FAKE_GH_MODE=manifest-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
@@ -344,6 +404,8 @@ assert_fail preflight_candidate "$FAKE_DIGEST"
 export FAKE_GH_MODE=label-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
 export FAKE_GH_MODE=provenance-fail
+assert_fail preflight_candidate "$FAKE_DIGEST"
+export FAKE_GH_MODE=workflow-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
 export FAKE_GH_MODE=run-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"

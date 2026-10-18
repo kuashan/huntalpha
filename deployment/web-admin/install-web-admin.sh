@@ -47,6 +47,11 @@ install_files() {
   [[ "${EUID}" -eq 0 ]] || die '--install requires root'
   command -v visudo >/dev/null || die 'visudo is required for a safe sudoers installation'
   check_sources
+  if [[ -e "$CONFIG_PATH" || -L "$CONFIG_PATH" ]]; then
+    # shellcheck disable=SC1090
+    source "$SCRIPT_DIR/lib/siftalpha-web-admin-lib.sh"
+    assert_secure_config_file "$CONFIG_PATH" || die 'existing web-admin configuration is unsafe'
+  fi
   if [[ -e "$RDC_DROPIN_PATH" ]]; then
     cmp -s "$SCRIPT_DIR/rdc-agent-web-admin.conf" "$RDC_DROPIN_PATH" \
       || die 'existing RDC web-admin drop-in differs; refusing to overwrite it'

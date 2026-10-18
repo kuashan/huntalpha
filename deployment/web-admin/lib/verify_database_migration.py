@@ -12,6 +12,7 @@ from collections import Counter
 from contextlib import closing
 import json
 import os
+import re
 import sqlite3
 import stat
 import sys
@@ -29,6 +30,10 @@ PROTECTED_TABLES = (
     "core_accountmembership",
     "core_watchlistentry",
     "formula_editor_formula",
+)
+APPROVED_TASK012_TABLE_SQL = (
+    'CREATE TABLE "formula_editor_fixedindicatorstate" '
+    '("code" varchar(32) NOT NULL PRIMARY KEY, "enabled" bool NOT NULL)'
 )
 
 
@@ -48,6 +53,10 @@ class PromotionRecoveryFailure(ValueError):
 
 def _reject() -> ValueError:
     return ValueError("unapproved Django migration plan")
+
+
+def _normalize_sql(sql: str) -> str:
+    return re.sub(r'[\s"`\[\]]+', "", sql).casefold()
 
 
 def validate_plan(payload: Any) -> list[str]:
@@ -170,8 +179,87 @@ def compare_database_contents(before_path: str | Path, after_path: str | Path) -
         raise ValueError("database snapshot comparison failed") from error
 
 
+def _validate_task012_permission_metadata(
+    before: sqlite3.Connection, after: sqlite3.Connection
+) -> tuple[int, list[int]]:
+    required_tables = {"django_content_type", "auth_permission"}
+    if not required_tables.issubset(_table_names(before)) or not required_tables.issubset(
+        _table_names(after)
+    ):
+        raise ValueError("Django permission metadata tables are unavailable")
+    for table in required_tables:
+        if not _rows_equal_schema(before, after, table):
+            raise ValueError("Django permission metadata schema changed")
+
+    content_type_columns = [
+        row[1] for row in before.execute('PRAGMA table_info("django_content_type")')
+    ]
+    permission_columns = [
+        row[1] for row in before.execute('PRAGMA table_info("auth_permission")')
+    ]
+    if set(content_type_columns) != {"id", "app_label", "model"} or set(
+        permission_columns
+    ) != {"id", "name", "content_type_id", "codename"}:
+        raise ValueError("Django permission metadata schema is unexpected")
+
+    before_content_types = Counter(before.execute('SELECT * FROM "django_content_type"'))
+    after_content_types = Counter(after.execute('SELECT * FROM "django_content_type"'))
+    removed_content_types = list((before_content_types - after_content_types).elements())
+    added_content_types = list((after_content_types - before_content_types).elements())
+    if removed_content_types or len(added_content_types) != 1:
+        raise ValueError("Task 012 content type metadata change is unexpected")
+    content_type = added_content_types[0]
+    content_type_indexes = {
+        name: content_type_columns.index(name) for name in ("id", "app_label", "model")
+    }
+    if (
+        content_type[content_type_indexes["app_label"]] != "formula_editor"
+        or content_type[content_type_indexes["model"]] != "fixedindicatorstate"
+    ):
+        raise ValueError("Task 012 content type metadata is unexpected")
+    content_type_id = content_type[content_type_indexes["id"]]
+    if not isinstance(content_type_id, int) or content_type_id <= 0:
+        raise ValueError("Task 012 content type identifier is invalid")
+
+    before_permissions = Counter(before.execute('SELECT * FROM "auth_permission"'))
+    after_permissions = Counter(after.execute('SELECT * FROM "auth_permission"'))
+    removed_permissions = list((before_permissions - after_permissions).elements())
+    added_permissions = list((after_permissions - before_permissions).elements())
+    expected_permissions = {
+        "add_fixedindicatorstate": "Can add 固定公式（服务器已安装）",
+        "change_fixedindicatorstate": "Can change 固定公式（服务器已安装）",
+        "delete_fixedindicatorstate": "Can delete 固定公式（服务器已安装）",
+        "view_fixedindicatorstate": "Can view 固定公式（服务器已安装）",
+    }
+    if removed_permissions or len(added_permissions) != len(expected_permissions):
+        raise ValueError("Task 012 permission metadata change is unexpected")
+    permission_indexes = {
+        name: permission_columns.index(name)
+        for name in ("id", "name", "content_type_id", "codename")
+    }
+    seen_codenames: set[str] = set()
+    permission_ids: list[int] = []
+    for permission in added_permissions:
+        codename = permission[permission_indexes["codename"]]
+        if (
+            codename not in expected_permissions
+            or codename in seen_codenames
+            or permission[permission_indexes["name"]] != expected_permissions[codename]
+            or permission[permission_indexes["content_type_id"]] != content_type_id
+        ):
+            raise ValueError("Task 012 permission metadata is unexpected")
+        permission_id = permission[permission_indexes["id"]]
+        if not isinstance(permission_id, int) or permission_id <= 0:
+            raise ValueError("Task 012 permission identifier is invalid")
+        seen_codenames.add(codename)
+        permission_ids.append(permission_id)
+    if seen_codenames != set(expected_permissions):
+        raise ValueError("Task 012 permission metadata is incomplete")
+    return content_type_id, permission_ids
+
+
 def validate_approved_migration_result(before_path: str | Path, after_path: str | Path) -> None:
-    """Allow only Task 012's empty state table and its Django history row."""
+    """Allow only Task 012's empty table, history row, and exact Django metadata."""
     migration_name = "0002_fixedindicatorstate"
     new_table = "formula_editor_fixedindicatorstate"
     try:
@@ -183,14 +271,37 @@ def validate_approved_migration_result(before_path: str | Path, after_path: str 
             if after_tables - before_tables != {new_table} or before_tables - after_tables:
                 raise ValueError("unexpected database migration table change")
             new_columns = [
-                (row[1], row[2].lower(), row[3], row[5])
-                for row in after.execute(f'PRAGMA table_info("{new_table}")')
+                (row[1], row[2].lower(), row[3], row[4], row[5], row[6])
+                for row in after.execute(f'PRAGMA table_xinfo("{new_table}")')
             ]
-            if new_columns != [("code", "varchar(32)", 1, 1), ("enabled", "bool", 1, 0)]:
+            if new_columns != [
+                ("code", "varchar(32)", 1, None, 1, 0),
+                ("enabled", "bool", 1, None, 0, 0),
+            ]:
+                raise ValueError("new Task 012 state table schema is unexpected")
+            table_sql_row = after.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (new_table,),
+            ).fetchone()
+            if (
+                table_sql_row is None
+                or not isinstance(table_sql_row[0], str)
+                or _normalize_sql(table_sql_row[0])
+                != _normalize_sql(APPROVED_TASK012_TABLE_SQL)
+            ):
                 raise ValueError("new Task 012 state table schema is unexpected")
             state_indexes = list(after.execute(f'PRAGMA index_list("{new_table}")'))
             if len(state_indexes) != 1 or state_indexes[0][2] != 1 or state_indexes[0][3] != "pk":
                 raise ValueError("new Task 012 state table indexes are unexpected")
+            attached_objects = list(
+                after.execute(
+                    "SELECT type FROM sqlite_master "
+                    "WHERE tbl_name=? AND type NOT IN ('table', 'index')",
+                    (new_table,),
+                )
+            )
+            if attached_objects:
+                raise ValueError("unexpected schema object attached to Task 012 state table")
             indexed_columns = [
                 row[2]
                 for row in after.execute(
@@ -205,7 +316,18 @@ def validate_approved_migration_result(before_path: str | Path, after_path: str 
             if before_schema != after_schema:
                 raise ValueError("unexpected database migration schema change")
 
-            for table in sorted(before_tables - {"django_migrations", "sqlite_sequence"}):
+            content_type_id, permission_ids = _validate_task012_permission_metadata(
+                before, after
+            )
+            for table in sorted(
+                before_tables
+                - {
+                    "auth_permission",
+                    "django_content_type",
+                    "django_migrations",
+                    "sqlite_sequence",
+                }
+            ):
                 if not _rows_equal(before, after, table):
                     raise ValueError("unexpected database migration data change")
 
@@ -249,14 +371,23 @@ def validate_approved_migration_result(before_path: str | Path, after_path: str 
                 after_sequences = list(after.execute('SELECT * FROM "sqlite_sequence"'))
                 before_by_name = {row[name_index]: row[seq_index] for row in before_sequences}
                 after_by_name = {row[name_index]: row[seq_index] for row in after_sequences}
-                expected_names = set(before_by_name) | {"django_migrations"}
+                sequence_minimums = {
+                    "django_migrations": added[column_indexes["id"]],
+                    "django_content_type": content_type_id,
+                    "auth_permission": max(permission_ids),
+                }
+                expected_names = set(before_by_name) | set(sequence_minimums)
                 if set(after_by_name) != expected_names:
                     raise ValueError("SQLite sequence metadata changed unexpectedly")
                 for name, value in before_by_name.items():
-                    if name != "django_migrations" and after_by_name.get(name) != value:
+                    if name in sequence_minimums:
+                        if after_by_name.get(name) != sequence_minimums[name] or sequence_minimums[name] < value:
+                            raise ValueError("SQLite sequence metadata changed unexpectedly")
+                    elif after_by_name.get(name) != value:
                         raise ValueError("SQLite sequence metadata changed unexpectedly")
-                if after_by_name.get("django_migrations", -1) < added[column_indexes["id"]]:
-                    raise ValueError("Django migration sequence is invalid")
+                for name, minimum in sequence_minimums.items():
+                    if after_by_name.get(name) != minimum:
+                        raise ValueError("SQLite sequence metadata is invalid")
     except ValueError:
         raise
     except (OSError, sqlite3.Error, IndexError, KeyError) as error:
@@ -407,7 +538,16 @@ def _main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "command",
-        choices=("validate-plan", "validate-state", "check-integrity", "compare", "copy", "promote", "restore"),
+        choices=(
+            "validate-plan",
+            "validate-state",
+            "validate-result",
+            "check-integrity",
+            "compare",
+            "copy",
+            "promote",
+            "restore",
+        ),
     )
     parser.add_argument("paths", nargs="*")
     args = parser.parse_args()
@@ -422,6 +562,9 @@ def _main() -> int:
                 raise ValueError("invalid migration validator arguments")
             state = validate_probe_state(json.load(sys.stdin))
             print(json.dumps(state, separators=(",", ":")))
+        elif args.command == "validate-result" and len(args.paths) == 2:
+            validate_approved_migration_result(*args.paths)
+            print("migration result: ok")
         elif args.command == "check-integrity" and len(args.paths) == 1:
             _integrity(args.paths[0])
             print("integrity_check: ok")

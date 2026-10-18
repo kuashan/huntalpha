@@ -156,6 +156,19 @@ class ProtectedDatabaseComparisonTests(MigrationGuardTestCase):
                 CREATE TABLE core_accountmembership (id INTEGER PRIMARY KEY, user_id INTEGER, tier TEXT);
                 CREATE TABLE core_watchlistentry (id INTEGER PRIMARY KEY, user_id INTEGER, symbol_id INTEGER);
                 CREATE TABLE formula_editor_formula (id INTEGER PRIMARY KEY, code TEXT, source TEXT);
+                CREATE TABLE django_content_type (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    app_label TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    UNIQUE(app_label, model)
+                );
+                CREATE TABLE auth_permission (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    content_type_id INTEGER NOT NULL,
+                    codename TEXT NOT NULL,
+                    UNIQUE(content_type_id, codename)
+                );
                 CREATE TABLE django_migrations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, app TEXT, name TEXT, applied TEXT
                 );
@@ -164,6 +177,9 @@ class ProtectedDatabaseComparisonTests(MigrationGuardTestCase):
                 INSERT INTO core_accountmembership VALUES (1, 1, 'pro');
                 INSERT INTO core_watchlistentry VALUES (1, 1, 77);
                 INSERT INTO formula_editor_formula VALUES (1, 'SYNTHETIC_ONLY', 'synthetic test content');
+                INSERT INTO django_content_type (id, app_label, model) VALUES (1, 'auth', 'user');
+                INSERT INTO auth_permission (id, name, content_type_id, codename)
+                    VALUES (1, 'Can view user', 1, 'view_user');
                 INSERT INTO django_migrations VALUES (1, 'formula_editor', '0001_initial', '2026-01-01 00:00:00');
                 """
             )
@@ -171,17 +187,33 @@ class ProtectedDatabaseComparisonTests(MigrationGuardTestCase):
             connection.close()
 
     @staticmethod
-    def _apply_approved_migration(path):
+    def _apply_approved_migration(
+        path,
+        table_sql='CREATE TABLE formula_editor_fixedindicatorstate '
+        '(code varchar(32) NOT NULL PRIMARY KEY, enabled bool NOT NULL)',
+    ):
         connection = sqlite3.connect(path)
         try:
-            connection.execute(
-                "CREATE TABLE formula_editor_fixedindicatorstate "
-                "(code varchar(32) NOT NULL PRIMARY KEY, enabled bool NOT NULL)"
-            )
+            connection.execute(table_sql)
             connection.execute(
                 "INSERT INTO django_migrations (app, name, applied) VALUES (?, ?, ?)",
                 ("formula_editor", "0002_fixedindicatorstate", "2026-01-01 00:01:00"),
             )
+            content_type_id = connection.execute(
+                "INSERT INTO django_content_type (app_label, model) VALUES (?, ?)",
+                ("formula_editor", "fixedindicatorstate"),
+            ).lastrowid
+            for codename, name in (
+                ("add_fixedindicatorstate", "Can add 固定公式（服务器已安装）"),
+                ("change_fixedindicatorstate", "Can change 固定公式（服务器已安装）"),
+                ("delete_fixedindicatorstate", "Can delete 固定公式（服务器已安装）"),
+                ("view_fixedindicatorstate", "Can view 固定公式（服务器已安装）"),
+            ):
+                connection.execute(
+                    "INSERT INTO auth_permission (name, content_type_id, codename) "
+                    "VALUES (?, ?, ?)",
+                    (name, content_type_id, codename),
+                )
             connection.commit()
         finally:
             connection.close()
@@ -239,6 +271,78 @@ class ProtectedDatabaseComparisonTests(MigrationGuardTestCase):
             )
         finally:
             connection.close()
+
+    def test_sqlite_sequence_cannot_advance_beyond_approved_rows(self):
+        migrated = Path(self.tempdir.name) / "migrated-sequence.sqlite3"
+        self.guard().copy_database(self.before, migrated)
+        self._apply_approved_migration(migrated)
+        connection = sqlite3.connect(migrated)
+        try:
+            connection.execute(
+                "UPDATE sqlite_sequence SET seq = 999 WHERE name = 'auth_permission'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaisesRegex(ValueError, "SQLite sequence metadata changed unexpectedly"):
+            self.guard().validate_approved_migration_result(self.before, migrated)
+
+    def test_approved_migration_rejects_trigger_attached_to_new_state_table(self):
+        migrated = Path(self.tempdir.name) / "migrated-trigger.sqlite3"
+        self.guard().copy_database(self.before, migrated)
+        self._apply_approved_migration(migrated)
+        connection = sqlite3.connect(migrated)
+        try:
+            connection.execute(
+                "CREATE TRIGGER unexpected_state_trigger "
+                "AFTER INSERT ON formula_editor_fixedindicatorstate "
+                "BEGIN UPDATE formula_editor_formula SET source='changed' WHERE id=1; END"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaisesRegex(ValueError, "unexpected schema object attached to Task 012 state table"):
+            self.guard().validate_approved_migration_result(self.before, migrated)
+
+    def test_approved_migration_rejects_unreviewed_table_defaults_and_constraints(self):
+        definitions = (
+            "CREATE TABLE formula_editor_fixedindicatorstate "
+            "(code varchar(32) NOT NULL PRIMARY KEY, enabled bool NOT NULL DEFAULT 1)",
+            "CREATE TABLE formula_editor_fixedindicatorstate "
+            "(code varchar(32) NOT NULL PRIMARY KEY, enabled bool NOT NULL "
+            "CHECK (enabled IN (0, 1)))",
+        )
+        for index, definition in enumerate(definitions):
+            with self.subTest(index=index):
+                migrated = Path(self.tempdir.name) / f"migrated-definition-{index}.sqlite3"
+                self.guard().copy_database(self.before, migrated)
+                self._apply_approved_migration(migrated, table_sql=definition)
+
+                with self.assertRaisesRegex(ValueError, "new Task 012 state table schema is unexpected"):
+                    self.guard().validate_approved_migration_result(self.before, migrated)
+
+    def test_validate_result_cli_accepts_reviewed_migration(self):
+        migrated = Path(self.tempdir.name) / "migrated-cli.sqlite3"
+        self.guard().copy_database(self.before, migrated)
+        self._apply_approved_migration(migrated)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(HELPER_PATH),
+                "validate-result",
+                str(self.before),
+                str(migrated),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "migration result: ok")
 
     def test_atomic_promotion_refuses_live_sqlite_sidecar(self):
         target = Path(self.tempdir.name) / "target.sqlite3"
@@ -341,6 +445,28 @@ class ProtectedDatabaseComparisonTests(MigrationGuardTestCase):
 
 
 class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
+    @staticmethod
+    def _remove_task012_content_type_from_baseline(database_path):
+        connection = sqlite3.connect(database_path)
+        try:
+            row = connection.execute(
+                "SELECT id FROM django_content_type "
+                "WHERE app_label=? AND model=?",
+                ("formula_editor", "fixedindicatorstate"),
+            ).fetchone()
+            if row:
+                connection.execute(
+                    "DELETE FROM auth_permission WHERE content_type_id=?",
+                    (row[0],),
+                )
+                connection.execute(
+                    "DELETE FROM django_content_type WHERE id=?",
+                    (row[0],),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
     def _run_manage(self, database_path, *arguments):
         environment = os.environ.copy()
         environment.update(
@@ -397,6 +523,7 @@ class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
                 "0001_initial",
                 "--noinput",
             )
+            self._remove_task012_content_type_from_baseline(baseline)
             approved_state = self.guard().validate_probe_state(self._probe(baseline))
             self.assertEqual(
                 approved_state,

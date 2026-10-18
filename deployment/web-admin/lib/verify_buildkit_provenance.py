@@ -66,10 +66,7 @@ def main() -> None:
     legacy_build_type = provenance.get("buildType")
     v1_build_definition = provenance.get("buildDefinition")
     if legacy_build_type == "https://mobyproject.org/buildkit@v1":
-        if not isinstance(provenance.get("invocation"), dict):
-            fail("OCI provenance invocation is missing")
-        if not isinstance(provenance.get("metadata"), dict):
-            fail("OCI provenance metadata is missing")
+        fail("OCI BuildKit provenance v0.2 is unsupported because it lacks verified source identity")
     elif (
         isinstance(v1_build_definition, dict)
         and v1_build_definition.get("buildType")
@@ -79,7 +76,23 @@ def main() -> None:
         and isinstance(provenance.get("runDetails"), dict)
     ):
         # SLSA v1 moved BuildKit's fields under buildDefinition/runDetails.
-        pass
+        internal = v1_build_definition.get("internalParameters")
+        expected_workflow_ref = (
+            "kuashan/huntalpha/.github/workflows/siftalpha-web-arm64.yml@"
+            f"{source_ref}"
+        )
+        if not isinstance(internal, dict) or any(
+            (
+                internal.get("github_repository") != "kuashan/huntalpha",
+                internal.get("github_workflow") != workflow,
+                internal.get("github_workflow_ref") != expected_workflow_ref,
+                internal.get("github_workflow_sha") != commit,
+                str(internal.get("github_run_id")) != run_id,
+                internal.get("github_ref") != source_ref,
+                internal.get("github_event_name") != "push",
+            )
+        ):
+            fail("OCI BuildKit provenance source identity mismatch")
     else:
         fail("OCI provenance is not BuildKit SLSA provenance")
 

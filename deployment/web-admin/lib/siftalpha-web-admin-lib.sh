@@ -11,6 +11,8 @@ readonly SIFTALPHA_IMAGE_REPOSITORY='ghcr.io/kuashan/siftalpha-web'
 readonly SIFTALPHA_GITHUB_REPOSITORY='kuashan/huntalpha'
 readonly SIFTALPHA_RELEASE_BRANCH='release/siftalpha-web-v1'
 readonly SIFTALPHA_WORKFLOW_NAME='SiftAlpha Web CI and ARM64'
+readonly SIFTALPHA_WORKFLOW_ID='387611326'
+readonly SIFTALPHA_WORKFLOW_PATH='.github/workflows/siftalpha-web-arm64.yml'
 readonly SIFTALPHA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SIFTALPHA_MIGRATION_GUARD="$SIFTALPHA_LIB_DIR/verify_database_migration.py"
 readonly SIFTALPHA_MIGRATION_PROBE="$SIFTALPHA_LIB_DIR/migration_probe.py"
@@ -26,6 +28,29 @@ die() { printf 'siftalpha-web-admin: %s\n' "$*" >&2; return 1; }
 
 require_value() { [[ -n "${!1:-}" ]] || { die "missing required configuration: $1"; return 1; }; }
 
+validate_config_metadata() {
+  local owner="$1" mode="$2" effective_uid="$3" group_permission other_permission
+  [[ "$owner" =~ ^[0-9]+$ && "$effective_uid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]{3}$ ]] \
+    || { die 'web-admin configuration metadata is invalid'; return 1; }
+  [[ "$owner" == "$effective_uid" ]] \
+    || { die 'web-admin configuration must be owned by the effective user'; return 1; }
+  group_permission="${mode:1:1}"
+  other_permission="${mode:2:1}"
+  case "$group_permission:$other_permission" in
+    *2*|*3*|*6*|*7*) die 'web-admin configuration must not be writable by group or others'; return 1 ;;
+  esac
+}
+
+assert_secure_config_file() {
+  local config_path="$1" metadata owner mode
+  [[ -f "$config_path" && ! -L "$config_path" ]] \
+    || { die 'web-admin configuration must be a regular non-symlink file'; return 1; }
+  metadata="$(stat -c '%u %a' -- "$config_path")" \
+    || { die 'cannot inspect web-admin configuration ownership and mode'; return 1; }
+  read -r owner mode <<<"$metadata"
+  validate_config_metadata "$owner" "$mode" "$EUID"
+}
+
 require_safe_absolute_path() {
   local name="$1" value="${!1:-}"
   [[ "$value" == /* && "$value" != *'..'* ]] || { die "unsafe configuration path: $name"; return 1; }
@@ -33,6 +58,7 @@ require_safe_absolute_path() {
 
 load_config() {
   local config_path="$1"
+  assert_secure_config_file "$config_path" || return 1
   [[ -r "$config_path" ]] || { die "configuration is unreadable"; return 1; }
   # Clear all deploy-sensitive values before sourcing the root-owned config.
   unset IMAGE_REPOSITORY GITHUB_REPOSITORY GITHUB_WORKFLOW_NAME RELEASE_BRANCH
@@ -153,16 +179,22 @@ verify_trusted_source() {
   GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$run_json" || { cleanup_provenance "$temp_dir"; return 1; }
   GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" run download "$run_id" --repo "$GITHUB_REPOSITORY" --name siftalpha-web-build-manifest --dir "$temp_dir" || { cleanup_provenance "$temp_dir"; return 1; }
   [[ -f "$manifest_file" ]] || { die 'build manifest artifact is unavailable'; cleanup_provenance "$temp_dir"; return 1; }
-  if ! "$PYTHON_BIN" - "$run_json" "$manifest_file" "$digest" "$run_id" "$RELEASE_BRANCH" "$GITHUB_WORKFLOW_NAME" <<'PY'
+  if ! "$PYTHON_BIN" - "$run_json" "$manifest_file" "$digest" "$run_id" \
+    "$RELEASE_BRANCH" "$GITHUB_WORKFLOW_NAME" "$SIFTALPHA_WORKFLOW_ID" "$SIFTALPHA_WORKFLOW_PATH" <<'PY'
 import json
 import sys
 
-run_path, manifest_path, digest, run_id, branch, workflow_name = sys.argv[1:]
+run_path, manifest_path, digest, run_id, branch, workflow_name, workflow_id, workflow_path = sys.argv[1:]
 run = json.loads(open(run_path, encoding="utf-8").read())
 manifest = json.loads(open(manifest_path, encoding="utf-8").read())
 if run.get("status") != "completed" or run.get("conclusion") != "success":
     raise SystemExit("GitHub Actions Run is not successful")
-if run.get("head_branch") != branch or run.get("name") != workflow_name:
+if (
+    run.get("head_branch") != branch
+    or run.get("name") != workflow_name
+    or str(run.get("workflow_id")) != workflow_id
+    or run.get("path") != workflow_path
+):
     raise SystemExit("GitHub Actions Run identity mismatch")
 if manifest.get("digest") != digest or str(manifest.get("run_id")) != run_id:
     raise SystemExit("build manifest digest or Run ID mismatch")
@@ -345,6 +377,12 @@ rehearse_migrations() {
   if ! "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" check-integrity "$migrated_database" >/dev/null; then
     cleanup_migration_workspace "$workspace" || true
     die 'isolated migrated database failed integrity check'
+    return 1
+  fi
+  if ! "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" validate-result \
+    "$source_database" "$migrated_database" >/dev/null; then
+    cleanup_migration_workspace "$workspace" || true
+    die 'isolated migration produced changes outside the approved Task 012 database scope'
     return 1
   fi
   if ! "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" compare "$source_database" "$migrated_database" >/dev/null; then
