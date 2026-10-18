@@ -66,6 +66,9 @@ case "${1:-}" in
     exit 0 ;;
   run)
     [[ "$*" == *'--network none'* && "$*" == *'--read-only'* ]] || exit 1
+    if [[ "$*" == *'manage.py migrate --noinput'* ]]; then
+      [[ "$*" == *'--env HOME=/tmp'* ]] || { printf 'isolated migrations must use the writable temporary home\n' >&2; exit 125; }
+    fi
     for argument in "$@"; do
       [[ "$argument" == type=bind*,rw ]] && { printf 'invalid Docker --mount rw shorthand\n' >&2; exit 125; }
     done
