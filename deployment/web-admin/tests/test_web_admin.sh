@@ -85,7 +85,23 @@ case "${1:-}" in
     esac
     exit 0 ;;
   container)
-    [[ "${3:-}" == siftalpha-web-compose ]] && exit 1
+    if [[ "${2:-}" == ls ]]; then
+      [[ "${FAKE_CONTAINER_LIST_FAIL:-0}" == 1 ]] && exit 1
+      [[ "${FAKE_CONTAINER_LIST_FAIL_AFTER_STOP:-0}" == 1 && -f "$FAKE_STOP_MARKER_FILE" ]] && exit 1
+      if [[ "$*" == *'name=^/siftalpha-web-compose$'* ]]; then
+        [[ -f "$FAKE_CANDIDATE_MARKER_FILE" ]] && printf 'siftalpha-web-compose\n'
+      elif [[ "$*" == *'name=^/siftalpha-task011-ebd23f4$'* ]]; then
+        [[ "${FAKE_LEGACY_ABSENT:-0}" == 1 ]] || printf 'siftalpha-task011-ebd23f4\n'
+      fi
+      exit 0
+    fi
+    if [[ "${2:-}" == inspect ]]; then
+      if [[ "${3:-}" == siftalpha-web-compose ]]; then
+        [[ -f "$FAKE_CANDIDATE_MARKER_FILE" ]] || exit 1
+      else
+        [[ "${FAKE_LEGACY_ABSENT:-0}" == 0 ]]
+      fi
+    fi
     exit 0 ;;
   run)
     [[ "$*" == *'--network none'* && "$*" == *'--read-only'* ]] || exit 1
@@ -199,16 +215,68 @@ PY
   exec)
     [[ "$*" == *'http://127.0.0.1:8000'* && "$*" == *'/healthz/'* && "$*" == *'/static/'* ]] || exit 1
     exit 0 ;;
+  container)
+    if [[ "${3:-}" == 'siftalpha-web-compose' ]]; then
+      [[ -f "$FAKE_CANDIDATE_MARKER_FILE" ]] || exit 1
+    fi
+    exit 0 ;;
   inspect)
-    if [[ "${3:-}" == '{{.State.Status}}' ]]; then cat "$FAKE_CONTAINER_STATE_FILE"; else printf 'siftalpha-task011:ebd23f4\n'; fi
+    if [[ "${3:-}" == '{{.State.Status}}' ]]; then
+      if [[ "${!#}" == 'siftalpha-web-compose' ]]; then
+        [[ -f "$FAKE_CANDIDATE_MARKER_FILE" ]] || exit 1
+        printf '%s\n' "${FAKE_COMPOSE_STATE:-running}"
+      elif [[ -f "$FAKE_CANDIDATE_MARKER_FILE" ]]; then
+        printf 'exited\n'
+      else
+        cat "$FAKE_CONTAINER_STATE_FILE"
+      fi
+    elif [[ "${3:-}" == '{{.Config.Image}}' ]]; then
+      if [[ "${!#}" == 'siftalpha-web-compose' ]]; then
+        if [[ -n "${FAKE_CANDIDATE_IMAGE_MISMATCH_PENDING_FILE:-}" && -f "$FAKE_CANDIDATE_IMAGE_MISMATCH_PENDING_FILE" ]]; then
+          rm -f "$FAKE_CANDIDATE_IMAGE_MISMATCH_PENDING_FILE"
+          printf 'ghcr.io/kuashan/siftalpha-web@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
+        else
+          printf 'ghcr.io/kuashan/siftalpha-web@%s\n' "$FAKE_DIGEST"
+        fi
+      else
+        printf 'siftalpha-task011:ebd23f4\n'
+      fi
+    else
+      printf 'siftalpha-task011:ebd23f4\n'
+    fi
+    exit 0 ;;
+  logs)
+    printf 'Traceback (most recent call last):\n'
+    printf 'PermissionError: synthetic startup failure\n'
+    printf 'django.db.utils.OperationalError: synthetic startup failure\n'
+    printf 'SYNTHETIC_PRIVATE_SENTINEL_DO_NOT_EMIT\n'
     exit 0 ;;
   compose)
     [[ "${FAKE_COMPOSE_FAIL:-0}" == 1 ]] && exit 1
+    if [[ "${FAKE_REQUIRE_LEGACY_STOPPED:-0}" == 1 && "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]]; then
+      printf 'Bind for 127.0.0.1:19091 failed: port is already allocated\n' >&2
+      exit 1
+    fi
+    if [[ "${FAKE_CANDIDATE_IMAGE_MISMATCH:-0}" == 1 \
+      && -n "${FAKE_CANDIDATE_IMAGE_MISMATCH_FILE:-}" \
+      && ! -e "$FAKE_CANDIDATE_IMAGE_MISMATCH_FILE" ]]; then
+      : > "$FAKE_CANDIDATE_IMAGE_MISMATCH_FILE"
+      : > "$FAKE_CANDIDATE_IMAGE_MISMATCH_PENDING_FILE"
+    fi
     printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"
+    printf 'candidate\n' > "$FAKE_CANDIDATE_MARKER_FILE"
     exit 0 ;;
-  stop) printf 'exited\n' > "$FAKE_CONTAINER_STATE_FILE"; exit 0 ;;
-  start) printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"; exit 0 ;;
-  rm) exit 0 ;;
+  stop)
+    [[ "${FAKE_STOP_FAIL:-0}" == 1 ]] && exit 1
+    if [[ "${FAKE_STOP_NOOP:-0}" != 1 ]]; then
+      printf 'exited\n' > "$FAKE_CONTAINER_STATE_FILE"
+      : > "$FAKE_STOP_MARKER_FILE"
+    fi
+    exit 0 ;;
+  start) printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"; rm -f "$FAKE_CANDIDATE_MARKER_FILE" "$FAKE_STOP_MARKER_FILE"; exit 0 ;;
+  rm)
+    [[ "$*" == *siftalpha-web-compose* ]] && rm -f "$FAKE_CANDIDATE_MARKER_FILE"
+    exit 0 ;;
   *) exit 0 ;;
 esac
 EOF
@@ -216,6 +284,36 @@ EOF
 cat > "$FAKE_BIN/curl" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+curl_timeout=''
+while (($#)); do
+  if [[ "$1" == --max-time ]]; then
+    curl_timeout="${2:-}"
+    shift 2
+  else
+    url="$1"
+    shift
+  fi
+done
+if [[ -n "${FAKE_CURL_TIMEOUT_FILE:-}" ]]; then
+  printf '%s\n' "${curl_timeout:-missing}" >> "$FAKE_CURL_TIMEOUT_FILE"
+fi
+if [[ -n "${FAKE_CURL_COUNT_FILE:-}" ]]; then
+  curl_count=0
+  [[ ! -f "$FAKE_CURL_COUNT_FILE" ]] || curl_count="$(<"$FAKE_CURL_COUNT_FILE")"
+  curl_count=$((curl_count + 1))
+  printf '%s\n' "$curl_count" > "$FAKE_CURL_COUNT_FILE"
+  if [[ "${FAKE_CURL_FAIL_ALWAYS:-0}" == 1 ]] || (( curl_count <= ${FAKE_CURL_FAIL_FIRST_CALLS:-0} )); then
+    exit 56
+  fi
+fi
+if [[ "${FAKE_CURL_STALL:-0}" == 1 ]]; then
+  [[ -n "$curl_timeout" ]] || exit 28
+  sleep "$curl_timeout"
+  exit 28
+fi
+if [[ -f "${FAKE_CANDIDATE_MARKER_FILE:-/dev/null}" && "${FAKE_CANDIDATE_FAIL_ALWAYS:-0}" == 1 ]]; then
+  exit 56
+fi
 url="${!#}"
 case "$url" in
   */healthz/) printf '{"status":"ok"}' ;;
@@ -276,8 +374,10 @@ EOF
 chmod +x "$FAKE_BIN/stat"
 GH_SHA256="$(sha256sum "$FAKE_BIN/gh" | awk '{print $1}')"
 FAKE_CONTAINER_STATE_FILE="$TEST_ROOT/container.state"
+FAKE_CANDIDATE_MARKER_FILE="$TEST_ROOT/candidate.started"
+FAKE_STOP_MARKER_FILE="$TEST_ROOT/legacy.stopped"
 printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"
-export FAKE_CONTAINER_STATE_FILE
+export FAKE_CONTAINER_STATE_FILE FAKE_CANDIDATE_MARKER_FILE FAKE_STOP_MARKER_FILE
 
 cat > "$TEST_ROOT/web-admin.conf" <<EOF
 IMAGE_REPOSITORY=ghcr.io/kuashan/siftalpha-web
@@ -366,9 +466,67 @@ fi
 unset FAKE_STAT_UNSAFE_CONFIG
 load_config "$TEST_ROOT/web-admin.conf"
 
+FAKE_CONTAINER_LIST_FAIL=1 assert_fail current_container
+unset FAKE_CONTAINER_LIST_FAIL
+
 SELF_TEST_NETWORK_NAME=web-admin-selftest-contract
 assert_ok health_check
 unset SELF_TEST_NETWORK_NAME
+
+FAKE_CURL_COUNT_FILE="$TEST_ROOT/curl.calls"
+FAKE_SLEEP_CALLS_FILE="$TEST_ROOT/sleep.calls"
+printf '0\n' > "$FAKE_CURL_COUNT_FILE"
+export FAKE_CURL_COUNT_FILE FAKE_SLEEP_CALLS_FILE FAKE_CURL_FAIL_FIRST_CALLS=2
+sleep() { printf '%s\n' "$1" >> "$FAKE_SLEEP_CALLS_FILE"; }
+assert_ok wait_for_health
+curl_calls="$(<"$FAKE_CURL_COUNT_FILE")"
+[[ "$curl_calls" -gt 2 ]] || fail "startup readiness did not retry transient connection failures"
+
+printf '0\n' > "$FAKE_CURL_COUNT_FILE"
+: > "$FAKE_SLEEP_CALLS_FILE"
+unset FAKE_CURL_FAIL_FIRST_CALLS
+export FAKE_CURL_FAIL_ALWAYS=1
+FAKE_HEALTH_CLOCK_FILE="$TEST_ROOT/health.clock"
+printf '0\n' > "$FAKE_HEALTH_CLOCK_FILE"
+health_clock_seconds() {
+  if [[ -z "${FAKE_HEALTH_CLOCK_FILE:-}" ]]; then
+    printf '%s\n' "$SECONDS"
+    return 0
+  fi
+  local now="$(<"$FAKE_HEALTH_CLOCK_FILE")"
+  printf '%s\n' "$now"
+  printf '%s\n' "$((now + 1))" > "$FAKE_HEALTH_CLOCK_FILE"
+}
+assert_fail wait_for_health
+curl_calls="$(<"$FAKE_CURL_COUNT_FILE")"
+sleep_calls="$(wc -l < "$FAKE_SLEEP_CALLS_FILE")"
+[[ "$curl_calls" -gt 1 && "$curl_calls" -le 60 ]] || fail "startup readiness did not stop within its bounded retry window"
+[[ "$sleep_calls" -gt 0 && "$sleep_calls" -lt "$curl_calls" ]] || fail "startup readiness did not poll between failed checks"
+unset FAKE_CURL_FAIL_ALWAYS FAKE_CURL_COUNT_FILE FAKE_HEALTH_CLOCK_FILE
+unset -f sleep
+
+FAKE_CURL_TIMEOUT_FILE="$TEST_ROOT/curl.timeouts"
+FAKE_CURL_COUNT_FILE="$TEST_ROOT/curl.timeout-count"
+: > "$FAKE_CURL_TIMEOUT_FILE"
+printf '0\n' > "$FAKE_CURL_COUNT_FILE"
+export FAKE_CURL_TIMEOUT_FILE FAKE_CURL_COUNT_FILE FAKE_CURL_FAIL_ALWAYS=1
+sleep() { :; }
+assert_fail wait_for_health 2
+unset -f sleep
+unset FAKE_CURL_FAIL_ALWAYS FAKE_CURL_COUNT_FILE
+grep -Fx 'missing' "$FAKE_CURL_TIMEOUT_FILE" >/dev/null \
+  && fail "health probes were launched without a per-request timeout"
+
+FAKE_CURL_STALL=1
+: > "$FAKE_CURL_TIMEOUT_FILE"
+export FAKE_CURL_STALL
+health_start_seconds="$SECONDS"
+assert_fail wait_for_health 2
+health_elapsed_seconds=$((SECONDS - health_start_seconds))
+[[ "$health_elapsed_seconds" -le 3 ]] || fail "stalled health probe exceeded its overall deadline"
+health_first_timeout="$(head -n 1 "$FAKE_CURL_TIMEOUT_FILE")"
+[[ "$health_first_timeout" =~ ^[1-2]$ ]] || fail "health probe timeout was not bounded by the remaining deadline"
+unset FAKE_CURL_STALL FAKE_CURL_TIMEOUT_FILE
 
 assert_ok validate_command status
 assert_ok validate_command health
@@ -454,9 +612,116 @@ snapshot_path="$(<"$ROLLBACK_DIR/latest")"
 [[ -f "$snapshot_path/metadata" ]] || fail "deployment snapshot metadata is missing"
 grep -Fx 'runtime=legacy' "$snapshot_path/metadata" >/dev/null || fail "legacy runtime was not recorded"
 
+export FAKE_COMPOSE_STATE=paused
+printf 'candidate\n' > "$FAKE_CANDIDATE_MARKER_FILE"
+assert_fail current_container
+rm -f "$FAKE_CANDIDATE_MARKER_FILE"
+unset FAKE_COMPOSE_STATE
+
+export FAKE_STOP_FAIL=1
+: > "$FAKE_LOG"
+assert_fail first_compose_cutover "$FAKE_DIGEST"
+unset FAKE_STOP_FAIL
+grep -F 'docker compose -f ' "$FAKE_LOG" >/dev/null && fail "Compose started after Docker failed to stop the legacy container"
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "legacy service state changed after stop failure"
+
+export FAKE_STOP_NOOP=1
+: > "$FAKE_LOG"
+assert_fail first_compose_cutover "$FAKE_DIGEST"
+unset FAKE_STOP_NOOP
+grep -F 'docker compose -f ' "$FAKE_LOG" >/dev/null && fail "Compose started before the legacy container was confirmed stopped"
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "legacy service was not left available when stop did not take effect"
+
+export FAKE_CONTAINER_LIST_FAIL_AFTER_STOP=1
+: > "$FAKE_LOG"
+assert_fail first_compose_cutover "$FAKE_DIGEST"
+unset FAKE_CONTAINER_LIST_FAIL_AFTER_STOP
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "legacy service was not restored when post-stop inspection failed"
+grep -F 'docker compose -f ' "$FAKE_LOG" >/dev/null && fail "Compose started without verifying the legacy container stopped"
+
+printf 'stale compose configuration\n' > "$COMPOSE_FILE"
+missing_template="$TEST_ROOT/missing-compose-template.yaml"
+: > "$FAKE_LOG"
+COMPOSE_TEMPLATE="$missing_template" assert_fail first_compose_cutover "$FAKE_DIGEST"
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "legacy service was not retained when Compose rendering failed"
+grep -F 'docker compose -f ' "$FAKE_LOG" >/dev/null && fail "stale Compose configuration was started after rendering failed"
+
+printf 'exited\n' > "$FAKE_CONTAINER_STATE_FILE"
+: > "$FAKE_LOG"
+COMPOSE_TEMPLATE="$missing_template" assert_fail first_compose_cutover "$FAKE_DIGEST"
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "legacy service was not restored after render failure with the old writer stopped"
+grep -F 'docker compose -f ' "$FAKE_LOG" >/dev/null && fail "stale Compose configuration was started after rendering failed with the old writer stopped"
+
 FAKE_COMPOSE_FAIL=1 assert_fail first_compose_cutover "$FAKE_DIGEST"
 grep -F 'docker start siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null || fail "legacy container was not restarted"
 grep -F 'docker rm siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null && fail "legacy container was removed"
+
+: > "$FAKE_LOG"
+FAKE_CANDIDATE_FAIL_ALWAYS=1
+export FAKE_CANDIDATE_FAIL_ALWAYS
+FAKE_HEALTH_CLOCK_FILE="$TEST_ROOT/health.cutover.clock"
+printf '0\n' > "$FAKE_HEALTH_CLOCK_FILE"
+sleep() { :; }
+if candidate_failure_output="$(first_compose_cutover "$FAKE_DIGEST" 2>&1)"; then
+  fail "candidate that never became ready was accepted"
+fi
+unset -f sleep
+unset FAKE_CANDIDATE_FAIL_ALWAYS FAKE_HEALTH_CLOCK_FILE
+[[ "$candidate_failure_output" == *'candidate startup diagnostics'* ]] || fail "failed candidate diagnostics were not summarized before cleanup"
+[[ "$candidate_failure_output" == *'permission_errors=1'* && "$candidate_failure_output" == *'database_errors=1'* ]] || fail "candidate startup error categories were not captured"
+[[ "$candidate_failure_output" != *'SYNTHETIC_PRIVATE_SENTINEL_DO_NOT_EMIT'* ]] || fail "candidate logs leaked raw content"
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "legacy container was not restored after candidate readiness timeout"
+[[ ! -e "$FAKE_CANDIDATE_MARKER_FILE" ]] || fail "unhealthy candidate was not removed before restoring legacy service"
+grep -F 'docker logs --tail 200 siftalpha-web-compose' "$FAKE_LOG" >/dev/null || fail "candidate logs were not summarized before removal"
+grep -F 'docker start siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null || fail "legacy container was not restarted after candidate readiness timeout"
+
+: > "$COMPOSE_FILE"
+: > "$FAKE_LOG"
+export FAKE_PLAN_MODE=none FAKE_CANDIDATE_FAIL_ALWAYS=1 FAKE_REQUIRE_LEGACY_STOPPED=1
+FAKE_HEALTH_CLOCK_FILE="$TEST_ROOT/health.deploy.clock"
+printf '0\n' > "$FAKE_HEALTH_CLOCK_FILE"
+export FAKE_HEALTH_CLOCK_FILE
+sleep() { :; }
+if deploy_failure_output="$(deploy_candidate "$FAKE_DIGEST" 2>&1)"; then
+  fail "deploy_candidate accepted a Compose service that never became ready"
+fi
+unset -f sleep
+unset FAKE_CANDIDATE_FAIL_ALWAYS FAKE_REQUIRE_LEGACY_STOPPED FAKE_HEALTH_CLOCK_FILE
+[[ "$deploy_failure_output" == *'candidate startup diagnostics'* ]] || fail "deploy_candidate omitted bounded startup diagnostics"
+[[ "$deploy_failure_output" != *'SYNTHETIC_PRIVATE_SENTINEL_DO_NOT_EMIT'* ]] || fail "deploy_candidate exposed raw container logs"
+[[ "$deploy_failure_output" != *'port is already allocated'* ]] || fail "stale Compose file bypassed the running legacy-container cutover"
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "deploy_candidate did not restore the prior website after readiness timeout"
+[[ ! -e "$FAKE_CANDIDATE_MARKER_FILE" ]] || fail "deploy_candidate left its unhealthy candidate active"
+grep -F 'docker compose -f ' "$FAKE_LOG" >/dev/null || fail "deploy_candidate did not exercise its Compose cutover path"
+grep -F 'docker start siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null || fail "deploy_candidate did not restart the prior website"
+stop_line="$(grep -n -F 'docker stop siftalpha-task011-ebd23f4' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+compose_line="$(grep -n -F 'docker compose -f ' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+[[ -n "$stop_line" && -n "$compose_line" && "$stop_line" -lt "$compose_line" ]] \
+  || fail "running legacy container was not stopped before the stale Compose file was applied"
+
+export FAKE_CANDIDATE_IMAGE_MISMATCH=1
+FAKE_CANDIDATE_IMAGE_MISMATCH_FILE="$TEST_ROOT/image-mismatch.once"
+FAKE_CANDIDATE_IMAGE_MISMATCH_PENDING_FILE="$TEST_ROOT/image-mismatch.pending"
+export FAKE_CANDIDATE_IMAGE_MISMATCH_FILE FAKE_CANDIDATE_IMAGE_MISMATCH_PENDING_FILE
+: > "$FAKE_LOG"
+assert_fail deploy_candidate "$FAKE_DIGEST"
+unset FAKE_CANDIDATE_IMAGE_MISMATCH FAKE_CANDIDATE_IMAGE_MISMATCH_FILE FAKE_CANDIDATE_IMAGE_MISMATCH_PENDING_FILE
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "legacy service was not restored when the candidate image digest differed"
+[[ ! -e "$FAKE_CANDIDATE_MARKER_FILE" ]] || fail "candidate with the wrong immutable image reference remained active"
+
+assert_ok deploy_candidate "$FAKE_DIGEST"
+[[ -e "$FAKE_CANDIDATE_MARKER_FILE" ]] || fail "valid Compose deployment did not remain active for upgrade-path validation"
+export FAKE_CANDIDATE_IMAGE_MISMATCH=1
+FAKE_CANDIDATE_IMAGE_MISMATCH_FILE="$TEST_ROOT/image-mismatch-compose.once"
+FAKE_CANDIDATE_IMAGE_MISMATCH_PENDING_FILE="$TEST_ROOT/image-mismatch-compose.pending"
+export FAKE_CANDIDATE_IMAGE_MISMATCH_FILE FAKE_CANDIDATE_IMAGE_MISMATCH_PENDING_FILE
+: > "$FAKE_LOG"
+assert_fail deploy_candidate "$FAKE_DIGEST"
+unset FAKE_CANDIDATE_IMAGE_MISMATCH FAKE_CANDIDATE_IMAGE_MISMATCH_FILE FAKE_CANDIDATE_IMAGE_MISMATCH_PENDING_FILE
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running && -e "$FAKE_CANDIDATE_MARKER_FILE" ]] \
+  || fail "Compose upgrade mismatch did not restore the previously active Compose service"
+[[ "$(grep -Fc 'docker compose -f ' "$FAKE_LOG")" -ge 2 ]] \
+  || fail "Compose upgrade mismatch did not run the candidate and snapshot restoration paths"
 
 assert_ok rollback
 

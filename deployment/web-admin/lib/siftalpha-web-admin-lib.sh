@@ -418,10 +418,28 @@ audit_deployment_event() {
     || { die 'cannot secure protected deployment audit log'; return 1; }
 }
 
+health_clock_seconds() {
+  printf '%s\n' "$SECONDS"
+}
+
+health_curl() {
+  local deadline="$1" max_time
+  shift
+  if [[ -n "$deadline" ]]; then
+    local now
+    now="$(health_clock_seconds)" || return 1
+    max_time=$((deadline - now))
+    (( max_time > 0 )) || return 28
+  else
+    max_time=10
+  fi
+  "$CURL_BIN" --max-time "$max_time" --fail --silent --show-error "$@"
+}
+
 health_check() {
-  local base="http://$LOOPBACK_PORT" page static_path self_test_container self_test_probe attempt
+  local deadline="${1:-}" base="http://$LOOPBACK_PORT" page static_path self_test_container self_test_probe attempt
   if [[ -n "${SELF_TEST_NETWORK_NAME:-}" ]]; then
-    self_test_container="$(current_container)" || return 1
+    self_test_container="$(running_container)" || return 1
     self_test_probe="$(printf '%s\n' \
       'import re' \
       'from urllib.request import urlopen' \
@@ -445,27 +463,145 @@ health_check() {
     return 1
   fi
   for page in / /account /account/ /healthz/; do
-    "$CURL_BIN" --fail --silent --show-error "$base$page" >/dev/null || { die "health endpoint failed: $page"; return 1; }
+    health_curl "$deadline" "$base$page" >/dev/null || { die "health endpoint failed: $page"; return 1; }
   done
-  static_path="$($CURL_BIN --fail --silent --show-error "$base/" | sed -n 's|.*src="\(/static/[A-Za-z0-9._/-]*\)".*|\1|p' | head -n 1)"
+  static_path="$(health_curl "$deadline" "$base/" | sed -n 's|.*src="\(/static/[A-Za-z0-9._/-]*\)".*|\1|p' | head -n 1)"
   [[ "$static_path" =~ ^/static/[A-Za-z0-9._/-]+$ && "$static_path" != *..* ]] || { die 'homepage has no safe static asset reference'; return 1; }
-  "$CURL_BIN" --fail --silent --show-error "$base$static_path" >/dev/null || { die 'homepage static asset failed'; return 1; }
+  health_curl "$deadline" "$base$static_path" >/dev/null || { die 'homepage static asset failed'; return 1; }
+}
+
+wait_for_health() {
+  local budget_seconds="${1:-60}" start deadline now remaining
+  [[ "$budget_seconds" =~ ^[1-9][0-9]*$ ]] || { die 'health readiness budget must be a positive integer'; return 1; }
+  # Compose starts containers asynchronously; probe readiness once per second,
+  # but keep the isolated self-test retry budget instead of nesting it.
+  if [[ -n "${SELF_TEST_NETWORK_NAME:-}" ]]; then
+    health_check
+    return $?
+  fi
+  start="$(health_clock_seconds)" || return 1
+  deadline=$((start + budget_seconds))
+  while :; do
+    if health_check "$deadline" >/dev/null 2>&1; then
+      return 0
+    fi
+    now="$(health_clock_seconds)" || return 1
+    (( now < deadline )) || break
+    remaining=$((deadline - now))
+    sleep "$((remaining < 1 ? remaining : 1))"
+  done
+  die "website did not become healthy within ${budget_seconds} seconds"
+}
+
+candidate_startup_diagnostics() {
+  local summary
+  if summary="$(docker_cli logs --tail 200 "$COMPOSE_CONTAINER" 2>/dev/null | "$PYTHON_BIN" -c '
+import re
+import sys
+
+patterns = {
+    "tracebacks": re.compile(r"Traceback \(most recent call last\)", re.I),
+    "permission_errors": re.compile(r"PermissionError|permission denied|readonly database", re.I),
+    "database_errors": re.compile(r"sqlite|OperationalError|DatabaseError", re.I),
+    "import_errors": re.compile(r"ImportError|ModuleNotFoundError", re.I),
+    "django_config_errors": re.compile(r"ImproperlyConfigured", re.I),
+    "server_start_markers": re.compile(r"Starting gunicorn|Listening at|Booting worker", re.I),
+}
+counts = {name: 0 for name in patterns}
+for line in sys.stdin:
+    for name, pattern in patterns.items():
+        counts[name] += bool(pattern.search(line))
+print(" ".join(f"{name}={count}" for name, count in counts.items()))
+')"; then
+    printf 'candidate startup diagnostics (last 200 log lines; categories only): %s\n' "$summary"
+  else
+    printf 'candidate startup diagnostics: container logs unavailable\n'
+  fi
+}
+
+fixed_container_state() {
+  local container="$1" matches state
+  matches="$(docker_cli container ls --all --filter "name=^/${container}$" --format '{{.Names}}')" \
+    || { die 'cannot enumerate fixed website containers'; return 1; }
+  if [[ -z "$matches" ]]; then
+    printf 'absent\n'
+    return 0
+  fi
+  [[ "$matches" == "$container" ]] || { die 'fixed website container lookup was ambiguous'; return 1; }
+  state="$(docker_cli inspect --format '{{.State.Status}}' "$container")" \
+    || { die 'cannot inspect fixed website container state'; return 1; }
+  case "$state" in
+    running|exited|dead) printf '%s\n' "$state" ;;
+    *) die 'fixed website container is in an unsafe or unknown state'; return 1 ;;
+  esac
 }
 
 current_container() {
-  if docker_cli container inspect "$COMPOSE_CONTAINER" >/dev/null 2>&1; then
+  local compose_status legacy_status
+  compose_status="$(fixed_container_state "$COMPOSE_CONTAINER")" || return 1
+  legacy_status="$(fixed_container_state "$LEGACY_CONTAINER")" || return 1
+  if [[ "$compose_status" == running && "$legacy_status" == running ]]; then
+    die 'both fixed website containers are running; refusing to select a deployment runtime'
+    return 1
+  elif [[ "$compose_status" == running ]]; then
     printf '%s\n' "$COMPOSE_CONTAINER"
-  elif docker_cli container inspect "$LEGACY_CONTAINER" >/dev/null 2>&1; then
+  elif [[ "$legacy_status" == running ]]; then
+    printf '%s\n' "$LEGACY_CONTAINER"
+  elif [[ "$compose_status" != absent ]]; then
+    printf '%s\n' "$COMPOSE_CONTAINER"
+  elif [[ "$legacy_status" != absent ]]; then
     printf '%s\n' "$LEGACY_CONTAINER"
   else
     die 'neither fixed website container exists'
   fi
 }
 
+running_container() {
+  local container state
+  container="$(current_container)" || return 1
+  state="$(docker_cli inspect --format '{{.State.Status}}' "$container")" \
+    || { die 'cannot inspect selected website container state'; return 1; }
+  [[ "$state" == running ]] || { die 'no fixed website container is running; refusing deployment'; return 1; }
+  printf '%s\n' "$container"
+}
+
+ensure_legacy_service() {
+  local state
+  state="$(fixed_container_state "$LEGACY_CONTAINER")" || return 1
+  case "$state" in
+    running)
+      ;;
+    exited|dead)
+      docker_cli start "$LEGACY_CONTAINER" >/dev/null \
+        || { die 'cannot restart the retained legacy website'; return 1; }
+      ;;
+    *)
+      die 'legacy website is absent or in an unsafe state'; return 1 ;;
+  esac
+  wait_for_health || { die 'legacy website is not healthy'; return 1; }
+}
+
+restore_legacy_service() {
+  docker_cli start "$LEGACY_CONTAINER" >/dev/null 2>&1 || true
+  wait_for_health || { die 'legacy website could not be confirmed healthy'; return 1; }
+}
+
+verify_candidate_image() {
+  local digest="$1" expected actual container
+  expected="$(candidate_image "$digest")" || return 1
+  container="$(current_container)" || return 1
+  [[ "$container" == "$COMPOSE_CONTAINER" ]] \
+    || { die 'candidate Compose container is not the active website'; return 1; }
+  actual="$(docker_cli inspect --format '{{.Config.Image}}' "$COMPOSE_CONTAINER")" \
+    || { die 'cannot inspect candidate website image reference'; return 1; }
+  [[ "$actual" == "$expected" ]] \
+    || { die 'running website image does not match the requested immutable digest'; return 1; }
+}
+
 snapshot_current_runtime() {
   local container runtime config_image image_id snapshot created
   ensure_state_directories || return 1
-  container="$(current_container)" || return 1
+  container="$(running_container)" || return 1
   if [[ "$container" == "$LEGACY_CONTAINER" ]]; then
     runtime='legacy'
   else
@@ -541,7 +677,7 @@ restore_snapshot() {
       ;;
     *) die 'deployment snapshot runtime is invalid'; return 1 ;;
   esac
-  health_check || { die 'restored website service is unhealthy'; return 1; }
+  wait_for_health || { die 'restored website service is unhealthy'; return 1; }
   printf 'rollback: restored snapshot=%s\n' "$snapshot"
   if [[ "$migrations" != '[]' ]]; then
     printf 'database rollback: retained reviewed additive migration %s; it is backward-compatible with the restored application\n' "$SIFTALPHA_APPROVED_MIGRATION"
@@ -637,19 +773,59 @@ PY
 }
 
 first_compose_cutover() {
-  local digest="$1"
-  render_compose "$digest"
-  docker_cli stop "$LEGACY_CONTAINER"
+  local digest="$1" legacy_status
+  if ! render_compose "$digest"; then
+    if ! ensure_legacy_service; then
+      die 'candidate Compose rendering failed and the legacy website could not be confirmed healthy'
+      return 1
+    fi
+    die 'candidate Compose configuration could not be rendered; legacy website was retained'
+    return 1
+  fi
+  if ! docker_cli stop "$LEGACY_CONTAINER"; then
+    if ! restore_legacy_service; then
+      die 'legacy website stop failed and the prior service could not be confirmed healthy'
+      return 1
+    fi
+    die 'could not stop the legacy website; candidate was not started'
+    return 1
+  fi
+  if ! legacy_status="$(fixed_container_state "$LEGACY_CONTAINER")"; then
+    if ! restore_legacy_service; then
+      die 'legacy website state could not be verified after stop and service recovery failed'
+      return 1
+    fi
+    die 'legacy website state could not be verified after stop; candidate was not started'
+    return 1
+  fi
+  if [[ "$legacy_status" != exited && "$legacy_status" != dead ]]; then
+    if ! restore_legacy_service; then
+      die 'legacy website did not stop and could not be confirmed healthy'
+      return 1
+    fi
+    die 'legacy website is still active; candidate was not started'
+    return 1
+  fi
   if ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate; then
     docker_cli rm -f "$COMPOSE_CONTAINER" || true
-    docker_cli start "$LEGACY_CONTAINER"
+    docker_cli start "$LEGACY_CONTAINER" || { die 'candidate failed to start and legacy website could not be restarted'; return 1; }
+    wait_for_health || { die 'candidate failed to start and legacy website did not recover'; return 1; }
     die 'candidate Compose service failed; legacy container was restarted'
     return 1
   fi
-  if ! health_check; then
+  if ! wait_for_health; then
+    candidate_startup_diagnostics
     docker_cli rm -f "$COMPOSE_CONTAINER" || true
-    docker_cli start "$LEGACY_CONTAINER"
+    docker_cli start "$LEGACY_CONTAINER" || { die 'candidate was unhealthy and legacy website could not be restarted'; return 1; }
+    wait_for_health || { die 'candidate was unhealthy and legacy website did not recover'; return 1; }
     die 'candidate Compose service was unhealthy; legacy container was restarted'
+    return 1
+  fi
+  if ! verify_candidate_image "$digest"; then
+    docker_cli rm -f "$COMPOSE_CONTAINER" >/dev/null 2>&1 || true
+    docker_cli start "$LEGACY_CONTAINER" || { die 'candidate image did not match and legacy website could not be restarted'; return 1; }
+    wait_for_health || { die 'candidate image did not match and legacy website did not recover'; return 1; }
+    die 'candidate image did not match the requested immutable digest; legacy website was restarted'
     return 1
   fi
 }
@@ -701,7 +877,7 @@ isolated_deploy_and_rollback_test() {
   local SELF_TEST_ID="web-admin-selftest-$BASHPID"
   [[ "$digest" =~ $SIFTALPHA_DIGEST_PATTERN ]] || { die 'invalid candidate digest'; return 1; }
   ensure_state_directories || return 1
-  original_container="$(current_container)" || return 1
+  original_container="$(running_container)" || return 1
   original_state="$(docker_cli inspect --format '{{.State.Status}}' "$original_container")" \
     || { die 'cannot inspect the current website for isolated self-test'; return 1; }
   [[ "$original_state" == running ]] || { die 'current website is not running; isolated self-test is blocked'; return 1; }
@@ -852,18 +1028,19 @@ restart_after_migration_preflight_failure() {
   local container="$1"
   docker_cli start "$container" >/dev/null \
     || { die 'cannot restart the original website container'; return 1; }
-  health_check || { die 'original website did not recover after migration was stopped'; return 1; }
+  wait_for_health || { die 'original website did not recover after migration was stopped'; return 1; }
   printf 'migration recovery: no production migration was applied; original container restarted\n'
 }
 
 deploy_candidate() {
-  local digest="$1" image planned database_state snapshot container state
+  local digest="$1" image planned database_state snapshot container state runtime
   preflight_candidate "$digest" || return 1
   image="$(candidate_image "$digest")"
   planned="$LAST_MIGRATION_PLAN"
   database_state="$LAST_APPLIED_MIGRATIONS"
   snapshot_current_runtime || return 1
   snapshot="$(latest_snapshot)" || return 1
+  runtime="$(snapshot_value "$snapshot" runtime)" || return 1
   if [[ "$planned" == '[]' ]]; then
     record_snapshot_database_state "$snapshot" "$database_state" || return 1
     if [[ "$database_state" != '[]' ]]; then
@@ -872,7 +1049,7 @@ deploy_candidate() {
       printf 'migration plan: none; continuing with the existing deployment path\n'
     fi
   else
-    container="$(current_container)" || return 1
+    container="$(running_container)" || return 1
     state="$(docker_cli inspect --format '{{.State.Status}}' "$container")" \
       || { die 'cannot inspect current website state'; return 1; }
     [[ "$state" == 'running' ]] || { die 'website container is not running; refusing migration'; return 1; }
@@ -935,19 +1112,39 @@ deploy_candidate() {
     }
   fi
 
-  if [[ ! -f "$COMPOSE_FILE" ]]; then
-    if ! first_compose_cutover "$digest"; then
-      audit_deployment_event deploy blocked "$digest" "$planned" || true
+  case "$runtime" in
+    legacy)
+      if ! first_compose_cutover "$digest"; then
+        audit_deployment_event deploy blocked "$digest" "$planned" || true
+        return 1
+      fi
+      ;;
+    compose)
+      if ! render_compose "$digest" || ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate; then
+        restore_snapshot "$(latest_snapshot)" || return 1
+        die 'candidate Compose service failed; prior website service was restored'
+        audit_deployment_event deploy blocked "$digest" "$planned" || true
+        return 1
+      fi
+      if ! wait_for_health; then
+        candidate_startup_diagnostics
+        restore_snapshot "$(latest_snapshot)" || return 1
+        die 'candidate Compose service failed health checks; prior website service was restored'
+        audit_deployment_event deploy blocked "$digest" "$planned" || true
+        return 1
+      fi
+      if ! verify_candidate_image "$digest"; then
+        restore_snapshot "$(latest_snapshot)" || return 1
+        die 'candidate image did not match the requested immutable digest; prior website service was restored'
+        audit_deployment_event deploy blocked "$digest" "$planned" || true
+        return 1
+      fi
+      ;;
+    *)
+      die 'deployment snapshot has an invalid runtime; refusing candidate cutover'
       return 1
-    fi
-  else
-    if ! render_compose "$digest" || ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate || ! health_check; then
-      restore_snapshot "$(latest_snapshot)" || return 1
-      die 'candidate Compose service failed; prior website service was restored'
-      audit_deployment_event deploy blocked "$digest" "$planned" || true
-      return 1
-    fi
-  fi
+      ;;
+  esac
   audit_deployment_event deploy ok "$digest" "$planned" || return 1
 }
 
