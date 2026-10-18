@@ -9,7 +9,7 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="PendingEmailRegistration",
             fields=[
-                ("id", models.AutoField(primary_key=True, serialize=False)),
+                ("id", models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
                 ("email", models.EmailField(max_length=150, unique=True)),
                 ("display_name", models.CharField(blank=True, max_length=150)),
                 ("password_hash", models.CharField(max_length=128)),
