@@ -199,8 +199,24 @@ PY
   exec)
     [[ "$*" == *'http://127.0.0.1:8000'* && "$*" == *'/healthz/'* && "$*" == *'/static/'* ]] || exit 1
     exit 0 ;;
+  container)
+    if [[ "${3:-}" == 'siftalpha-web-compose' ]]; then
+      [[ -f "$FAKE_CANDIDATE_MARKER_FILE" ]] || exit 1
+    fi
+    exit 0 ;;
   inspect)
-    if [[ "${3:-}" == '{{.State.Status}}' ]]; then cat "$FAKE_CONTAINER_STATE_FILE"; else printf 'siftalpha-task011:ebd23f4\n'; fi
+    if [[ "${3:-}" == '{{.State.Status}}' ]]; then
+      if [[ "${!#}" == 'siftalpha-web-compose' ]]; then
+        [[ -f "$FAKE_CANDIDATE_MARKER_FILE" ]] || exit 1
+        printf 'running\n'
+      elif [[ -f "$FAKE_CANDIDATE_MARKER_FILE" ]]; then
+        printf 'exited\n'
+      else
+        cat "$FAKE_CONTAINER_STATE_FILE"
+      fi
+    else
+      printf 'siftalpha-task011:ebd23f4\n'
+    fi
     exit 0 ;;
   logs)
     printf 'Traceback (most recent call last):\n'
@@ -210,6 +226,10 @@ PY
     exit 0 ;;
   compose)
     [[ "${FAKE_COMPOSE_FAIL:-0}" == 1 ]] && exit 1
+    if [[ "${FAKE_REQUIRE_LEGACY_STOPPED:-0}" == 1 && "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]]; then
+      printf 'Bind for 127.0.0.1:19091 failed: port is already allocated\n' >&2
+      exit 1
+    fi
     printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"
     printf 'candidate\n' > "$FAKE_CANDIDATE_MARKER_FILE"
     exit 0 ;;
@@ -520,19 +540,24 @@ grep -F 'docker start siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null || fail 
 
 : > "$COMPOSE_FILE"
 : > "$FAKE_LOG"
-export FAKE_PLAN_MODE=none FAKE_CANDIDATE_FAIL_ALWAYS=1
+export FAKE_PLAN_MODE=none FAKE_CANDIDATE_FAIL_ALWAYS=1 FAKE_REQUIRE_LEGACY_STOPPED=1
 sleep() { :; }
 if deploy_failure_output="$(deploy_candidate "$FAKE_DIGEST" 2>&1)"; then
   fail "deploy_candidate accepted a Compose service that never became ready"
 fi
 unset -f sleep
-unset FAKE_CANDIDATE_FAIL_ALWAYS
+unset FAKE_CANDIDATE_FAIL_ALWAYS FAKE_REQUIRE_LEGACY_STOPPED
 [[ "$deploy_failure_output" == *'candidate startup diagnostics'* ]] || fail "deploy_candidate omitted bounded startup diagnostics"
 [[ "$deploy_failure_output" != *'SYNTHETIC_PRIVATE_SENTINEL_DO_NOT_EMIT'* ]] || fail "deploy_candidate exposed raw container logs"
+[[ "$deploy_failure_output" != *'port is already allocated'* ]] || fail "stale Compose file bypassed the running legacy-container cutover"
 [[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "deploy_candidate did not restore the prior website after readiness timeout"
 [[ ! -e "$FAKE_CANDIDATE_MARKER_FILE" ]] || fail "deploy_candidate left its unhealthy candidate active"
 grep -F 'docker compose -f ' "$FAKE_LOG" >/dev/null || fail "deploy_candidate did not exercise its Compose cutover path"
 grep -F 'docker start siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null || fail "deploy_candidate did not restart the prior website"
+stop_line="$(grep -n -F 'docker stop siftalpha-task011-ebd23f4' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+compose_line="$(grep -n -F 'docker compose -f ' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+[[ -n "$stop_line" && -n "$compose_line" && "$stop_line" -lt "$compose_line" ]] \
+  || fail "running legacy container was not stopped before the stale Compose file was applied"
 
 assert_ok rollback
 

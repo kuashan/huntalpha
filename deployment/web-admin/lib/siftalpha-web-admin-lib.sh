@@ -421,7 +421,7 @@ audit_deployment_event() {
 health_check() {
   local base="http://$LOOPBACK_PORT" page static_path self_test_container self_test_probe attempt
   if [[ -n "${SELF_TEST_NETWORK_NAME:-}" ]]; then
-    self_test_container="$(current_container)" || return 1
+    self_test_container="$(running_container)" || return 1
     self_test_probe="$(printf '%s\n' \
       'import re' \
       'from urllib.request import urlopen' \
@@ -498,19 +498,44 @@ print(" ".join(f"{name}={count}" for name, count in counts.items()))
 }
 
 current_container() {
+  local compose_status='absent' legacy_status='absent'
   if docker_cli container inspect "$COMPOSE_CONTAINER" >/dev/null 2>&1; then
+    compose_status="$(docker_cli inspect --format '{{.State.Status}}' "$COMPOSE_CONTAINER")" \
+      || { die 'cannot inspect Compose website state'; return 1; }
+  fi
+  if docker_cli container inspect "$LEGACY_CONTAINER" >/dev/null 2>&1; then
+    legacy_status="$(docker_cli inspect --format '{{.State.Status}}' "$LEGACY_CONTAINER")" \
+      || { die 'cannot inspect legacy website state'; return 1; }
+  fi
+  if [[ "$compose_status" == running && "$legacy_status" == running ]]; then
+    die 'both fixed website containers are running; refusing to select a deployment runtime'
+    return 1
+  elif [[ "$compose_status" == running ]]; then
     printf '%s\n' "$COMPOSE_CONTAINER"
-  elif docker_cli container inspect "$LEGACY_CONTAINER" >/dev/null 2>&1; then
+  elif [[ "$legacy_status" == running ]]; then
+    printf '%s\n' "$LEGACY_CONTAINER"
+  elif [[ "$compose_status" != absent ]]; then
+    printf '%s\n' "$COMPOSE_CONTAINER"
+  elif [[ "$legacy_status" != absent ]]; then
     printf '%s\n' "$LEGACY_CONTAINER"
   else
     die 'neither fixed website container exists'
   fi
 }
 
+running_container() {
+  local container state
+  container="$(current_container)" || return 1
+  state="$(docker_cli inspect --format '{{.State.Status}}' "$container")" \
+    || { die 'cannot inspect selected website container state'; return 1; }
+  [[ "$state" == running ]] || { die 'no fixed website container is running; refusing deployment'; return 1; }
+  printf '%s\n' "$container"
+}
+
 snapshot_current_runtime() {
   local container runtime config_image image_id snapshot created
   ensure_state_directories || return 1
-  container="$(current_container)" || return 1
+  container="$(running_container)" || return 1
   if [[ "$container" == "$LEGACY_CONTAINER" ]]; then
     runtime='legacy'
   else
@@ -749,7 +774,7 @@ isolated_deploy_and_rollback_test() {
   local SELF_TEST_ID="web-admin-selftest-$BASHPID"
   [[ "$digest" =~ $SIFTALPHA_DIGEST_PATTERN ]] || { die 'invalid candidate digest'; return 1; }
   ensure_state_directories || return 1
-  original_container="$(current_container)" || return 1
+  original_container="$(running_container)" || return 1
   original_state="$(docker_cli inspect --format '{{.State.Status}}' "$original_container")" \
     || { die 'cannot inspect the current website for isolated self-test'; return 1; }
   [[ "$original_state" == running ]] || { die 'current website is not running; isolated self-test is blocked'; return 1; }
@@ -905,13 +930,14 @@ restart_after_migration_preflight_failure() {
 }
 
 deploy_candidate() {
-  local digest="$1" image planned database_state snapshot container state
+  local digest="$1" image planned database_state snapshot container state runtime
   preflight_candidate "$digest" || return 1
   image="$(candidate_image "$digest")"
   planned="$LAST_MIGRATION_PLAN"
   database_state="$LAST_APPLIED_MIGRATIONS"
   snapshot_current_runtime || return 1
   snapshot="$(latest_snapshot)" || return 1
+  runtime="$(snapshot_value "$snapshot" runtime)" || return 1
   if [[ "$planned" == '[]' ]]; then
     record_snapshot_database_state "$snapshot" "$database_state" || return 1
     if [[ "$database_state" != '[]' ]]; then
@@ -920,7 +946,7 @@ deploy_candidate() {
       printf 'migration plan: none; continuing with the existing deployment path\n'
     fi
   else
-    container="$(current_container)" || return 1
+    container="$(running_container)" || return 1
     state="$(docker_cli inspect --format '{{.State.Status}}' "$container")" \
       || { die 'cannot inspect current website state'; return 1; }
     [[ "$state" == 'running' ]] || { die 'website container is not running; refusing migration'; return 1; }
@@ -983,26 +1009,33 @@ deploy_candidate() {
     }
   fi
 
-  if [[ ! -f "$COMPOSE_FILE" ]]; then
-    if ! first_compose_cutover "$digest"; then
-      audit_deployment_event deploy blocked "$digest" "$planned" || true
+  case "$runtime" in
+    legacy)
+      if ! first_compose_cutover "$digest"; then
+        audit_deployment_event deploy blocked "$digest" "$planned" || true
+        return 1
+      fi
+      ;;
+    compose)
+      if ! render_compose "$digest" || ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate; then
+        restore_snapshot "$(latest_snapshot)" || return 1
+        die 'candidate Compose service failed; prior website service was restored'
+        audit_deployment_event deploy blocked "$digest" "$planned" || true
+        return 1
+      fi
+      if ! wait_for_health; then
+        candidate_startup_diagnostics
+        restore_snapshot "$(latest_snapshot)" || return 1
+        die 'candidate Compose service failed health checks; prior website service was restored'
+        audit_deployment_event deploy blocked "$digest" "$planned" || true
+        return 1
+      fi
+      ;;
+    *)
+      die 'deployment snapshot has an invalid runtime; refusing candidate cutover'
       return 1
-    fi
-  else
-    if ! render_compose "$digest" || ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate; then
-      restore_snapshot "$(latest_snapshot)" || return 1
-      die 'candidate Compose service failed; prior website service was restored'
-      audit_deployment_event deploy blocked "$digest" "$planned" || true
-      return 1
-    fi
-    if ! wait_for_health; then
-      candidate_startup_diagnostics
-      restore_snapshot "$(latest_snapshot)" || return 1
-      die 'candidate Compose service failed health checks; prior website service was restored'
-      audit_deployment_event deploy blocked "$digest" "$planned" || true
-      return 1
-    fi
-  fi
+      ;;
+  esac
   audit_deployment_event deploy ok "$digest" "$planned" || return 1
 }
 
