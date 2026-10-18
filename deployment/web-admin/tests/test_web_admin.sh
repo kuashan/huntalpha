@@ -18,15 +18,41 @@ assert_fail() { if "$@"; then fail "expected failure: $*"; fi; }
 if [[ ! -f "$LIB" ]]; then
   fail "web-admin library is missing: $LIB"
 fi
+if grep -F ',rw"' "$LIB" >/dev/null; then
+  fail "Docker --mount must not use the unsupported rw shorthand"
+fi
+if ! sed -n '/^isolated_deploy_and_rollback_test()/,/^record_snapshot_database_state()/p' "$LIB" \
+  | grep -F -- '--env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/data/db.sqlite3 --env HOME=/tmp' >/dev/null; then
+  fail "isolated legacy container must use the writable temporary home"
+fi
+if ! grep -F 'HOME: /tmp' "$ROOT/deployment/web-admin/compose.selftest.yaml.template" >/dev/null; then
+  fail "isolated candidate container must use the writable temporary home"
+fi
+if ! sed -n '/^install_files()/,/^install_rdc_write_allowance()/p' "$ROOT/deployment/web-admin/install-web-admin.sh" \
+  | grep -F 'assert_secure_config_file "$CONFIG_PATH"' >/dev/null; then
+  fail "installer must refuse an unsafe pre-existing root configuration"
+fi
+if ! sed -n '/^health_check()/,/^current_container()/p' "$LIB" | grep -F 'docker_cli exec' >/dev/null; then
+  fail "self-test health checks must run inside the isolated container"
+fi
+if ! sed -n '/^rehearse_migrations()/,/^audit_deployment_event()/p' "$LIB" | grep -F 'validate-result' >/dev/null; then
+  fail "migration rehearsal must validate the exact approved database result"
+fi
+if grep -F 'ports:' "$ROOT/deployment/web-admin/compose.selftest.yaml.template" >/dev/null; then
+  fail "isolated self-test containers must not publish host ports"
+fi
 
 FAKE_BIN="$TEST_ROOT/bin"
 STATE_DIR="$TEST_ROOT/state"
 DATA_DIR="$TEST_ROOT/data"
 mkdir -p "$FAKE_BIN" "$STATE_DIR" "$DATA_DIR"
 export FAKE_LOG="$TEST_ROOT/fake.log"
+: > "$FAKE_LOG"
 export FAKE_DIGEST="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 export FAKE_COMMIT="0123456789abcdef0123456789abcdef01234567"
 export FAKE_RUN_ID="424242"
+export FAKE_PLAN_MODE='none'
+export FAKE_LOG
 
 cat > "$FAKE_BIN/docker" <<'EOF'
 #!/usr/bin/env bash
@@ -42,7 +68,7 @@ case "${1:-}" in
       if [[ "${FAKE_PROVENANCE_VERSION:-v1}" == v0.2 ]]; then
         printf '{"buildType":"https://mobyproject.org/buildkit@v1","invocation":{},"metadata":{}}\n'
       else
-        printf '{"buildDefinition":{"buildType":"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md","externalParameters":{},"resolvedDependencies":[]},"runDetails":{"builder":{"id":""},"metadata":{}}}\n'
+        printf '{"buildDefinition":{"buildType":"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md","externalParameters":{},"internalParameters":{"github_repository":"kuashan/huntalpha","github_workflow":"SiftAlpha Web CI and ARM64","github_workflow_ref":"kuashan/huntalpha/.github/workflows/siftalpha-web-arm64.yml@refs/heads/release/siftalpha-web-v1","github_workflow_sha":"%s","github_run_id":"%s","github_ref":"refs/heads/release/siftalpha-web-v1","github_event_name":"push"},"resolvedDependencies":[]},"runDetails":{"builder":{"id":""},"metadata":{}}}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
       fi
     else
       printf '{"manifests":[{"platform":{"architecture":"arm64","os":"linux"}}]}\n'
@@ -61,13 +87,128 @@ case "${1:-}" in
   container)
     [[ "${3:-}" == siftalpha-web-compose ]] && exit 1
     exit 0 ;;
+  run)
+    [[ "$*" == *'--network none'* && "$*" == *'--read-only'* ]] || exit 1
+    if [[ "$*" == *'manage.py migrate --noinput'* ]]; then
+      [[ "$*" == *'--env HOME=/tmp'* ]] || { printf 'isolated migrations must use the writable temporary home\n' >&2; exit 125; }
+    fi
+    for argument in "$@"; do
+      [[ "$argument" == type=bind*,rw ]] && { printf 'invalid Docker --mount rw shorthand\n' >&2; exit 125; }
+    done
+    mount_specs=()
+    previous=''
+    for argument in "$@"; do
+      if [[ "$previous" == --mount ]]; then
+        mount_specs+=("$argument")
+        previous=''
+        continue
+      fi
+      previous="$argument"
+    done
+    mount_source=''
+    for mount_spec in "${mount_specs[@]}"; do
+      IFS=',' read -ra mount_parts <<< "$mount_spec"
+      mount_destination=''
+      candidate_source=''
+      for part in "${mount_parts[@]}"; do
+        [[ "$part" == src=* ]] && candidate_source="${part#src=}"
+        [[ "$part" == dst=* ]] && mount_destination="${part#dst=}"
+      done
+      if [[ "$mount_destination" == /deploy/db.sqlite3 || "$mount_destination" == /deploy ]]; then
+        mount_source="$candidate_source"
+      fi
+    done
+    [[ -n "$mount_source" ]] || exit 1
+    if [[ "$*" == *'migration_probe.py'* ]]; then
+      database_path="$mount_source"
+      [[ -d "$mount_source" ]] && database_path="$mount_source/db.sqlite3"
+      python - "$database_path" "${FAKE_PLAN_MODE:-none}" <<'PY'
+import json
+import sqlite3
+import sys
+
+database_path, mode = sys.argv[1:]
+connection = sqlite3.connect(database_path)
+try:
+    table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='formula_editor_fixedindicatorstate'"
+    ).fetchone() is not None
+    migration_applied = connection.execute(
+        "SELECT 1 FROM django_migrations WHERE app=? AND name=?",
+        ("formula_editor", "0002_fixedindicatorstate"),
+    ).fetchone() is not None
+finally:
+    connection.close()
+
+if mode == "none":
+    pending = []
+elif mode == "unknown":
+    pending = [{"name": "core.9999_unknown", "backwards": False, "sha256": "0" * 64}]
+else:
+    pending = [] if table_exists and migration_applied else [{
+        "name": "formula_editor.0002_fixedindicatorstate",
+        "backwards": False,
+        "sha256": "72514513ca8f6b801b2b68fef42f7b35e998c78d7cdcd9cd236e0dbffefa977a",
+    }]
+applied = [{
+    "name": "formula_editor.0002_fixedindicatorstate",
+    "sha256": "72514513ca8f6b801b2b68fef42f7b35e998c78d7cdcd9cd236e0dbffefa977a",
+}] if migration_applied else []
+print(json.dumps({"pending": pending, "applied": applied}, separators=(",", ":")))
+PY
+      exit $?
+    fi
+    if [[ "$*" == *'manage.py migrate --noinput'* ]]; then
+      [[ "${FAKE_MIGRATE_FAIL:-0}" == 1 ]] && exit 1
+      database_path="$mount_source/db.sqlite3"
+      python - "$database_path" <<'PY'
+import sqlite3
+import sys
+connection = sqlite3.connect(sys.argv[1])
+try:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS formula_editor_fixedindicatorstate "
+        "(code varchar(32) NOT NULL PRIMARY KEY, enabled bool NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO django_migrations (app, name, applied) VALUES (?, ?, ?)",
+        ("formula_editor", "0002_fixedindicatorstate", "2026-01-01 00:01:00"),
+    )
+    content_type_id = connection.execute(
+        "INSERT INTO django_content_type (app_label, model) VALUES (?, ?)",
+        ("formula_editor", "fixedindicatorstate"),
+    ).lastrowid
+    for codename, name in (
+        ("add_fixedindicatorstate", "Can add 固定公式（服务器已安装）"),
+        ("change_fixedindicatorstate", "Can change 固定公式（服务器已安装）"),
+        ("delete_fixedindicatorstate", "Can delete 固定公式（服务器已安装）"),
+        ("view_fixedindicatorstate", "Can view 固定公式（服务器已安装）"),
+    ):
+        connection.execute(
+            "INSERT INTO auth_permission (name, content_type_id, codename) VALUES (?, ?, ?)",
+            (name, content_type_id, codename),
+        )
+    connection.commit()
+finally:
+    connection.close()
+PY
+      exit $?
+    fi
+    exit 1 ;;
+  exec)
+    [[ "$*" == *'http://127.0.0.1:8000'* && "$*" == *'/healthz/'* && "$*" == *'/static/'* ]] || exit 1
+    exit 0 ;;
   inspect)
-    if [[ "${3:-}" == '{{.State.Status}}' ]]; then printf 'running\n'; else printf 'siftalpha-task011:ebd23f4\n'; fi
+    if [[ "${3:-}" == '{{.State.Status}}' ]]; then cat "$FAKE_CONTAINER_STATE_FILE"; else printf 'siftalpha-task011:ebd23f4\n'; fi
     exit 0 ;;
   compose)
     [[ "${FAKE_COMPOSE_FAIL:-0}" == 1 ]] && exit 1
+    printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"
     exit 0 ;;
-  stop|start|rm) exit 0 ;;
+  stop) printf 'exited\n' > "$FAKE_CONTAINER_STATE_FILE"; exit 0 ;;
+  start) printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"; exit 0 ;;
+  rm) exit 0 ;;
   *) exit 0 ;;
 esac
 EOF
@@ -86,10 +227,17 @@ EOF
 cat > "$FAKE_BIN/gh" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+[[ "${GH_CONFIG_DIR:-}" == */gh-cli-config ]] || { printf 'GitHub CLI config directory is not isolated under web-admin state\n' >&2; exit 1; }
+mkdir -p "$GH_CONFIG_DIR"
+[[ -w "$GH_CONFIG_DIR" ]] || exit 1
 case "${1:-}" in
   api)
     [[ "${FAKE_GH_MODE:-ok}" == run-mismatch ]] && { printf '{"conclusion":"failure"}\n'; exit 0; }
-    printf '{"status":"completed","conclusion":"success","head_sha":"%s","head_branch":"release/siftalpha-web-v1","name":"SiftAlpha Web CI and ARM64","html_url":"https://github.com/kuashan/huntalpha/actions/runs/%s"}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
+    if [[ "${FAKE_GH_MODE:-ok}" == workflow-mismatch ]]; then
+      printf '{"status":"completed","conclusion":"success","head_sha":"%s","head_branch":"release/siftalpha-web-v1","name":"SiftAlpha Web CI and ARM64","workflow_id":123456,"path":".github/workflows/other.yml","html_url":"https://github.com/kuashan/huntalpha/actions/runs/%s"}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
+      exit 0
+    fi
+    printf '{"status":"completed","conclusion":"success","head_sha":"%s","head_branch":"release/siftalpha-web-v1","name":"SiftAlpha Web CI and ARM64","workflow_id":387611326,"path":".github/workflows/siftalpha-web-arm64.yml","html_url":"https://github.com/kuashan/huntalpha/actions/runs/%s"}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
     ;;
   run)
     destination=""
@@ -106,7 +254,30 @@ case "${1:-}" in
 esac
 EOF
 chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/curl" "$FAKE_BIN/gh"
+cat > "$FAKE_BIN/chmod" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "${FAKE_CHMOD_FAIL:-0}" == 1 ]]; then
+  printf 'chmod: simulated read-only filesystem\n' >&2
+  exit 1
+fi
+exec /usr/bin/chmod "$@"
+EOF
+chmod +x "$FAKE_BIN/chmod"
+cat > "$FAKE_BIN/stat" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ -n "${FAKE_STAT_UNSAFE_CONFIG:-}" && "${!#}" == "$FAKE_STAT_UNSAFE_CONFIG" ]]; then
+  printf '%s 666\n' "$EUID"
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+EOF
+chmod +x "$FAKE_BIN/stat"
 GH_SHA256="$(sha256sum "$FAKE_BIN/gh" | awk '{print $1}')"
+FAKE_CONTAINER_STATE_FILE="$TEST_ROOT/container.state"
+printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"
+export FAKE_CONTAINER_STATE_FILE
 
 cat > "$TEST_ROOT/web-admin.conf" <<EOF
 IMAGE_REPOSITORY=ghcr.io/kuashan/siftalpha-web
@@ -141,23 +312,80 @@ import sqlite3
 import sys
 
 connection = sqlite3.connect(sys.argv[1])
-connection.execute("create table fixture (id integer primary key, value text)")
-connection.execute("insert into fixture (value) values ('safe')")
-connection.commit()
-connection.close()
+try:
+    connection.executescript("""
+        create table fixture (id integer primary key, value text);
+        insert into fixture (value) values ('safe');
+        create table auth_user (id integer primary key, username text, password text);
+        insert into auth_user values (1, 'synthetic-user', 'synthetic-hash');
+        create table core_accountprofile (id integer primary key, user_id integer, market text);
+        insert into core_accountprofile values (1, 1, 'us');
+        create table core_accountmembership (id integer primary key, user_id integer, tier text);
+        insert into core_accountmembership values (1, 1, 'pro');
+        create table core_watchlistentry (id integer primary key, user_id integer, symbol_id integer);
+        insert into core_watchlistentry values (1, 1, 77);
+        create table formula_editor_formula (id integer primary key, code text, source text);
+        insert into formula_editor_formula values (1, 'SYNTHETIC_ONLY', 'synthetic test content');
+        create table django_content_type (
+            id integer primary key autoincrement, app_label text not null,
+            model text not null, unique(app_label, model)
+        );
+        insert into django_content_type (id, app_label, model) values (1, 'auth', 'user');
+        create table auth_permission (
+            id integer primary key autoincrement, name text not null,
+            content_type_id integer not null, codename text not null,
+            unique(content_type_id, codename)
+        );
+        insert into auth_permission (id, name, content_type_id, codename)
+            values (1, 'Can view user', 1, 'view_user');
+        create table django_migrations (
+            id integer primary key autoincrement, app text, name text, applied text
+        );
+        insert into django_migrations values (1, 'formula_editor', '0001_initial', '2026-01-01 00:00:00');
+    """)
+    connection.commit()
+finally:
+    connection.close()
 PY
 
 source "$LIB"
 load_config "$TEST_ROOT/web-admin.conf"
+PATH="$FAKE_BIN:$PATH"
+export PATH
+
+insecure_config="$TEST_ROOT/insecure-web-admin.conf"
+cp "$TEST_ROOT/web-admin.conf" "$insecure_config"
+printf '\n: > "%s/config-sourced"\n' "$TEST_ROOT" >> "$insecure_config"
+chmod 0666 "$insecure_config"
+FAKE_STAT_UNSAFE_CONFIG="$insecure_config"
+export FAKE_STAT_UNSAFE_CONFIG
+if load_config "$insecure_config"; then
+  fail "writable configuration was accepted"
+fi
+[[ ! -e "$TEST_ROOT/config-sourced" ]] || fail "unsafe configuration was sourced before validation"
+unset FAKE_STAT_UNSAFE_CONFIG
+load_config "$TEST_ROOT/web-admin.conf"
+
+SELF_TEST_NETWORK_NAME=web-admin-selftest-contract
+assert_ok health_check
+unset SELF_TEST_NETWORK_NAME
 
 assert_ok validate_command status
 assert_ok validate_command health
 assert_ok validate_command preflight "$FAKE_DIGEST"
 assert_ok validate_command deploy "$FAKE_DIGEST"
+assert_ok validate_command test-deploy "$FAKE_DIGEST"
 assert_ok validate_command rollback
 assert_fail validate_command deploy
 assert_fail validate_command preflight sha256:bad
+assert_fail validate_command test-deploy sha256:bad
 assert_fail validate_command status unexpected
+assert_fail validate_command
+
+log_before="$(wc -l < "$FAKE_LOG")"
+FAKE_CHMOD_FAIL=1 assert_fail verify_trusted_source "$FAKE_DIGEST"
+[[ "$(wc -l < "$FAKE_LOG")" == "$log_before" ]] || fail "read-only state failure continued into Docker verification"
+find "$RECOVERY_DIR" -mindepth 1 -print -quit | grep -q . && fail "read-only state failure left a temporary provenance copy"
 
 IMAGE_REPOSITORY=ghcr.io/evil/repository
 load_config "$TEST_ROOT/web-admin.conf"
@@ -165,7 +393,7 @@ load_config "$TEST_ROOT/web-admin.conf"
 
 assert_ok preflight_candidate "$FAKE_DIGEST"
 export FAKE_PROVENANCE_VERSION=v0.2
-assert_ok preflight_candidate "$FAKE_DIGEST"
+assert_fail preflight_candidate "$FAKE_DIGEST"
 export FAKE_PROVENANCE_VERSION=v1
 export FAKE_GH_MODE=manifest-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
@@ -177,9 +405,44 @@ export FAKE_GH_MODE=label-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
 export FAKE_GH_MODE=provenance-fail
 assert_fail preflight_candidate "$FAKE_DIGEST"
+export FAKE_GH_MODE=workflow-mismatch
+assert_fail preflight_candidate "$FAKE_DIGEST"
 export FAKE_GH_MODE=run-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
 unset FAKE_GH_MODE
+
+export FAKE_PLAN_MODE=unknown
+assert_fail preflight_candidate "$FAKE_DIGEST"
+export FAKE_PLAN_MODE=approved
+export FAKE_MIGRATE_FAIL=1
+log_before="$(wc -l < "$FAKE_LOG")"
+assert_fail preflight_candidate "$FAKE_DIGEST"
+[[ "$(wc -l < "$FAKE_LOG")" -gt "$log_before" ]] || fail "migration rehearsal was not attempted"
+if tail -n "+$((log_before + 1))" "$FAKE_LOG" | grep -F 'docker stop ' >/dev/null; then
+  fail "preflight failure stopped the running website"
+fi
+unset FAKE_MIGRATE_FAIL
+assert_ok preflight_candidate "$FAKE_DIGEST"
+find "$RECOVERY_DIR" -mindepth 1 -print -quit | grep -q . && fail "migration rehearsal copy was not cleaned"
+
+assert_ok deploy_candidate "$FAKE_DIGEST"
+python - "$DATABASE_PATH" <<'PY'
+import sqlite3
+import sys
+connection = sqlite3.connect(sys.argv[1])
+try:
+    assert connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='formula_editor_fixedindicatorstate'"
+    ).fetchone()
+finally:
+    connection.close()
+PY
+rollback_output="$(rollback)"
+[[ "$rollback_output" == *'database rollback: retained reviewed additive migration formula_editor.0002_fixedindicatorstate'* ]] \
+  || fail "database rollback compatibility was not reported"
+grep -F 'docker stop siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null || fail "migration deploy did not stop the old writer first"
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "original website container was not running after rollback"
 
 assert_ok backup_and_restore_check
 find "$BACKUP_DIR" -name '*.sqlite3' -type f | grep -q . || fail "backup was not created"
@@ -196,6 +459,15 @@ grep -F 'docker start siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null || fail 
 grep -F 'docker rm siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null && fail "legacy container was removed"
 
 assert_ok rollback
+
+for source_file in \
+  deployment/web-admin/install-web-admin.sh \
+  deployment/web-admin/siftalpha-web-admin \
+  deployment/web-admin/lib/siftalpha-web-admin-lib.sh; do
+  eol_attribute="$(git check-attr eol -- "$source_file")"
+  [[ "$eol_attribute" == "$source_file: eol: lf" ]] \
+    || fail "deployment source must be archived with LF line endings: $source_file"
+done
 
 assert_ok "$ROOT/deployment/web-admin/install-web-admin.sh" --check
 

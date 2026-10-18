@@ -11,11 +11,45 @@ readonly SIFTALPHA_IMAGE_REPOSITORY='ghcr.io/kuashan/siftalpha-web'
 readonly SIFTALPHA_GITHUB_REPOSITORY='kuashan/huntalpha'
 readonly SIFTALPHA_RELEASE_BRANCH='release/siftalpha-web-v1'
 readonly SIFTALPHA_WORKFLOW_NAME='SiftAlpha Web CI and ARM64'
+readonly SIFTALPHA_WORKFLOW_ID='387611326'
+readonly SIFTALPHA_WORKFLOW_PATH='.github/workflows/siftalpha-web-arm64.yml'
 readonly SIFTALPHA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SIFTALPHA_MIGRATION_GUARD="$SIFTALPHA_LIB_DIR/verify_database_migration.py"
+readonly SIFTALPHA_MIGRATION_PROBE="$SIFTALPHA_LIB_DIR/migration_probe.py"
+readonly SIFTALPHA_APPROVED_MIGRATION='formula_editor.0002_fixedindicatorstate'
+readonly SIFTALPHA_COMPOSE_PROJECT_NAME='siftalpha-web'
+
+LAST_BACKUP_PATH=''
+LAST_BACKUP_SHA256=''
+LAST_MIGRATION_PLAN='[]'
+LAST_APPLIED_MIGRATIONS='[]'
 
 die() { printf 'siftalpha-web-admin: %s\n' "$*" >&2; return 1; }
 
 require_value() { [[ -n "${!1:-}" ]] || { die "missing required configuration: $1"; return 1; }; }
+
+validate_config_metadata() {
+  local owner="$1" mode="$2" effective_uid="$3" group_permission other_permission
+  [[ "$owner" =~ ^[0-9]+$ && "$effective_uid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]{3}$ ]] \
+    || { die 'web-admin configuration metadata is invalid'; return 1; }
+  [[ "$owner" == "$effective_uid" ]] \
+    || { die 'web-admin configuration must be owned by the effective user'; return 1; }
+  group_permission="${mode:1:1}"
+  other_permission="${mode:2:1}"
+  case "$group_permission:$other_permission" in
+    *2*|*3*|*6*|*7*) die 'web-admin configuration must not be writable by group or others'; return 1 ;;
+  esac
+}
+
+assert_secure_config_file() {
+  local config_path="$1" metadata owner mode
+  [[ -f "$config_path" && ! -L "$config_path" ]] \
+    || { die 'web-admin configuration must be a regular non-symlink file'; return 1; }
+  metadata="$(stat -c '%u %a' -- "$config_path")" \
+    || { die 'cannot inspect web-admin configuration ownership and mode'; return 1; }
+  read -r owner mode <<<"$metadata"
+  validate_config_metadata "$owner" "$mode" "$EUID"
+}
 
 require_safe_absolute_path() {
   local name="$1" value="${!1:-}"
@@ -24,6 +58,7 @@ require_safe_absolute_path() {
 
 load_config() {
   local config_path="$1"
+  assert_secure_config_file "$config_path" || return 1
   [[ -r "$config_path" ]] || { die "configuration is unreadable"; return 1; }
   # Clear all deploy-sensitive values before sourcing the root-owned config.
   unset IMAGE_REPOSITORY GITHUB_REPOSITORY GITHUB_WORKFLOW_NAME RELEASE_BRANCH
@@ -57,13 +92,13 @@ validate_config() {
 }
 
 validate_command() {
-  case "$#:$1" in
+  case "$#:${1:-}" in
     1:status|1:health|1:rollback) return 0 ;;
-    2:preflight|2:deploy)
+    2:preflight|2:deploy|2:test-deploy)
       [[ "$2" =~ $SIFTALPHA_DIGEST_PATTERN ]] || { die 'digest must be lowercase sha256:<64 hexadecimal characters>'; return 1; }
       return 0
       ;;
-    *) die 'usage: status | health | preflight <digest> | deploy <digest> | rollback' ;;
+    *) die 'usage: status | health | preflight <digest> | deploy <digest> | test-deploy <digest> | rollback' ;;
   esac
 }
 
@@ -78,8 +113,15 @@ docker_cli() {
 }
 
 ensure_state_directories() {
-  mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR"
-  chmod 700 "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR"
+  mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR" "$STATE_DIR/gh-cli-config" \
+    || { die 'cannot create protected deployment state directories'; return 1; }
+  chmod 700 "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR" "$STATE_DIR/gh-cli-config" \
+    || { die 'cannot secure protected deployment state directories'; return 1; }
+  [[ -d "$STATE_DIR" && -w "$STATE_DIR" && -w "$BACKUP_DIR" && -w "$ROLLBACK_DIR" && -w "$RECOVERY_DIR" && -w "$STATE_DIR/gh-cli-config" ]] \
+    || { die 'protected deployment state directories are not writable'; return 1; }
+  command -v "$PYTHON_BIN" >/dev/null 2>&1 \
+    && [[ -r "$SIFTALPHA_MIGRATION_GUARD" ]] \
+    || { die 'database migration guard is unavailable'; return 1; }
 }
 
 image_label() {
@@ -118,13 +160,15 @@ verify_gh_binary() {
 }
 
 verify_trusted_source() {
-  local digest="$1" image run_id run_json temp_dir manifest_file oci_manifest_file oci_provenance_file token
+  local digest="$1" image run_id run_json temp_dir manifest_file oci_manifest_file oci_provenance_file token gh_config_dir
   image="$(candidate_image "$digest")"
   verify_gh_binary || return 1
   token="$(<"$GITHUB_TOKEN_FILE")"
   [[ -n "$token" ]] || { die 'GitHub verification token is empty'; return 1; }
-  ensure_state_directories
-  temp_dir="$(mktemp -d "$RECOVERY_DIR/provenance.XXXXXX")"
+  ensure_state_directories || return 1
+  gh_config_dir="$STATE_DIR/gh-cli-config"
+  temp_dir="$(mktemp -d "$RECOVERY_DIR/provenance.XXXXXX")" \
+    || { die 'cannot create protected provenance workspace'; return 1; }
   run_json="$temp_dir/run.json"
   manifest_file="$temp_dir/siftalpha-web-build-manifest.json"
   oci_manifest_file="$temp_dir/oci-manifest.json"
@@ -132,19 +176,25 @@ verify_trusted_source() {
   docker_cli pull "$image" >/dev/null || { cleanup_provenance "$temp_dir"; return 1; }
   run_id="$(image_label "$image" 'io.siftalpha.build.run-id')"
   [[ "$run_id" =~ ^[0-9]+$ ]] || { die 'OCI run-id label is invalid'; cleanup_provenance "$temp_dir"; return 1; }
-  GH_TOKEN="$token" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$run_json" || { cleanup_provenance "$temp_dir"; return 1; }
-  GH_TOKEN="$token" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" run download "$run_id" --repo "$GITHUB_REPOSITORY" --name siftalpha-web-build-manifest --dir "$temp_dir" || { cleanup_provenance "$temp_dir"; return 1; }
+  GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$run_json" || { cleanup_provenance "$temp_dir"; return 1; }
+  GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" run download "$run_id" --repo "$GITHUB_REPOSITORY" --name siftalpha-web-build-manifest --dir "$temp_dir" || { cleanup_provenance "$temp_dir"; return 1; }
   [[ -f "$manifest_file" ]] || { die 'build manifest artifact is unavailable'; cleanup_provenance "$temp_dir"; return 1; }
-  if ! "$PYTHON_BIN" - "$run_json" "$manifest_file" "$digest" "$run_id" "$RELEASE_BRANCH" "$GITHUB_WORKFLOW_NAME" <<'PY'
+  if ! "$PYTHON_BIN" - "$run_json" "$manifest_file" "$digest" "$run_id" \
+    "$RELEASE_BRANCH" "$GITHUB_WORKFLOW_NAME" "$SIFTALPHA_WORKFLOW_ID" "$SIFTALPHA_WORKFLOW_PATH" <<'PY'
 import json
 import sys
 
-run_path, manifest_path, digest, run_id, branch, workflow_name = sys.argv[1:]
+run_path, manifest_path, digest, run_id, branch, workflow_name, workflow_id, workflow_path = sys.argv[1:]
 run = json.loads(open(run_path, encoding="utf-8").read())
 manifest = json.loads(open(manifest_path, encoding="utf-8").read())
 if run.get("status") != "completed" or run.get("conclusion") != "success":
     raise SystemExit("GitHub Actions Run is not successful")
-if run.get("head_branch") != branch or run.get("name") != workflow_name:
+if (
+    run.get("head_branch") != branch
+    or run.get("name") != workflow_name
+    or str(run.get("workflow_id")) != workflow_id
+    or run.get("path") != workflow_path
+):
     raise SystemExit("GitHub Actions Run identity mismatch")
 if manifest.get("digest") != digest or str(manifest.get("run_id")) != run_id:
     raise SystemExit("build manifest digest or Run ID mismatch")
@@ -189,10 +239,12 @@ cleanup_provenance() {
 
 backup_and_restore_check() {
   [[ -r "$DATABASE_PATH" ]] || { die 'website database is unavailable'; return 1; }
-  ensure_state_directories
-  "$PYTHON_BIN" - "$DATABASE_PATH" "$BACKUP_DIR" "$RECOVERY_DIR" <<'PY'
+  ensure_state_directories || return 1
+  local output
+  output="$("$PYTHON_BIN" - "$DATABASE_PATH" "$BACKUP_DIR" "$RECOVERY_DIR" "$SIFTALPHA_MIGRATION_GUARD" <<'PY'
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import sqlite3
@@ -201,10 +253,17 @@ import sys
 source_path = Path(sys.argv[1])
 backup_dir = Path(sys.argv[2])
 recovery_dir = Path(sys.argv[3])
+guard_path = Path(sys.argv[4])
 stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 partial_path = backup_dir / f"siftalpha-web-{stamp}.sqlite3.partial"
 backup_path = backup_dir / f"siftalpha-web-{stamp}.sqlite3"
 recovery_path = recovery_dir / f"siftalpha-web-{stamp}.sqlite3"
+
+spec = importlib.util.spec_from_file_location("web_admin_migration_guard", guard_path)
+if spec is None or spec.loader is None:
+    raise RuntimeError("database recovery verifier is unavailable")
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
 
 def integrity(path):
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -233,9 +292,14 @@ try:
         source.close()
     if integrity(recovery_path) != "ok":
         raise RuntimeError("restore integrity check failed")
+    guard.compare_database_contents(backup_path, recovery_path)
     size = backup_path.stat().st_size
-    digest = hashlib.sha256(backup_path.read_bytes()).hexdigest()
-    print(f"backup path: {backup_path}")
+    hasher = hashlib.sha256()
+    with backup_path.open("rb") as backup_file:
+        for chunk in iter(lambda: backup_file.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    digest = hasher.hexdigest()
+    print(f"backup filename: {backup_path.name}")
     print(f"backup size: {size}")
     print(f"backup sha256: {digest}")
     print("integrity_check: ok")
@@ -245,10 +309,141 @@ finally:
     if 'backup_path' in locals() and backup_path.exists() and 'digest' not in locals():
         backup_path.unlink()
 PY
+)" || return 1
+  output="$(printf '%s\n' "$output" | tr -d '\r')"
+  local backup_filename
+  backup_filename="$(sed -n 's/^backup filename: //p' <<<"$output" | head -n 1)"
+  LAST_BACKUP_SHA256="$(sed -n 's/^backup sha256: //p' <<<"$output" | head -n 1)"
+  [[ "$backup_filename" =~ ^siftalpha-web-[0-9TZ]+\.sqlite3$ && "$LAST_BACKUP_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || { die 'database backup metadata is invalid'; return 1; }
+  LAST_BACKUP_PATH="$BACKUP_DIR/$backup_filename"
+  printf '%s\n' "$output" | sed '/^backup filename:/d'
+  printf 'backup path: %s\n' "$LAST_BACKUP_PATH"
+}
+
+inspect_migration_plan() {
+  local image="$1" database_path="$2" raw_plan validated_plan
+  raw_plan="$(docker_cli run --rm --network none --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --mount "type=bind,src=$database_path,dst=/deploy/db.sqlite3,readonly" \
+    --mount "type=bind,src=$SIFTALPHA_MIGRATION_PROBE,dst=/deploy/migration_probe.py,readonly" \
+    --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 \
+    "$image" python /deploy/migration_probe.py 2>&1)" \
+    || { die 'candidate migration plan inspection failed'; return 1; }
+  validated_plan="$(printf '%s\n' "$raw_plan" | "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" validate-state)" \
+    || { die 'candidate contains an unapproved Django migration plan'; return 1; }
+  case "$validated_plan" in
+    '{"pending":[],"applied":[]}') LAST_MIGRATION_PLAN='[]'; LAST_APPLIED_MIGRATIONS='[]' ;;
+    "{\"pending\":[\"$SIFTALPHA_APPROVED_MIGRATION\"],\"applied\":[]}")
+      LAST_MIGRATION_PLAN="[\"$SIFTALPHA_APPROVED_MIGRATION\"]"; LAST_APPLIED_MIGRATIONS='[]' ;;
+    "{\"pending\":[],\"applied\":[\"$SIFTALPHA_APPROVED_MIGRATION\"]}")
+      LAST_MIGRATION_PLAN='[]'; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\"]" ;;
+    *) die 'candidate migration plan validation returned an invalid result'; return 1 ;;
+  esac
+}
+
+cleanup_migration_workspace() {
+  local workspace="$1"
+  [[ "$workspace" == "$RECOVERY_DIR"/migration.* && -d "$workspace" && ! -L "$workspace" ]] \
+    || { die 'refusing to clean an unrecognized migration recovery directory'; return 1; }
+  find "$workspace" -depth -delete || { die 'cannot clean migration recovery copy'; return 1; }
+}
+
+LAST_MIGRATED_DATABASE=''
+LAST_MIGRATION_WORKSPACE=''
+
+rehearse_migrations() {
+  local image="$1" source_database="$2" workspace migrated_database post_plan approved_plan="$LAST_MIGRATION_PLAN" approved_applied="$LAST_APPLIED_MIGRATIONS"
+  workspace="$(mktemp -d "$RECOVERY_DIR/migration.XXXXXX")" \
+    || { die 'cannot create isolated migration recovery copy'; return 1; }
+  chmod 700 "$workspace" || { cleanup_migration_workspace "$workspace" || true; die 'cannot secure migration recovery copy'; return 1; }
+  migrated_database="$workspace/db.sqlite3"
+  if ! "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" copy "$source_database" "$migrated_database"; then
+    cleanup_migration_workspace "$workspace" || true
+    die 'cannot create isolated migration database copy'
+    return 1
+  fi
+  if ! docker_cli run --rm --network none --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --mount "type=bind,src=$workspace,dst=/deploy" \
+    --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 --env HOME=/tmp \
+    "$image" python manage.py migrate --noinput >/dev/null 2>&1; then
+    cleanup_migration_workspace "$workspace" || true
+    die 'Django migration rehearsal failed on the isolated copy'
+    return 1
+  fi
+  if ! "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" check-integrity "$migrated_database" >/dev/null; then
+    cleanup_migration_workspace "$workspace" || true
+    die 'isolated migrated database failed integrity check'
+    return 1
+  fi
+  if ! "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" validate-result \
+    "$source_database" "$migrated_database" >/dev/null; then
+    cleanup_migration_workspace "$workspace" || true
+    die 'isolated migration produced changes outside the approved Task 012 database scope'
+    return 1
+  fi
+  if ! "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" compare "$source_database" "$migrated_database" >/dev/null; then
+    cleanup_migration_workspace "$workspace" || true
+    die 'migration changed protected user or private-data tables'
+    return 1
+  fi
+  if ! inspect_migration_plan "$image" "$migrated_database"; then
+    cleanup_migration_workspace "$workspace" || true
+    return 1
+  fi
+  post_plan="$LAST_MIGRATION_PLAN"
+  if [[ "$post_plan" != '[]' ]]; then
+    cleanup_migration_workspace "$workspace" || true
+    die 'candidate still has pending migrations after isolated rehearsal'
+    return 1
+  fi
+  LAST_MIGRATION_PLAN="$approved_plan"
+  LAST_APPLIED_MIGRATIONS="$approved_applied"
+  LAST_MIGRATED_DATABASE="$migrated_database"
+  LAST_MIGRATION_WORKSPACE="$workspace"
+}
+
+audit_deployment_event() {
+  local event="$1" result="$2" digest="${3:--}" migrations="${4:-$LAST_MIGRATION_PLAN}"
+  local backup_path="${LAST_BACKUP_PATH:--}" backup_sha="${LAST_BACKUP_SHA256:--}"
+  ensure_state_directories || return 1
+  printf '%s event=%s result=%s digest=%s backup=%s backup_sha256=%s pending_migrations=%s applied_migrations=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$event" "$result" "$digest" \
+    "$backup_path" "$backup_sha" "$migrations" "$LAST_APPLIED_MIGRATIONS" >> "$STATE_DIR/deployment-audit.log" \
+    || { die 'cannot record protected deployment audit event'; return 1; }
+  chmod 600 "$STATE_DIR/deployment-audit.log" \
+    || { die 'cannot secure protected deployment audit log'; return 1; }
 }
 
 health_check() {
-  local base="http://$LOOPBACK_PORT" page static_path
+  local base="http://$LOOPBACK_PORT" page static_path self_test_container self_test_probe attempt
+  if [[ -n "${SELF_TEST_NETWORK_NAME:-}" ]]; then
+    self_test_container="$(current_container)" || return 1
+    self_test_probe="$(printf '%s\n' \
+      'import re' \
+      'from urllib.request import urlopen' \
+      'base = "http://127.0.0.1:8000"' \
+      'for path in ("/", "/account", "/account/", "/healthz/"):' \
+      '    with urlopen(base + path, timeout=4) as response:' \
+      '        if not 200 <= response.status < 400: raise SystemExit(1)' \
+      'with urlopen(base + "/", timeout=4) as response:' \
+      '    page = response.read().decode("utf-8", "replace")' \
+      'match = re.search("src=" + chr(34) + r"(/static/[A-Za-z0-9._/-]+)" + chr(34), page)' \
+      'if not match or ".." in match.group(1): raise SystemExit(1)' \
+      'with urlopen(base + match.group(1), timeout=4) as response:' \
+      '    response.read(1)')"
+    for attempt in {1..20}; do
+      if docker_cli exec "$self_test_container" python -c "$self_test_probe" >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 1
+    done
+    die 'isolated website container failed health checks'
+    return 1
+  fi
   for page in / /account /account/ /healthz/; do
     "$CURL_BIN" --fail --silent --show-error "$base$page" >/dev/null || { die "health endpoint failed: $page"; return 1; }
   done
@@ -269,7 +464,7 @@ current_container() {
 
 snapshot_current_runtime() {
   local container runtime config_image image_id snapshot created
-  ensure_state_directories
+  ensure_state_directories || return 1
   container="$(current_container)" || return 1
   if [[ "$container" == "$LEGACY_CONTAINER" ]]; then
     runtime='legacy'
@@ -299,7 +494,7 @@ snapshot_current_runtime() {
 snapshot_value() {
   local snapshot="$1" key="$2"
   [[ "$snapshot" == "$ROLLBACK_DIR"/* && -r "$snapshot/metadata" ]] || { die 'deployment snapshot is unavailable'; return 1; }
-  case "$key" in runtime|container|config_image|image_id|data_dir) ;; *) die 'invalid deployment snapshot field'; return 1 ;; esac
+  case "$key" in runtime|container|config_image|image_id|data_dir|database_migrations|database_backup|database_backup_sha256) ;; *) die 'invalid deployment snapshot field'; return 1 ;; esac
   sed -n "s/^${key}=//p" "$snapshot/metadata" | head -n 1
 }
 
@@ -312,8 +507,26 @@ latest_snapshot() {
 }
 
 restore_snapshot() {
-  local snapshot="$1" runtime image
+  local snapshot="$1" runtime image migrations backup backup_sha actual_sha
   runtime="$(snapshot_value "$snapshot" runtime)" || return 1
+  migrations="$(snapshot_value "$snapshot" database_migrations)"
+  migrations="${migrations:-[]}"
+  case "$migrations" in
+    '[]') ;;
+    "[\"$SIFTALPHA_APPROVED_MIGRATION\"]") ;;
+    *) die 'database migration history is not compatible with automatic rollback'; return 1 ;;
+  esac
+  if [[ "$migrations" != '[]' ]]; then
+    backup="$(snapshot_value "$snapshot" database_backup)"
+    backup_sha="$(snapshot_value "$snapshot" database_backup_sha256)"
+    [[ "$backup" == "$BACKUP_DIR"/*.sqlite3 && -f "$backup" && "$backup_sha" =~ ^[0-9a-f]{64}$ ]] \
+      || { die 'verified deployment database backup is unavailable; refusing application rollback'; return 1; }
+    actual_sha="$(sha256sum "$backup" | awk '{print $1}')"
+    [[ "$actual_sha" == "$backup_sha" ]] \
+      || { die 'deployment database backup SHA-256 mismatch; refusing application rollback'; return 1; }
+    "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" check-integrity "$backup" >/dev/null \
+      || { die 'deployment database backup integrity check failed; refusing application rollback'; return 1; }
+  fi
   case "$runtime" in
     legacy)
       [[ "$(snapshot_value "$snapshot" container)" == "$LEGACY_CONTAINER" ]] || { die 'legacy snapshot container mismatch'; return 1; }
@@ -324,12 +537,17 @@ restore_snapshot() {
       image="$(snapshot_value "$snapshot" config_image)" || return 1
       [[ "$image" == "$IMAGE_REPOSITORY"@sha256:* ]] || { die 'Compose snapshot image is not immutable'; return 1; }
       render_compose "${image#*@}" || return 1
-      docker_cli compose -f "$COMPOSE_FILE" --project-name siftalpha-web up -d --force-recreate || { die 'cannot restore prior Compose website service'; return 1; }
+      docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate || { die 'cannot restore prior Compose website service'; return 1; }
       ;;
     *) die 'deployment snapshot runtime is invalid'; return 1 ;;
   esac
   health_check || { die 'restored website service is unhealthy'; return 1; }
   printf 'rollback: restored snapshot=%s\n' "$snapshot"
+  if [[ "$migrations" != '[]' ]]; then
+    printf 'database rollback: retained reviewed additive migration %s; it is backward-compatible with the restored application\n' "$SIFTALPHA_APPROVED_MIGRATION"
+  else
+    printf 'database rollback: no schema migration to reverse\n'
+  fi
 }
 
 status() {
@@ -341,27 +559,63 @@ status() {
 }
 
 preflight_candidate() {
-  local digest="$1"
+  local digest="$1" image planned
   [[ "$digest" =~ $SIFTALPHA_DIGEST_PATTERN ]] || { die 'invalid candidate digest'; return 1; }
-  health_check || return 1
-  [[ -r "$DATABASE_PATH" && -d "$DATA_DIR" ]] || { die 'website data bind is unavailable'; return 1; }
-  verify_trusted_source "$digest" || return 1
-  verify_arm64_image "$(candidate_image "$digest")" || return 1
-  backup_and_restore_check || return 1
+  LAST_BACKUP_PATH=''
+  LAST_BACKUP_SHA256=''
+  LAST_MIGRATION_PLAN='[]'
+  LAST_APPLIED_MIGRATIONS='[]'
+  image="$(candidate_image "$digest")"
+  if ! health_check; then
+    audit_deployment_event preflight blocked "$digest" "$LAST_MIGRATION_PLAN" || true
+    return 1
+  fi
+  if [[ ! -r "$DATABASE_PATH" || ! -d "$DATA_DIR" ]]; then
+    die 'website data bind is unavailable'
+    audit_deployment_event preflight blocked "$digest" "$LAST_MIGRATION_PLAN" || true
+    return 1
+  fi
+  if ! verify_trusted_source "$digest" || ! verify_arm64_image "$image" \
+    || ! backup_and_restore_check || ! inspect_migration_plan "$image" "$LAST_BACKUP_PATH"; then
+    audit_deployment_event preflight blocked "$digest" "$LAST_MIGRATION_PLAN" || true
+    return 1
+  fi
+  planned="$LAST_MIGRATION_PLAN"
+  local database_state="$LAST_APPLIED_MIGRATIONS"
+  if [[ "$planned" != '[]' ]]; then
+    if ! rehearse_migrations "$image" "$LAST_BACKUP_PATH"; then
+      audit_deployment_event preflight blocked "$digest" "$planned" || true
+      return 1
+    fi
+    if ! cleanup_migration_workspace "$LAST_MIGRATION_WORKSPACE"; then
+      audit_deployment_event preflight blocked "$digest" "$planned" || true
+      return 1
+    fi
+    LAST_MIGRATION_WORKSPACE=''
+    LAST_MIGRATED_DATABASE=''
+  else
+    if [[ "$database_state" == '[]' ]]; then
+      printf 'migration plan: none\n'
+    else
+      printf 'migration plan: none; reviewed migration already applied\n'
+    fi
+  fi
+  LAST_MIGRATION_PLAN="$planned"
+  audit_deployment_event preflight ok "$digest" "$planned" || return 1
   printf 'preflight: ok\n'
 }
 
 render_compose() {
-  local digest="$1" image
+  local digest="$1" image project_name="${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" self_test_network="${SELF_TEST_NETWORK_NAME:-}" self_test_id="${SELF_TEST_ID:-}"
   image="$(candidate_image "$digest")"
   [[ -r "$COMPOSE_TEMPLATE" ]] || { die 'Compose template is unavailable'; return 1; }
-  "$PYTHON_BIN" - "$COMPOSE_TEMPLATE" "$COMPOSE_FILE" "$image" "$COMPOSE_CONTAINER" "$DATA_DIR" "$ENV_FILE" "$LOOPBACK_PORT" <<'PY'
+  "$PYTHON_BIN" - "$COMPOSE_TEMPLATE" "$COMPOSE_FILE" "$image" "$COMPOSE_CONTAINER" "$DATA_DIR" "$ENV_FILE" "$LOOPBACK_PORT" "$self_test_network" "$self_test_id" <<'PY'
 from pathlib import Path
 import sys
 
 template_path = Path(sys.argv[1])
 output_path = Path(sys.argv[2])
-image, container, data_dir, env_file, port = sys.argv[3:]
+image, container, data_dir, env_file, port, self_test_network, self_test_id = sys.argv[3:]
 content = template_path.read_text(encoding="utf-8")
 for key, value in {
     "__IMAGE_REFERENCE__": image,
@@ -369,10 +623,14 @@ for key, value in {
     "__DATA_DIR__": data_dir,
     "__ENV_FILE__": env_file,
     "__LOOPBACK_PORT__": port,
+    "__SELF_TEST_NETWORK__": self_test_network,
+    "__SELF_TEST_ID__": self_test_id,
 }.items():
     content = content.replace(key, value)
 if "__" in content:
     raise SystemExit("unresolved Compose template placeholder")
+if "selftest" in template_path.name and (not self_test_network or not self_test_id):
+    raise SystemExit("isolated Compose template requires its fixed self-test network and label")
 output_path.parent.mkdir(parents=True, exist_ok=True)
 output_path.write_text(content, encoding="utf-8")
 PY
@@ -382,7 +640,7 @@ first_compose_cutover() {
   local digest="$1"
   render_compose "$digest"
   docker_cli stop "$LEGACY_CONTAINER"
-  if ! docker_cli compose -f "$COMPOSE_FILE" --project-name siftalpha-web up -d --force-recreate; then
+  if ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate; then
     docker_cli rm -f "$COMPOSE_CONTAINER" || true
     docker_cli start "$LEGACY_CONTAINER"
     die 'candidate Compose service failed; legacy container was restarted'
@@ -396,19 +654,301 @@ first_compose_cutover() {
   fi
 }
 
+cleanup_isolated_deploy_test() {
+  local container label
+  if [[ "${SELF_TEST_CANDIDATE_CREATED:-no}" == yes ]] \
+    && docker_cli container inspect "$COMPOSE_CONTAINER" >/dev/null 2>&1; then
+    label="$(docker_cli inspect --format '{{ index .Config.Labels "io.siftalpha.web-admin.selftest" }}' "$COMPOSE_CONTAINER")" \
+      || { die 'cannot verify isolated candidate container label'; return 1; }
+    [[ "$label" == "$SELF_TEST_ID" ]] \
+      || { die 'isolated candidate container label changed; refusing cleanup'; return 1; }
+    docker_cli rm -f "$COMPOSE_CONTAINER" >/dev/null \
+      || { die 'cannot remove isolated candidate container'; return 1; }
+  fi
+  if [[ "${SELF_TEST_LEGACY_CREATED:-no}" == yes ]] \
+    && docker_cli container inspect "$LEGACY_CONTAINER" >/dev/null 2>&1; then
+    label="$(docker_cli inspect --format '{{ index .Config.Labels "io.siftalpha.web-admin.selftest" }}' "$LEGACY_CONTAINER")" \
+      || { die 'cannot verify isolated prior-version container label'; return 1; }
+    [[ "$label" == "$SELF_TEST_ID" ]] \
+      || { die 'isolated prior-version container label changed; refusing cleanup'; return 1; }
+    docker_cli rm -f "$LEGACY_CONTAINER" >/dev/null \
+      || { die 'cannot remove isolated prior-version container'; return 1; }
+  fi
+  if [[ "${SELF_TEST_NETWORK_CREATED:-no}" == yes ]]; then
+    docker_cli network rm "$SELF_TEST_NETWORK_NAME" >/dev/null \
+      || { die 'cannot remove isolated self-test network'; return 1; }
+  fi
+  local workspace="${SELF_TEST_WORKSPACE:-}"
+  if [[ -n "$workspace" ]]; then
+    [[ "$workspace" == "$SELF_TEST_PARENT"/selftest.* && -d "$workspace" && ! -L "$workspace" ]] \
+      || { die 'refusing to clean an unrecognized self-test directory'; return 1; }
+    find "$workspace" -depth -delete || { die 'cannot clean isolated self-test data'; return 1; }
+  fi
+}
+
+abort_isolated_deploy_test() {
+  local message="$1"
+  cleanup_isolated_deploy_test || return 1
+  die "$message"
+  return 1
+}
+
+isolated_deploy_and_rollback_test() {
+  local digest="$1" image original_container original_state original_image_id original_platform
+  local workspace network project legacy candidate self_test_state
+  local SELF_TEST_PARENT="$RECOVERY_DIR" SELF_TEST_WORKSPACE='' SELF_TEST_NETWORK_NAME=''
+  local SELF_TEST_NETWORK_CREATED=no SELF_TEST_LEGACY_CREATED=no SELF_TEST_CANDIDATE_CREATED=no
+  local SELF_TEST_ID="web-admin-selftest-$BASHPID"
+  [[ "$digest" =~ $SIFTALPHA_DIGEST_PATTERN ]] || { die 'invalid candidate digest'; return 1; }
+  ensure_state_directories || return 1
+  original_container="$(current_container)" || return 1
+  original_state="$(docker_cli inspect --format '{{.State.Status}}' "$original_container")" \
+    || { die 'cannot inspect the current website for isolated self-test'; return 1; }
+  [[ "$original_state" == running ]] || { die 'current website is not running; isolated self-test is blocked'; return 1; }
+  original_image_id="$(docker_cli inspect --format '{{.Image}}' "$original_container")" \
+    || { die 'cannot identify the current website image for rollback test'; return 1; }
+  [[ "$original_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || { die 'current website image ID is invalid; isolated rollback test is blocked'; return 1; }
+  original_platform="$(docker_cli image inspect --format '{{.Os}}/{{.Architecture}}' "$original_image_id")" \
+    || { die 'cannot verify the current website rollback image'; return 1; }
+  [[ "$original_platform" == linux/arm64 ]] \
+    || { die 'current website rollback image is not linux/arm64'; return 1; }
+
+  image="$(candidate_image "$digest")"
+
+  SELF_TEST_WORKSPACE="$(mktemp -d "$SELF_TEST_PARENT/selftest.XXXXXX")" \
+    || { die 'cannot create isolated self-test workspace'; return 1; }
+  SELF_TEST_NETWORK_CREATED=no
+  SELF_TEST_LEGACY_CREATED=no
+  SELF_TEST_CANDIDATE_CREATED=no
+  workspace="$SELF_TEST_WORKSPACE"
+  network="siftalpha-web-admin-selftest-$BASHPID"
+  project="$network"
+  legacy="$network-old"
+  candidate="$network-new"
+  SELF_TEST_NETWORK_NAME="$network"
+  [[ "$network" =~ ^[a-z0-9][a-z0-9_.-]*$ && "$project" =~ ^[a-z0-9][a-z0-9_.-]*$ \
+    && "$legacy" =~ ^[a-z0-9][a-z0-9_.-]*$ && "$candidate" =~ ^[a-z0-9][a-z0-9_.-]*$ ]] \
+    || { cleanup_isolated_deploy_test || true; die 'generated self-test resource name is invalid'; return 1; }
+  if docker_cli container inspect "$legacy" >/dev/null 2>&1 \
+    || docker_cli container inspect "$candidate" >/dev/null 2>&1 \
+    || docker_cli network inspect "$network" >/dev/null 2>&1; then
+    cleanup_isolated_deploy_test || true
+    die 'an isolated self-test resource name is already in use; nothing was changed'
+    return 1
+  fi
+  if ! docker_cli network create --internal \
+    --label io.siftalpha.web-admin.selftest=managed "$network" >/dev/null; then
+    cleanup_isolated_deploy_test || true
+    die 'cannot create isolated egress-disabled self-test network'
+    return 1
+  fi
+  SELF_TEST_NETWORK_CREATED=yes
+
+  local LEGACY_CONTAINER="$legacy"
+  local COMPOSE_CONTAINER="$candidate"
+  local COMPOSE_PROJECT_NAME="$project"
+  local DATA_DIR="$workspace/data"
+  local DATABASE_PATH="$workspace/data/db.sqlite3"
+  local COMPOSE_FILE="$workspace/compose.yaml"
+  local COMPOSE_TEMPLATE="$SIFTALPHA_LIB_DIR/compose.selftest.yaml.template"
+  local ENV_FILE="$workspace/self-test.env"
+  local LOOPBACK_PORT='127.0.0.1:19092'
+  local STATE_DIR="$workspace/state"
+  local BACKUP_DIR="$workspace/state/backups"
+  local ROLLBACK_DIR="$workspace/state/rollbacks"
+  local RECOVERY_DIR="$workspace/state/recovery-checks"
+  local LAST_BACKUP_PATH=''
+  local LAST_BACKUP_SHA256=''
+  local LAST_MIGRATION_PLAN='[]'
+  local LAST_APPLIED_MIGRATIONS='[]'
+  local LAST_MIGRATED_DATABASE=''
+  local LAST_MIGRATION_WORKSPACE=''
+
+  chmod 700 "$workspace" || { abort_isolated_deploy_test 'cannot secure isolated self-test workspace'; return 1; }
+  mkdir -p "$DATA_DIR" "$STATE_DIR" "$BACKUP_DIR" "$ROLLBACK_DIR" "$RECOVERY_DIR" \
+    || { abort_isolated_deploy_test 'cannot prepare isolated self-test directories'; return 1; }
+  printf 'DJANGO_SECRET_KEY=siftalpha-web-self-test-only\nDJANGO_DEBUG=0\nHUNTALPHA_ALLOWED_HOSTS=127.0.0.1,localhost\nHUNTALPHA_DATABASE_PATH=/data/db.sqlite3\n' \
+    > "$ENV_FILE" || { abort_isolated_deploy_test 'cannot create synthetic self-test settings'; return 1; }
+  chmod 600 "$ENV_FILE" || { abort_isolated_deploy_test 'cannot secure synthetic self-test settings'; return 1; }
+
+  if ! docker_cli run --rm --network none --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop ALL --security-opt no-new-privileges \
+    --mount "type=bind,src=$DATA_DIR,dst=/deploy" \
+    --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 --env HOME=/tmp \
+    "$original_image_id" python manage.py migrate --noinput >/dev/null 2>&1; then
+    abort_isolated_deploy_test 'cannot initialize a synthetic rollback database with the retained application image'
+    return 1
+  fi
+  SELF_TEST_LEGACY_CREATED=yes
+  if ! docker_cli run --detach --name "$legacy" \
+    --label "io.siftalpha.web-admin.selftest=$SELF_TEST_ID" \
+    --network "$network" \
+    --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop ALL --security-opt no-new-privileges \
+    --mount "type=bind,src=$DATA_DIR,dst=/data" \
+    --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/data/db.sqlite3 --env HOME=/tmp \
+    "$original_image_id" >/dev/null; then
+    abort_isolated_deploy_test 'cannot start isolated prior-version test container'
+    return 1
+  fi
+  health_check || { abort_isolated_deploy_test 'isolated prior-version container failed health checks'; return 1; }
+
+  SELF_TEST_CANDIDATE_CREATED=yes
+  if ! deploy_candidate "$digest"; then
+    abort_isolated_deploy_test 'isolated controlled deployment failed; production website was not touched'
+    return 1
+  fi
+  if ! rollback; then
+    abort_isolated_deploy_test 'isolated application rollback failed; production website was not touched'
+    return 1
+  fi
+  self_test_state="$LAST_APPLIED_MIGRATIONS"
+  if ! inspect_migration_plan "$image" "$DATABASE_PATH"; then
+    abort_isolated_deploy_test 'cannot verify isolated database after application rollback'
+    return 1
+  fi
+  if [[ "$LAST_MIGRATION_PLAN" != '[]' || "$LAST_APPLIED_MIGRATIONS" != "$self_test_state" ]]; then
+    abort_isolated_deploy_test 'isolated rollback did not preserve the reviewed database state'
+    return 1
+  fi
+  if ! cleanup_isolated_deploy_test; then
+    die 'isolated deploy/rollback passed but its temporary resources could not be fully cleaned'
+    return 1
+  fi
+  SELF_TEST_WORKSPACE=''
+  printf 'test-deploy: isolated deploy and rollback passed; production container and database were not mounted or switched\n'
+}
+
+record_snapshot_database_state() {
+  local snapshot="$1" migrations="$2" staged
+  case "$migrations" in
+    '[]'|"[\"$SIFTALPHA_APPROVED_MIGRATION\"]") ;;
+    *) die 'refusing to record an unapproved database migration'; return 1 ;;
+  esac
+  [[ "$LAST_BACKUP_PATH" == "$BACKUP_DIR"/*.sqlite3 && "$LAST_BACKUP_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || { die 'cannot record an unverified database backup'; return 1; }
+  staged="$(mktemp "$snapshot/.metadata.XXXXXX")" \
+    || { die 'cannot stage database rollback metadata'; return 1; }
+  if ! awk '!/^database_migrations=/ && !/^database_backup=/ && !/^database_backup_sha256=/' \
+    "$snapshot/metadata" > "$staged"; then
+    rm -f "$staged"
+    die 'cannot stage database rollback metadata'
+    return 1
+  fi
+  if ! {
+    printf 'database_migrations=%s\n' "$migrations"
+    printf 'database_backup=%s\n' "$LAST_BACKUP_PATH"
+    printf 'database_backup_sha256=%s\n' "$LAST_BACKUP_SHA256"
+  } >> "$staged"; then
+    rm -f "$staged"
+    die 'cannot stage database rollback metadata'
+    return 1
+  fi
+  chmod 600 "$staged" && mv -f "$staged" "$snapshot/metadata" \
+    || { rm -f "$staged"; die 'cannot securely record database rollback metadata'; return 1; }
+}
+
+restart_after_migration_preflight_failure() {
+  local container="$1"
+  docker_cli start "$container" >/dev/null \
+    || { die 'cannot restart the original website container'; return 1; }
+  health_check || { die 'original website did not recover after migration was stopped'; return 1; }
+  printf 'migration recovery: no production migration was applied; original container restarted\n'
+}
+
 deploy_candidate() {
-  local digest="$1"
+  local digest="$1" image planned database_state snapshot container state
   preflight_candidate "$digest" || return 1
+  image="$(candidate_image "$digest")"
+  planned="$LAST_MIGRATION_PLAN"
+  database_state="$LAST_APPLIED_MIGRATIONS"
   snapshot_current_runtime || return 1
-  if [[ ! -f "$COMPOSE_FILE" ]]; then
-    first_compose_cutover "$digest" || return 1
+  snapshot="$(latest_snapshot)" || return 1
+  if [[ "$planned" == '[]' ]]; then
+    record_snapshot_database_state "$snapshot" "$database_state" || return 1
+    if [[ "$database_state" != '[]' ]]; then
+      printf 'migration plan: none; reviewed migration already applied\n'
+    else
+      printf 'migration plan: none; continuing with the existing deployment path\n'
+    fi
   else
-    if ! render_compose "$digest" || ! docker_cli compose -f "$COMPOSE_FILE" --project-name siftalpha-web up -d --force-recreate || ! health_check; then
+    container="$(current_container)" || return 1
+    state="$(docker_cli inspect --format '{{.State.Status}}' "$container")" \
+      || { die 'cannot inspect current website state'; return 1; }
+    [[ "$state" == 'running' ]] || { die 'website container is not running; refusing migration'; return 1; }
+    docker_cli stop "$container" >/dev/null || { die 'cannot stop the current website before migration'; return 1; }
+    state="$(docker_cli inspect --format '{{.State.Status}}' "$container")" \
+      || { docker_cli start "$container" >/dev/null || true; die 'cannot verify stopped website state'; return 1; }
+    if [[ "$state" == 'running' ]]; then
+      docker_cli start "$container" >/dev/null || true
+      die 'current website is still running; refusing to migrate its database'
+      return 1
+    fi
+
+    if ! backup_and_restore_check; then
+      restart_after_migration_preflight_failure "$container" || return 1
+      audit_deployment_event deploy blocked "$digest" "$planned" || true
+      return 1
+    fi
+    if ! inspect_migration_plan "$image" "$LAST_BACKUP_PATH"; then
+      audit_deployment_event deploy blocked "$digest" "$planned" || true
+      die 'cannot safely revalidate the stopped website database; leaving it stopped for operator review'
+      return 1
+    fi
+    if [[ "$LAST_MIGRATION_PLAN" != "$planned" ]]; then
+      audit_deployment_event deploy blocked "$digest" "$planned" || true
+      die 'database migration plan changed while the website was stopped; leaving it stopped for operator review'
+      return 1
+    fi
+    if ! rehearse_migrations "$image" "$LAST_BACKUP_PATH"; then
+      restart_after_migration_preflight_failure "$container" || return 1
+      audit_deployment_event deploy blocked "$digest" "$planned" || true
+      return 1
+    fi
+    if ! "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" promote \
+      "$LAST_BACKUP_PATH" "$LAST_MIGRATED_DATABASE" "$DATABASE_PATH" >/dev/null; then
+      cleanup_migration_workspace "$LAST_MIGRATION_WORKSPACE" || true
+      audit_deployment_event deploy blocked "$digest" "$planned" || true
+      die 'production migration promotion failed; website remains stopped for database-state review'
+      return 1
+    fi
+    if ! inspect_migration_plan "$image" "$DATABASE_PATH" \
+      || [[ "$LAST_MIGRATION_PLAN" != '[]' || "$LAST_APPLIED_MIGRATIONS" != "[\"$SIFTALPHA_APPROVED_MIGRATION\"]" ]]; then
+      cleanup_migration_workspace "$LAST_MIGRATION_WORKSPACE" || true
+      audit_deployment_event deploy blocked "$digest" "$planned" || true
+      die 'production migration state could not be verified; website remains stopped for operator review'
+      return 1
+    fi
+    if ! cleanup_migration_workspace "$LAST_MIGRATION_WORKSPACE"; then
+      audit_deployment_event deploy blocked "$digest" "$planned" || true
+      return 1
+    fi
+    LAST_MIGRATION_WORKSPACE=''
+    LAST_MIGRATED_DATABASE=''
+    audit_deployment_event migration promoted "$digest" "$planned" || {
+      die 'migration was applied but audit logging failed; website remains stopped for operator review'
+      return 1
+    }
+    record_snapshot_database_state "$snapshot" "$LAST_APPLIED_MIGRATIONS" || {
+      die 'migration was applied but rollback metadata could not be recorded; website remains stopped for operator review'
+      return 1
+    }
+  fi
+
+  if [[ ! -f "$COMPOSE_FILE" ]]; then
+    if ! first_compose_cutover "$digest"; then
+      audit_deployment_event deploy blocked "$digest" "$planned" || true
+      return 1
+    fi
+  else
+    if ! render_compose "$digest" || ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate || ! health_check; then
       restore_snapshot "$(latest_snapshot)" || return 1
       die 'candidate Compose service failed; prior website service was restored'
+      audit_deployment_event deploy blocked "$digest" "$planned" || true
       return 1
     fi
   fi
+  audit_deployment_event deploy ok "$digest" "$planned" || return 1
 }
 
 rollback() {
@@ -418,10 +958,19 @@ rollback() {
 web_admin_main() {
   validate_command "$@" || return 1
   case "$1" in
+    deploy|rollback|test-deploy)
+      ensure_state_directories || return 1
+      command -v flock >/dev/null 2>&1 || { die 'deployment lock utility is unavailable'; return 1; }
+      exec 9>"$STATE_DIR/operation.lock" || { die 'cannot open deployment lock'; return 1; }
+      flock -n 9 || { die 'another controlled deployment or rollback is already running'; return 1; }
+      ;;
+  esac
+  case "$1" in
     status) status ;;
     health) health_check; printf 'health: ok\n' ;;
     preflight) preflight_candidate "$2" ;;
     deploy) deploy_candidate "$2" ;;
+    test-deploy) isolated_deploy_and_rollback_test "$2" ;;
     rollback) rollback ;;
   esac
 }
