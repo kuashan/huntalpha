@@ -418,8 +418,26 @@ audit_deployment_event() {
     || { die 'cannot secure protected deployment audit log'; return 1; }
 }
 
+health_clock_seconds() {
+  printf '%s\n' "$SECONDS"
+}
+
+health_curl() {
+  local deadline="$1" max_time
+  shift
+  if [[ -n "$deadline" ]]; then
+    local now
+    now="$(health_clock_seconds)" || return 1
+    max_time=$((deadline - now))
+    (( max_time > 0 )) || return 28
+  else
+    max_time=10
+  fi
+  "$CURL_BIN" --max-time "$max_time" --fail --silent --show-error "$@"
+}
+
 health_check() {
-  local base="http://$LOOPBACK_PORT" page static_path self_test_container self_test_probe attempt
+  local deadline="${1:-}" base="http://$LOOPBACK_PORT" page static_path self_test_container self_test_probe attempt
   if [[ -n "${SELF_TEST_NETWORK_NAME:-}" ]]; then
     self_test_container="$(running_container)" || return 1
     self_test_probe="$(printf '%s\n' \
@@ -445,30 +463,34 @@ health_check() {
     return 1
   fi
   for page in / /account /account/ /healthz/; do
-    "$CURL_BIN" --fail --silent --show-error "$base$page" >/dev/null || { die "health endpoint failed: $page"; return 1; }
+    health_curl "$deadline" "$base$page" >/dev/null || { die "health endpoint failed: $page"; return 1; }
   done
-  static_path="$($CURL_BIN --fail --silent --show-error "$base/" | sed -n 's|.*src="\(/static/[A-Za-z0-9._/-]*\)".*|\1|p' | head -n 1)"
+  static_path="$(health_curl "$deadline" "$base/" | sed -n 's|.*src="\(/static/[A-Za-z0-9._/-]*\)".*|\1|p' | head -n 1)"
   [[ "$static_path" =~ ^/static/[A-Za-z0-9._/-]+$ && "$static_path" != *..* ]] || { die 'homepage has no safe static asset reference'; return 1; }
-  "$CURL_BIN" --fail --silent --show-error "$base$static_path" >/dev/null || { die 'homepage static asset failed'; return 1; }
+  health_curl "$deadline" "$base$static_path" >/dev/null || { die 'homepage static asset failed'; return 1; }
 }
 
 wait_for_health() {
-  local attempt
+  local budget_seconds="${1:-60}" start deadline now remaining
+  [[ "$budget_seconds" =~ ^[1-9][0-9]*$ ]] || { die 'health readiness budget must be a positive integer'; return 1; }
   # Compose starts containers asynchronously; probe readiness once per second,
   # but keep the isolated self-test retry budget instead of nesting it.
   if [[ -n "${SELF_TEST_NETWORK_NAME:-}" ]]; then
     health_check
     return $?
   fi
-  for attempt in {1..60}; do
-    if health_check >/dev/null 2>&1; then
+  start="$(health_clock_seconds)" || return 1
+  deadline=$((start + budget_seconds))
+  while :; do
+    if health_check "$deadline" >/dev/null 2>&1; then
       return 0
     fi
-    if [[ "$attempt" -lt 60 ]]; then
-      sleep 1
-    fi
+    now="$(health_clock_seconds)" || return 1
+    (( now < deadline )) || break
+    remaining=$((deadline - now))
+    sleep "$((remaining < 1 ? remaining : 1))"
   done
-  die 'website did not become healthy within 60 seconds'
+  die "website did not become healthy within ${budget_seconds} seconds"
 }
 
 candidate_startup_diagnostics() {
@@ -497,16 +519,27 @@ print(" ".join(f"{name}={count}" for name, count in counts.items()))
   fi
 }
 
+fixed_container_state() {
+  local container="$1" matches state
+  matches="$(docker_cli container ls --all --filter "name=^/${container}$" --format '{{.Names}}')" \
+    || { die 'cannot enumerate fixed website containers'; return 1; }
+  if [[ -z "$matches" ]]; then
+    printf 'absent\n'
+    return 0
+  fi
+  [[ "$matches" == "$container" ]] || { die 'fixed website container lookup was ambiguous'; return 1; }
+  state="$(docker_cli inspect --format '{{.State.Status}}' "$container")" \
+    || { die 'cannot inspect fixed website container state'; return 1; }
+  case "$state" in
+    running|exited|dead) printf '%s\n' "$state" ;;
+    *) die 'fixed website container is in an unsafe or unknown state'; return 1 ;;
+  esac
+}
+
 current_container() {
-  local compose_status='absent' legacy_status='absent'
-  if docker_cli container inspect "$COMPOSE_CONTAINER" >/dev/null 2>&1; then
-    compose_status="$(docker_cli inspect --format '{{.State.Status}}' "$COMPOSE_CONTAINER")" \
-      || { die 'cannot inspect Compose website state'; return 1; }
-  fi
-  if docker_cli container inspect "$LEGACY_CONTAINER" >/dev/null 2>&1; then
-    legacy_status="$(docker_cli inspect --format '{{.State.Status}}' "$LEGACY_CONTAINER")" \
-      || { die 'cannot inspect legacy website state'; return 1; }
-  fi
+  local compose_status legacy_status
+  compose_status="$(fixed_container_state "$COMPOSE_CONTAINER")" || return 1
+  legacy_status="$(fixed_container_state "$LEGACY_CONTAINER")" || return 1
   if [[ "$compose_status" == running && "$legacy_status" == running ]]; then
     die 'both fixed website containers are running; refusing to select a deployment runtime'
     return 1
@@ -530,6 +563,39 @@ running_container() {
     || { die 'cannot inspect selected website container state'; return 1; }
   [[ "$state" == running ]] || { die 'no fixed website container is running; refusing deployment'; return 1; }
   printf '%s\n' "$container"
+}
+
+ensure_legacy_service() {
+  local state
+  state="$(fixed_container_state "$LEGACY_CONTAINER")" || return 1
+  case "$state" in
+    running)
+      ;;
+    exited|dead)
+      docker_cli start "$LEGACY_CONTAINER" >/dev/null \
+        || { die 'cannot restart the retained legacy website'; return 1; }
+      ;;
+    *)
+      die 'legacy website is absent or in an unsafe state'; return 1 ;;
+  esac
+  wait_for_health || { die 'legacy website is not healthy'; return 1; }
+}
+
+restore_legacy_service() {
+  docker_cli start "$LEGACY_CONTAINER" >/dev/null 2>&1 || true
+  wait_for_health || { die 'legacy website could not be confirmed healthy'; return 1; }
+}
+
+verify_candidate_image() {
+  local digest="$1" expected actual container
+  expected="$(candidate_image "$digest")" || return 1
+  container="$(current_container)" || return 1
+  [[ "$container" == "$COMPOSE_CONTAINER" ]] \
+    || { die 'candidate Compose container is not the active website'; return 1; }
+  actual="$(docker_cli inspect --format '{{.Config.Image}}' "$COMPOSE_CONTAINER")" \
+    || { die 'cannot inspect candidate website image reference'; return 1; }
+  [[ "$actual" == "$expected" ]] \
+    || { die 'running website image does not match the requested immutable digest'; return 1; }
 }
 
 snapshot_current_runtime() {
@@ -707,9 +773,39 @@ PY
 }
 
 first_compose_cutover() {
-  local digest="$1"
-  render_compose "$digest"
-  docker_cli stop "$LEGACY_CONTAINER"
+  local digest="$1" legacy_status
+  if ! render_compose "$digest"; then
+    if ! ensure_legacy_service; then
+      die 'candidate Compose rendering failed and the legacy website could not be confirmed healthy'
+      return 1
+    fi
+    die 'candidate Compose configuration could not be rendered; legacy website was retained'
+    return 1
+  fi
+  if ! docker_cli stop "$LEGACY_CONTAINER"; then
+    if ! restore_legacy_service; then
+      die 'legacy website stop failed and the prior service could not be confirmed healthy'
+      return 1
+    fi
+    die 'could not stop the legacy website; candidate was not started'
+    return 1
+  fi
+  if ! legacy_status="$(fixed_container_state "$LEGACY_CONTAINER")"; then
+    if ! restore_legacy_service; then
+      die 'legacy website state could not be verified after stop and service recovery failed'
+      return 1
+    fi
+    die 'legacy website state could not be verified after stop; candidate was not started'
+    return 1
+  fi
+  if [[ "$legacy_status" != exited && "$legacy_status" != dead ]]; then
+    if ! restore_legacy_service; then
+      die 'legacy website did not stop and could not be confirmed healthy'
+      return 1
+    fi
+    die 'legacy website is still active; candidate was not started'
+    return 1
+  fi
   if ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate; then
     docker_cli rm -f "$COMPOSE_CONTAINER" || true
     docker_cli start "$LEGACY_CONTAINER" || { die 'candidate failed to start and legacy website could not be restarted'; return 1; }
@@ -723,6 +819,13 @@ first_compose_cutover() {
     docker_cli start "$LEGACY_CONTAINER" || { die 'candidate was unhealthy and legacy website could not be restarted'; return 1; }
     wait_for_health || { die 'candidate was unhealthy and legacy website did not recover'; return 1; }
     die 'candidate Compose service was unhealthy; legacy container was restarted'
+    return 1
+  fi
+  if ! verify_candidate_image "$digest"; then
+    docker_cli rm -f "$COMPOSE_CONTAINER" >/dev/null 2>&1 || true
+    docker_cli start "$LEGACY_CONTAINER" || { die 'candidate image did not match and legacy website could not be restarted'; return 1; }
+    wait_for_health || { die 'candidate image did not match and legacy website did not recover'; return 1; }
+    die 'candidate image did not match the requested immutable digest; legacy website was restarted'
     return 1
   fi
 }
@@ -1027,6 +1130,12 @@ deploy_candidate() {
         candidate_startup_diagnostics
         restore_snapshot "$(latest_snapshot)" || return 1
         die 'candidate Compose service failed health checks; prior website service was restored'
+        audit_deployment_event deploy blocked "$digest" "$planned" || true
+        return 1
+      fi
+      if ! verify_candidate_image "$digest"; then
+        restore_snapshot "$(latest_snapshot)" || return 1
+        die 'candidate image did not match the requested immutable digest; prior website service was restored'
         audit_deployment_event deploy blocked "$digest" "$planned" || true
         return 1
       fi
