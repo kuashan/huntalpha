@@ -81,6 +81,8 @@ let needsHistoryReconcile = false
 let historyReconcileRetryTimer
 let providerLive = false
 const HISTORY_RECONCILE_RETRY_MS = 2000
+// Match Crypto chart candle shades without changing the user's red/green direction.
+const cryptoCandleColor = color => ({ '#ef6671': '#ef5350', '#3acba3': '#20bd92' })[String(color || '').toLowerCase()] || color
 
 const backgroundStick = item => item.layer === 'background'
 const savedSubPaneHeights = () => {
@@ -339,8 +341,8 @@ function setCandleMode(rendered) {
     upColor: 'transparent', downColor: 'transparent', borderVisible: false,
     wickUpColor: 'transparent', wickDownColor: 'transparent',
   } : {
-    upColor: props.marketColorTokens.up, downColor: props.marketColorTokens.down, borderVisible: false,
-    wickUpColor: props.marketColorTokens.up, wickDownColor: props.marketColorTokens.down,
+    upColor: cryptoCandleColor(props.marketColorTokens.up), downColor: cryptoCandleColor(props.marketColorTokens.down), borderVisible: false,
+    wickUpColor: cryptoCandleColor(props.marketColorTokens.up), wickDownColor: cryptoCandleColor(props.marketColorTokens.down),
   })
   marketCandleSeries = !formulaCandleLayer
 }
@@ -731,17 +733,22 @@ async function draw(options = {}) {
   el.value.style.height = `${chartHeight}px`
   chart = createChart(el.value, {
     width: el.value.clientWidth, height: chartHeight,
-    layout: { background: { color: '#101722' }, textColor: '#8798ab', panes: { separatorColor: '#263241' } },
-    grid: { vertLines: { color: '#1a2634' }, horzLines: { color: '#1a2634' } },
-    rightPriceScale: { borderColor: '#263241' }, timeScale: { borderColor: '#263241', timeVisible: true },
+    layout: { background: { color: '#080d17' }, textColor: '#8798ab', panes: { separatorColor: '#263241' } },
+    grid: { vertLines: { color: '#172234' }, horzLines: { color: '#172234' } },
+    rightPriceScale: { borderColor: '#263241' },
+    timeScale: { borderColor: '#263241', timeVisible: true, secondsVisible: false, rightOffset: 4, barSpacing: 7, minBarSpacing: 2 },
+    crosshair: { mode: 0 },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+    handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+    kineticScroll: { mouse: true, touch: true },
   })
   const formulaCandleLayer = formulaOwnsMainCandles(rendered, bars)
   const candle = chart.addSeries(CandlestickSeries, formulaCandleLayer ? {
     upColor: 'transparent', downColor: 'transparent', borderVisible: false,
     wickUpColor: 'transparent', wickDownColor: 'transparent',
   } : {
-    upColor: props.marketColorTokens.up, downColor: props.marketColorTokens.down, borderVisible: false,
-    wickUpColor: props.marketColorTokens.up, wickDownColor: props.marketColorTokens.down,
+    upColor: cryptoCandleColor(props.marketColorTokens.up), downColor: cryptoCandleColor(props.marketColorTokens.down), borderVisible: false,
+    wickUpColor: cryptoCandleColor(props.marketColorTokens.up), wickDownColor: cryptoCandleColor(props.marketColorTokens.down),
   }, 0)
   candleSeries = candle
   marketCandleSeries = !formulaCandleLayer
@@ -767,6 +774,7 @@ async function draw(options = {}) {
     if (version === drawVersion && el.value) syncSubTitlePositions(renderedItems)
   }))
   if (options.visibleRange) chart.timeScale().setVisibleLogicalRange(options.visibleRange)
+  else if (bars.length > 90) chart.timeScale().setVisibleLogicalRange({ from: bars.length - 90, to: bars.length - 1 })
   else chart.timeScale().fitContent()
   requestAnimationFrame(() => { historyWatchReady = true })
   connectRealtime()
@@ -910,7 +918,7 @@ watch(() => [props.symbol, props.period, props.installedIndicators], (next, prev
   else if (update === 'full') scheduleDraw()
 })
 watch(() => props.marketColorTokens, tokens => {
-  if (marketCandleSeries && candleSeries && tokens) candleSeries.applyOptions({ upColor: tokens.up, downColor: tokens.down, wickUpColor: tokens.up, wickDownColor: tokens.down })
+  if (marketCandleSeries && candleSeries && tokens) candleSeries.applyOptions({ upColor: cryptoCandleColor(tokens.up), downColor: cryptoCandleColor(tokens.down), wickUpColor: cryptoCandleColor(tokens.up), wickDownColor: cryptoCandleColor(tokens.down) })
 }, { deep: true })
 </script>
 
