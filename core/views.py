@@ -14,7 +14,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.core.exceptions import ValidationError
-from django.http import JsonResponse, StreamingHttpResponse
+from django.http import FileResponse, JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.cache import never_cache
@@ -72,12 +72,19 @@ formula_run_registry = FormulaRunRegistry()
 
 
 def json(data, status=200):
-    result = JsonResponse(data, status=status)
-    result["Access-Control-Allow-Origin"] = "http://127.0.0.1:5173"
-    result["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
-    result["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
-    result["Access-Control-Allow-Credentials"] = "true"
-    return result
+    return JsonResponse(data, status=status)
+
+
+@require_GET
+def healthz(request):
+    return JsonResponse({"status": "ok"})
+
+
+def frontend_index(request):
+    index_path = settings.BASE_DIR / "frontend" / "dist" / "index.html"
+    if not index_path.is_file():
+        return JsonResponse({"error": "frontend build is not available"}, status=503)
+    return FileResponse(index_path.open("rb"), content_type="text/html")
 
 
 def user_payload(user, request=None):
@@ -769,8 +776,6 @@ def realtime_market_stream(request, code):
     # it. Keep the stream alive through the generator/keep-alive comments;
     # reverse proxies can manage transport persistence themselves.
     response["X-Accel-Buffering"] = "no"
-    response["Access-Control-Allow-Origin"] = "http://127.0.0.1:5173"
-    response["Access-Control-Allow-Credentials"] = "true"
     return response
 
 

@@ -21,6 +21,8 @@ from django.urls import path
 from core import views
 
 urlpatterns = [
+    path('', views.frontend_index),
+    path('healthz/', views.healthz),
     path('admin/', admin.site.urls),
     path('api/auth/session/', views.auth_session),
     path('api/auth/register/', views.auth_register),

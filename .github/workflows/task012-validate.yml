@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/012-formula-manager-entitlements-20261017
+      - release/task012-safe-integration-20261018
   pull_request:
     branches:
       - feat/011-free-pro-membership-watchlist-20261017
@@ -35,6 +36,8 @@ jobs:
         run: python manage.py check
       - name: Migration definition check without production DB
         run: python manage.py makemigrations --check --dry-run
+      - name: Collect admin assets for Django staticfiles manifest
+        run: python manage.py collectstatic --noinput
       - name: Test isolated synthetic database
         run: python manage.py test core formula_editor --noinput
 
@@ -74,3 +77,189 @@ jobs:
           fetch-depth: 0
       - name: Check whitespace in Task 012 changes
         run: git diff --check ${{ github.event.pull_request.base.sha || 'ebd23f4248219fb70fe457ac800d5603fbf47ef1' }} HEAD
+
+
+  arm64-image-smoke:
+    name: ARM64 image build and isolated database smoke
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Confirm genuine ARM64 runner
+        run: test "$(uname -m)" = aarch64
+      - name: Build candidate image without publishing
+        run: docker build --tag siftalpha-task012-candidate:ci .
+      - name: Migrate an isolated disposable database
+        run: |
+          docker volume create task012-ci-data
+          docker run --rm \
+            -e DJANGO_SECRET_KEY=isolated-ci-only-not-production \
+            -e DJANGO_DEBUG=0 \
+            -e HUNTALPHA_ALLOWED_HOSTS=127.0.0.1,localhost \
+            -e HUNTALPHA_DATABASE_PATH=/data/ci.sqlite3 \
+            -v task012-ci-data:/data \
+            --entrypoint python \
+            siftalpha-task012-candidate:ci manage.py migrate --noinput
+      - name: Start candidate and probe health
+        run: |
+          docker run --detach --name task012-ci-web \
+            -p 127.0.0.1:18092:8000 \
+            -e DJANGO_SECRET_KEY=isolated-ci-only-not-production \
+            -e DJANGO_DEBUG=0 \
+            -e HUNTALPHA_ALLOWED_HOSTS=127.0.0.1,localhost \
+            -e HUNTALPHA_DATABASE_PATH=/data/ci.sqlite3 \
+            -v task012-ci-data:/data \
+            siftalpha-task012-candidate:ci
+          ok=0
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18092/healthz/ | grep -q '"status": "ok"'; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ok" -eq 1
+          curl --fail --silent --output /dev/null http://127.0.0.1:18092/
+          docker exec task012-ci-web python manage.py check_python_indicators
+      - name: Remove only isolated CI assets
+        if: always()
+        run: |
+          docker rm --force task012-ci-web 2>/dev/null || true
+          docker volume rm --force task012-ci-data 2>/dev/null || true
+
+
+  upgrade-from-task011:
+    name: Existing Task011 data -> Task012 migration (synthetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DJANGO_SECRET_KEY: isolated-migration-upgrade-not-production
+    steps:
+      - name: Checkout exact Task011 production source into sandbox
+        uses: actions/checkout@v4
+        with:
+          ref: ebd23f4248219fb70fe457ac800d5603fbf47ef1
+          path: previous
+          submodules: true
+      - name: Checkout release candidate separately
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+          submodules: true
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install -r candidate/requirements.txt
+      - name: Create historical schema and synthetic user/private formulas
+        working-directory: previous
+        run: |
+          python manage.py migrate --noinput
+          python manage.py shell -c '
+          from django.contrib.auth import get_user_model
+          from core.models import AccountMembership, MarketSymbol, WatchlistEntry
+          from formula_editor.models import Formula
+          u = get_user_model().objects.create_user(username="synthetic-upgrade-ci", password="synthetic-only-not-secret")
+          AccountMembership.objects.update_or_create(user=u, defaults={"tier":"pro"})
+          symbol=MarketSymbol.objects.create(code="US.CI_ONLY",name="CI Only",market="us",security_type="stock",provider="synthetic",provider_symbol="CI_ONLY")
+          WatchlistEntry.objects.create(user=u,symbol=symbol)
+          for n in range(4):
+              Formula.objects.create(code=f"CI_FORMULA_{n}",name="Synthetic",source=f"SYNTHETIC_ONLY_{n}:MA(C,5);",placement="main")
+          assert Formula.objects.filter(code__startswith="CI_FORMULA_").count()==4
+          print("Task011 synthetic baseline created")
+          '
+      - name: Create and verify offline snapshot before migration
+        run: |
+          python - <<'PY'
+          import sqlite3, pathlib
+          src=pathlib.Path('previous/db.sqlite3')
+          dst=pathlib.Path('previous/db.before-task012.sqlite3')
+          source=sqlite3.connect(str(src))
+          backup=sqlite3.connect(str(dst))
+          source.backup(backup)
+          assert backup.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+          backup.close()
+          source.close()
+          print('Synthetic pre-migration backup integrity: ok')
+          PY
+      - name: Apply candidate schema only to synthetic old database
+        working-directory: candidate
+        env:
+          HUNTALPHA_DATABASE_PATH: ${{ github.workspace }}/previous/db.sqlite3
+        run: |
+          python manage.py migrate --noinput
+          python manage.py migrate --check
+      - name: Verify four formula sources, PRO membership and watchlist unchanged
+        working-directory: candidate
+        env:
+          HUNTALPHA_DATABASE_PATH: ${{ github.workspace }}/previous/db.sqlite3
+        run: |
+          python manage.py shell -c '
+          from django.contrib.auth import get_user_model
+          from core.models import AccountMembership, WatchlistEntry
+          from formula_editor.models import Formula, FixedIndicatorState
+          u=get_user_model().objects.get(username="synthetic-upgrade-ci")
+          assert AccountMembership.objects.get(user=u).tier=="pro"
+          assert WatchlistEntry.objects.filter(user=u,symbol__code="US.CI_ONLY").count()==1
+          for n in range(4):
+              assert Formula.objects.get(code=f"CI_FORMULA_{n}").source==f"SYNTHETIC_ONLY_{n}:MA(C,5);"
+          assert FixedIndicatorState.objects.count()==0
+          print("CI upgrade preserved 4 synthetic formulas, PRO account, watchlist; new fixed indicator table ready")
+          '
+
+
+  publish-arm64-ghcr:
+    name: Publish verified ARM64 image to web-admin GHCR package
+    if: github.event_name == 'push' && github.ref == 'refs/heads/release/task012-safe-integration-20261018'
+    needs: [backend, frontend, diff, arm64-image-smoke, upgrade-from-task011]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout exact verified source
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Confirm ARM64
+        run: test "$(uname -m)" = aarch64
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and push immutable ARM64 image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/kuashan/siftalpha-web:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=min
+      - name: Verify exact published digest
+        run: |
+          set -euo pipefail
+          digest='${{ steps.image.outputs.digest }}'
+          case "$digest" in sha256:*) ;; *) echo 'IMAGE_DIGEST_MISSING'; exit 1;; esac
+          docker buildx imagetools inspect "ghcr.io/kuashan/siftalpha-web@$digest"
+      - name: Report exact image identity for controlled Work deployment
+        run: |
+          echo "IMAGE=ghcr.io/kuashan/siftalpha-web:sha-${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "IMAGE_DIGEST=${{ steps.image.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "IMAGE_IMMUTABLE=ghcr.io/kuashan/siftalpha-web@${{ steps.image.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "SOURCE_COMMIT=${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "PLATFORM=linux/arm64" >> "$GITHUB_STEP_SUMMARY"
+          echo "DEPLOYED_TO_SERVER=NO" >> "$GITHUB_STEP_SUMMARY"
