@@ -671,6 +671,7 @@ restore_snapshot() {
   case "$migrations" in
     '[]') ;;
     "[\"$SIFTALPHA_APPROVED_MIGRATION\"]") ;;
+    "[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]") ;;
     *) die 'database migration history is not compatible with automatic rollback'; return 1 ;;
   esac
   if [[ "$migrations" != '[]' ]]; then
@@ -770,19 +771,20 @@ render_compose() {
   local digest="$1" image project_name="${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" self_test_network="${SELF_TEST_NETWORK_NAME:-}" self_test_id="${SELF_TEST_ID:-}"
   image="$(candidate_image "$digest")"
   [[ -r "$COMPOSE_TEMPLATE" ]] || { die 'Compose template is unavailable'; return 1; }
-  "$PYTHON_BIN" - "$COMPOSE_TEMPLATE" "$COMPOSE_FILE" "$image" "$COMPOSE_CONTAINER" "$DATA_DIR" "$ENV_FILE" "$LOOPBACK_PORT" "$self_test_network" "$self_test_id" <<'PY'
+  "$PYTHON_BIN" - "$COMPOSE_TEMPLATE" "$COMPOSE_FILE" "$image" "$COMPOSE_CONTAINER" "$DATA_DIR" "$ENV_FILE" "$BREVO_ENV_FILE" "$LOOPBACK_PORT" "$self_test_network" "$self_test_id" <<'PY'
 from pathlib import Path
 import sys
 
 template_path = Path(sys.argv[1])
 output_path = Path(sys.argv[2])
-image, container, data_dir, env_file, port, self_test_network, self_test_id = sys.argv[3:]
+image, container, data_dir, env_file, brevo_env_file, port, self_test_network, self_test_id = sys.argv[3:]
 content = template_path.read_text(encoding="utf-8")
 for key, value in {
     "__IMAGE_REFERENCE__": image,
     "__COMPOSE_CONTAINER__": container,
     "__DATA_DIR__": data_dir,
     "__ENV_FILE__": env_file,
+    "__BREVO_ENV_FILE__": brevo_env_file,
     "__LOOPBACK_PORT__": port,
     "__SELF_TEST_NETWORK__": self_test_network,
     "__SELF_TEST_ID__": self_test_id,
@@ -1114,8 +1116,12 @@ deploy_candidate() {
       die 'production migration promotion failed; website remains stopped for database-state review'
       return 1
     fi
+    local expected_applied="[\"$SIFTALPHA_APPROVED_MIGRATION\"]"
+    if [[ "$planned" == "[\"$SIFTALPHA_ACCOUNT_MIGRATION\"]" ]]; then
+      expected_applied="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]"
+    fi
     if ! inspect_migration_plan "$image" "$DATABASE_PATH" \
-      || [[ "$LAST_MIGRATION_PLAN" != '[]' || "$LAST_APPLIED_MIGRATIONS" != "[\"$SIFTALPHA_APPROVED_MIGRATION\"]" ]]; then
+      || [[ "$LAST_MIGRATION_PLAN" != '[]' || "$LAST_APPLIED_MIGRATIONS" != "$expected_applied" ]]; then
       cleanup_migration_workspace "$LAST_MIGRATION_WORKSPACE" || true
       audit_deployment_event deploy blocked "$digest" "$planned" || true
       die 'production migration state could not be verified; website remains stopped for operator review'
