@@ -600,6 +600,20 @@ class RealAccountMigrationRehearsalTests(RealDjangoMigrationRehearsalTests):
                 self.guard().validate_probe_state(self._probe(migrated)),
                 {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate", "core.0012_auth_verification"]},
             )
+            # A trigger on the new tables is never part of the approved migration.
+            unsafe = root / "unsafe-trigger.sqlite3"
+            self.guard().copy_database(migrated, unsafe)
+            connection = sqlite3.connect(unsafe)
+            try:
+                connection.execute(
+                    "CREATE TRIGGER hidden_update AFTER INSERT ON core_authratelimit "
+                    "BEGIN SELECT 1; END"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaises(ValueError):
+                self.guard().validate_approved_migration_result(baseline, unsafe)
             # Any change to existing private Formula data must block promotion.
             connection = sqlite3.connect(migrated)
             try:
