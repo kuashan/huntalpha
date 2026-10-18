@@ -1,0 +1,165 @@
+name: Task012 official integration checks
+
+on:
+  push:
+    branches:
+      - release/task012-official-integration-20261018
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  django:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DJANGO_SECRET_KEY: isolated-only-testing-not-production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install project requirements
+        run: python -m pip install -r requirements.txt
+      - name: Check Django config and schema
+        run: |
+          python manage.py check
+          python manage.py makemigrations --check --dry-run
+      - name: Run all Task 010/011/012 and release tests
+        run: python manage.py test core formula_editor --noinput
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test and build V1 frontend
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run test:indicators
+          npm run test:realtime
+          npm run test:chart
+          npm run build
+      - name: Test static V1.0.0 footer
+        working-directory: frontend
+        run: |
+          if test -f src/components/SiteVersionFooter.test.mjs; then
+            node src/components/SiteVersionFooter.test.mjs
+          fi
+
+  task011-upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    env:
+      DJANGO_SECRET_KEY: isolated-only-testing-not-production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ebd23f4248219fb70fe457ac800d5603fbf47ef1
+          path: old
+          submodules: true
+      - uses: actions/checkout@v4
+        with:
+          path: new
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r new/requirements.txt
+      - name: Make real old schema with synthetic data
+        working-directory: old
+        run: |
+          python manage.py migrate --noinput
+          python manage.py shell -c '
+          from django.contrib.auth import get_user_model
+          from core.models import AccountMembership, MarketSymbol, WatchlistEntry
+          from formula_editor.models import Formula
+          u=get_user_model().objects.create_user(username="ci-upgrade",password="synthetic-ci-no-secret")
+          AccountMembership.objects.update_or_create(user=u, defaults={"tier":"pro"})
+          s=MarketSymbol.objects.create(code="US.CI_UPGRADE",name="Synthetic",market="us",security_type="stock",provider="synthetic",provider_symbol="CI_UPGRADE")
+          WatchlistEntry.objects.create(user=u,symbol=s)
+          for n in range(4):
+              Formula.objects.create(code=f"CI_012_{n}",name="Synthetic",source=f"SYNTHETIC_{n}:MA(C,5);",placement="main")
+          '
+      - name: SQLite online backup and recovery integrity
+        run: |
+          python - <<'PY'
+          import sqlite3
+          src=sqlite3.connect('old/db.sqlite3')
+          dest=sqlite3.connect('old/backup.sqlite3')
+          src.backup(dest)
+          assert dest.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+          dest.close();src.close()
+          src=sqlite3.connect('old/backup.sqlite3')
+          dest=sqlite3.connect('old/recovered.sqlite3')
+          src.backup(dest)
+          assert dest.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+          dest.close();src.close()
+          print('synthetic backup/restore check: PASS')
+          PY
+      - name: Django migration on synthetic copy only
+        working-directory: new
+        env:
+          HUNTALPHA_DATABASE_PATH: ${{ github.workspace }}/old/recovered.sqlite3
+        run: |
+          python manage.py migrate formula_editor 0002 --noinput
+          python manage.py migrate --check
+          python manage.py shell -c '
+          from django.contrib.auth import get_user_model
+          from core.models import AccountMembership,WatchlistEntry
+          from formula_editor.models import Formula,FixedIndicatorState
+          u=get_user_model().objects.get(username="ci-upgrade")
+          assert AccountMembership.objects.get(user=u).tier=="pro"
+          assert WatchlistEntry.objects.filter(user=u,symbol__code="US.CI_UPGRADE").count()==1
+          assert FixedIndicatorState.objects.count()==0
+          for n in range(4):
+              assert Formula.objects.get(code=f"CI_012_{n}").source==f"SYNTHETIC_{n}:MA(C,5);"
+          print("synthetic user, 4 formulas and watchlist retained: PASS")
+          '
+
+  arm64-runtime:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build exact production Dockerfile (no push)
+        run: |
+          test "$(uname -m)" = aarch64
+          docker build -f deployment/web/Dockerfile -t task012-official-integration:test .
+      - name: Boot isolated ephemeral database (no production data)
+        run: |
+          docker volume create task012-prod-check
+          docker run --rm -e DJANGO_SECRET_KEY=synthetic -e DJANGO_DEBUG=0 -e HUNTALPHA_ALLOWED_HOSTS=127.0.0.1,localhost -e HUNTALPHA_DATABASE_PATH=/data/test.sqlite3 -v task012-prod-check:/data --entrypoint python task012-official-integration:test manage.py migrate --noinput
+          docker run -d --name task012-prod-check-web -p 127.0.0.1:19092:8000 -e DJANGO_SECRET_KEY=synthetic -e DJANGO_DEBUG=0 -e HUNTALPHA_ALLOWED_HOSTS=127.0.0.1,localhost -e HUNTALPHA_DATABASE_PATH=/data/test.sqlite3 -v task012-prod-check:/data task012-official-integration:test
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:19092/healthz/ | grep -q '"status": "ok"'; then ok=1; break; fi
+            sleep 2
+          done
+          test "$ok" -eq 1
+          curl -fsS -o /dev/null http://127.0.0.1:19092/
+          docker exec task012-prod-check-web python manage.py check_python_indicators
+      - name: Remove temporary assets
+        if: always()
+        run: |
+          docker rm -f task012-prod-check-web 2>/dev/null || true
+          docker volume rm -f task012-prod-check 2>/dev/null || true
+
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git diff --check 6f0bb13b91c086185f291569a29079f9c9575eb3 HEAD
