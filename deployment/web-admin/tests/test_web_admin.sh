@@ -66,6 +66,9 @@ case "${1:-}" in
     exit 0 ;;
   run)
     [[ "$*" == *'--network none'* && "$*" == *'--read-only'* ]] || exit 1
+    for argument in "$@"; do
+      [[ "$argument" == type=bind*,rw ]] && { printf 'invalid Docker --mount rw shorthand\n' >&2; exit 125; }
+    done
     mount_specs=()
     previous=''
     for argument in "$@"; do

@@ -335,7 +335,7 @@ rehearse_migrations() {
   if ! docker_cli run --rm --network none --read-only \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m \
     --cap-drop ALL --security-opt no-new-privileges \
-    --mount "type=bind,src=$workspace,dst=/deploy,rw" \
+    --mount "type=bind,src=$workspace,dst=/deploy" \
     --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 \
     "$image" python manage.py migrate --noinput >/dev/null 2>&1; then
     cleanup_migration_workspace "$workspace" || true
@@ -712,7 +712,7 @@ isolated_deploy_and_rollback_test() {
 
   if ! docker_cli run --rm --network none --read-only \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop ALL --security-opt no-new-privileges \
-    --mount "type=bind,src=$DATA_DIR,dst=/deploy,rw" \
+    --mount "type=bind,src=$DATA_DIR,dst=/deploy" \
     --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 \
     "$original_image_id" python manage.py migrate --noinput >/dev/null 2>&1; then
     abort_isolated_deploy_test 'cannot initialize a synthetic rollback database with the retained application image'
