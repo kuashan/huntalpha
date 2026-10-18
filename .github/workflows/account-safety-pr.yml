@@ -52,3 +52,62 @@ jobs:
           npm run test:realtime
           npm run test:chart
           npm run build
+
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DJANGO_SECRET_KEY: synthetic-only-upgrade-ci
+      DJANGO_DEBUG: '1'
+      HUNTALPHA_DATABASE_PATH: ${{ github.workspace }}/old/legacy.sqlite3
+    steps:
+      - name: Checkout deployed baseline
+        uses: actions/checkout@v4
+        with:
+          ref: 07903d29e32f23a5e04db1888f2047073808542b
+          path: old
+      - name: Checkout proposed account change
+        uses: actions/checkout@v4
+        with:
+          path: new
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned requirements
+        run: python -m pip install -r new/requirements.txt
+      - name: Create synthetic baseline users and four formulas
+        working-directory: old
+        run: |
+          python manage.py migrate --noinput
+          python manage.py shell -c '
+          from django.contrib.auth import get_user_model
+          from core.models import AccountMembership, MarketSymbol, WatchlistEntry
+          from formula_editor.models import Formula
+          u=get_user_model().objects.create_user(username="synthetic@example.com",email="synthetic@example.com",password="only-ci-password")
+          AccountMembership.objects.filter(user=u).update(tier="pro")
+          s=MarketSymbol.objects.create(code="US.SAFETEST",name="Synthetic",market="us",security_type="STOCK",provider="synthetic",provider_symbol="SAFETEST")
+          WatchlistEntry.objects.create(user=u,symbol=s)
+          for i in range(4):
+              Formula.objects.create(code=f"SAFE_{i}",name=f"Synthetic {i}",source=f"SAFE_SYNTHETIC_{i}:MA(C,5);",placement="main")
+          '
+      - name: Migrate only the synthetic database and check preserved rows
+        working-directory: new
+        run: |
+          python manage.py migrate --noinput
+          python manage.py shell -c '
+          from django.contrib.auth import get_user_model
+          from core.models import AccountMembership, WatchlistEntry, PendingEmailRegistration, AuthRateLimit
+          from formula_editor.models import Formula
+          u=get_user_model().objects.get(username="synthetic@example.com")
+          assert AccountMembership.objects.get(user=u).tier=="pro"
+          assert WatchlistEntry.objects.filter(user=u,symbol__code="US.SAFETEST").count()==1
+          assert Formula.objects.count()==4
+          for i in range(4):
+              assert Formula.objects.get(code=f"SAFE_{i}").source==f"SAFE_SYNTHETIC_{i}:MA(C,5);"
+          assert PendingEmailRegistration.objects.count()==0
+          assert AuthRateLimit.objects.count()==0
+          print("synthetic upgrade preserves member, PRO, watchlist and 4 formula sources: PASS")
+          '
+      - name: Check changed files contain no whitespace errors
+        working-directory: new
+        run: git diff --check ${{ github.event.pull_request.base.sha }} HEAD
