@@ -1,0 +1,54 @@
+name: Prelaunch account safety checks (PR only)
+
+on:
+  pull_request:
+    branches:
+      - release/siftalpha-web-v1
+    paths:
+      - 'core/**'
+      - 'quant_site/**'
+      - 'frontend/**'
+      - '.env.example'
+      - '.github/workflows/account-safety-pr.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  django:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DJANGO_SECRET_KEY: synthetic-only-account-safety-ci
+      DJANGO_DEBUG: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install project dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Validate schema, permissions and verified signup
+        run: |
+          python manage.py check
+          python manage.py makemigrations --check --dry-run
+          python manage.py test core formula_editor --noinput
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build and check existing frontend
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run test:indicators
+          npm run test:realtime
+          npm run test:chart
+          npm run build
