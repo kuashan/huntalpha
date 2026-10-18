@@ -192,7 +192,7 @@ class AuthenticationApiTests(TestCase):
             )
             self.assertEqual(response.status_code, 202)
             self.assertEqual(self.client.get('/api/auth/session/').status_code, 401)
-            code = re.search(r'\\b[0-9]{6}\\b', mail.outbox[-1].body).group()
+            code = re.search(r'\b[0-9]{6}\b', mail.outbox[-1].body).group()
             verified = self.client.post('/api/auth/verify-email/',
                 data=json.dumps({'email': 'researcher@example.com', 'code': code}),
                 content_type='application/json')
