@@ -392,6 +392,7 @@ LOOPBACK_PORT=127.0.0.1:19091
 COMPOSE_FILE=$STATE_DIR/compose.yaml
 COMPOSE_TEMPLATE=$ROOT/deployment/web-admin/compose.yaml.template
 ENV_FILE=$TEST_ROOT/web-admin.env
+BREVO_ENV_FILE=$TEST_ROOT/secret/brevo.env
 STATE_DIR=$STATE_DIR
 BACKUP_DIR=$STATE_DIR/backups
 ROLLBACK_DIR=$STATE_DIR/rollbacks
@@ -406,6 +407,11 @@ PYTHON_BIN=python
 EOF
 printf 'test-token\n' > "$TEST_ROOT/github-token"
 printf 'DJANGO_SECRET_KEY=test-only\n' > "$TEST_ROOT/web-admin.env"
+mkdir -p "$TEST_ROOT/secret"
+chmod 700 "$TEST_ROOT/secret"
+printf 'BREVO_API_KEY=synthetic-not-real-key-for-tests-only\n' > "$TEST_ROOT/secret/brevo.env"
+chmod 600 "$TEST_ROOT/secret/brevo.env"
+
 
 python - "$DATA_DIR/db.sqlite3" <<'PY'
 import sqlite3
@@ -450,6 +456,18 @@ PY
 
 source "$LIB"
 load_config "$TEST_ROOT/web-admin.conf"
+assert_ok verify_brevo_secret_file
+chmod 644 "$BREVO_ENV_FILE"
+assert_fail verify_brevo_secret_file
+chmod 600 "$BREVO_ENV_FILE"
+printf 'BREVO_API_KEY=\n' > "$BREVO_ENV_FILE"
+assert_fail verify_brevo_secret_file
+printf 'BREVO_API_KEY=synthetic-not-real-key-for-tests-only\n' > "$BREVO_ENV_FILE"
+assert_ok verify_brevo_secret_file
+for template in "$ROOT/deployment/web-admin/compose.yaml.template" "$ROOT/deployment/web-admin/compose.selftest.yaml.template"; do
+  grep -F -- '- __BREVO_ENV_FILE__' "$template" >/dev/null || fail "Compose must inject Brevo secret only into website service"
+done
+
 PATH="$FAKE_BIN:$PATH"
 export PATH
 
