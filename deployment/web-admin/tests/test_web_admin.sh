@@ -467,6 +467,9 @@ assert_ok verify_brevo_secret_file
 for template in "$ROOT/deployment/web-admin/compose.yaml.template" "$ROOT/deployment/web-admin/compose.selftest.yaml.template"; do
   grep -F -- '- __BREVO_ENV_FILE__' "$template" >/dev/null || fail "Compose must inject Brevo secret only into website service"
 done
+assert_ok render_compose "$FAKE_DIGEST"
+grep -F "$BREVO_ENV_FILE" "$COMPOSE_FILE" >/dev/null || fail "rendered website Compose lacks secret env_file"
+
 
 PATH="$FAKE_BIN:$PATH"
 export PATH
