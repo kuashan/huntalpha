@@ -1,0 +1,29 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div id="content-main">
+  <p>列表只读取当前服务器正式注册的固定公式。公式代码、版本和位置只读；不会扫描、上传或执行额外 Python 文件。</p>
+  <div class="module">
+    <table>
+      <thead><tr><th scope="col">代码</th><th scope="col">名称</th><th scope="col">版本</th><th scope="col">位置</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead>
+      <tbody>
+      {% for fixed in fixed_indicators %}
+        <tr>
+          <td>{{ fixed.code }}</td><td>{{ fixed.name }}</td><td>{{ fixed.version }}</td>
+          <td>{{ fixed.placement }}</td><td>{% if fixed.enabled %}已启用{% else %}已停用{% endif %}</td>
+          <td>
+          {% if can_change %}
+            <form method="post" action="{{ fixed.toggle_url }}">
+              {% csrf_token %}
+              <button type="submit">{% if fixed.enabled %}停用{% else %}启用{% endif %}</button>
+            </form>
+          {% else %}只读{% endif %}
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="6">当前版本没有正式注册的固定公式。</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

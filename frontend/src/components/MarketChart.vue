@@ -12,6 +12,7 @@ import { settleHistoryReconcile } from '../realtime/historyRecovery.mjs'
 import { isCurrentFormulaResult, shouldScheduleFormulaRefresh } from '../realtime/formulaRefreshScheduler.mjs'
 import { classifyChartUpdate, diffIndicatorSets, indicatorKey } from '../realtime/chartUpdatePolicy.mjs'
 
+const emit = defineEmits(['indicator-denied'])
 const props = defineProps({
   symbol: Object,
   period: String,
@@ -109,8 +110,12 @@ async function requestFormulaDrawing(item, bars, revision = 0) {
   try {
     const params = new URLSearchParams({ period: props.period, count: String(bars.length), revision: String(revision) })
     if (realtimeEpoch) params.set('epoch', realtimeEpoch)
-    const reply = await fetch(`${API_BASE}/api/indicator-render/${encodeURIComponent(item.code)}/${props.symbol.code}/?${params}`, { credentials: 'include' })
+    const reply = await fetch(`${API_BASE}/api/indicator-render/${encodeURIComponent(item.code)}/${props.symbol.code}/?${params}`, { credentials: 'include', cache: 'no-store' })
     const payload = await reply.json()
+    if ((reply.status === 403 && payload.code === 'indicator_not_allowed') || (reply.status === 404 && payload.code === 'fixed_indicator_disabled')) {
+      emit('indicator-denied', item)
+      return null
+    }
     if (reply.ok) return { item, drawing: payload.drawing, epoch: payload.epoch || '', revision: Number(payload.revision || revision) }
     renderErrors.value.push(`${item.name}：${payload.error || '指标计算失败'}`)
   } catch (error) {

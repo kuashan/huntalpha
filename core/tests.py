@@ -27,7 +27,7 @@ from futu import Market, RET_OK
 
 from formula_editor.models import Formula
 from .market_indices import INDEX_DEFINITIONS, FutuOpenDIndexAdapter, convert_snapshot_frame
-from .models import AccountProfile, MarketSymbol, WatchlistEntry
+from .models import AccountMembership, AccountProfile, MarketSymbol, WatchlistEntry
 from .symbol_catalog import FutuOpenDAdapter, ProviderCatalogSnapshot, ProviderSymbol, ProviderSyncError, apply_catalog_snapshot
 from .views import _watchlist_create, bar_rows, formula_run_registry, merge_calculation_snapshot_rows
 from .watchlist import resolve_account_tier, resolve_watchlist_limit
@@ -851,7 +851,9 @@ class RealMarketDataApiTests(TestCase):
         self.assertNotIn('bars', response.json())
 
     def test_indicator_timeout_message_is_neutral(self):
-        self.client.force_login(self.make_user())
+        fixture_user = self.make_user()
+        self.client.force_login(fixture_user)
+        AccountMembership.objects.filter(user=fixture_user).update(tier='pro')
         Formula.objects.create(
             name='Synthetic timeout fixture',
             code='SYNTHETIC_TIMEOUT',
@@ -2026,6 +2028,7 @@ class RealtimeCoreContractTests(TestCase):
         user = get_user_model().objects.create_user(username="realtime-formula-user", password="Valid-password-123")
         client = Client()
         client.force_login(user)
+        AccountMembership.objects.filter(user=user).update(tier='pro')
         provider = FakeRealtimeProvider()
         store = RealtimeStateStore()
         registry = RealtimeRegistry(provider=provider, state_store=store, grace_seconds=0)

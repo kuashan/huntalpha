@@ -17,8 +17,10 @@ from django.core.exceptions import ValidationError
 from django.http import FileResponse, JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
+from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from formula_editor.models import Formula
+from formula_editor.fixed_indicators import installed_fixed_indicators, is_fixed_indicator_enabled
 from .models import AccountProfile, MarketSymbol, WatchlistEntry
 from .account import (
     AvatarValidationError, account_avatar_url, account_display_name, account_preferences as account_preferences_data,
@@ -47,7 +49,7 @@ from .realtime import (
 from .realtime.formula_scheduler import FormulaRunRegistry, calculation_input_fingerprint
 from .realtime.provider import REALTIME_PERIOD_SUBTYPES
 from .symbol_catalog import COINBASE_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
-from .watchlist import account_tier_payload, active_watchlist_entry_ids, watchlist_limit_for_user
+from .watchlist import account_tier_payload, active_watchlist_entry_ids, watchlist_limit_for_user, resolve_account_tier
 from .python_indicators import (
     PythonIndicatorExecutionError,
     PythonIndicatorRuntimeUnavailable,
@@ -1093,27 +1095,52 @@ def symbol_search(request):
 
 
 @require_GET
+@never_cache
 @api_terminal_required
 def indicators(request):
-    # Formula editing is deliberately confined to Django Admin, where staff
-    # authentication, audit trail and the private source field are available.
-    common = [{**item, "version": 1, "enabled": True, "updated_at": "", "visitor_available": True, "common": True} for item in COMMON_INDICATORS]
-    installed = [{**indicator_data(item), "visitor_available": False, "common": False} for item in Formula.objects.filter(enabled=True)]
-    chanlun = next(item.metadata() for item in list_python_indicators() if item.code == "CHANLUN")
-    return json({"visitor": is_visitor(request), "items": common + [chanlun] + installed})
+    """Expose names and permissions, never private Tongdaxin or Python source."""
+    tier = None if is_visitor(request) else resolve_account_tier(request.user)
+    common = [
+        {**item, "version": 1, "enabled": True, "updated_at": "",
+         "visitor_available": True, "common": True, "allowed": True}
+        for item in COMMON_INDICATORS
+    ]
+    # Visitors remain strictly limited to the six common client indicators.
+    if tier is None:
+        return json({"visitor": True, "items": common})
+    fixed = [
+        {**definition.metadata(), "enabled": True,
+         "allowed": definition.code == "CHANLUN" or tier == "pro"}
+        for definition, enabled in installed_fixed_indicators() if enabled
+    ]
+    private = [
+        {**indicator_data(item), "visitor_available": False,
+         "common": False, "allowed": tier == "pro"}
+        for item in Formula.objects.filter(enabled=True)
+    ]
+    return json({"visitor": False, "items": common + fixed + private})
 
 
 @require_GET
+@never_cache
 @api_terminal_required
 def indicator_render(request, code, symbol):
-    """Return drawing data, never the proprietary formula source itself."""
+    """Enforce database entitlement *before* accessing data or cached drawing."""
     if code.upper() in {item["code"] for item in COMMON_INDICATORS}:
         return json({"error": "常用指标由终端本地标准实现绘制"}, 400)
-    if is_visitor(request):
-        return json({"error": "访客模式不能启用已安装的私有指标"}, 403)
+    if is_visitor(request) or not request.user.is_authenticated:
+        return json({"error": "访客仅可使用六个基础指标", "code": "indicator_not_allowed"}, 403)
+    tier = resolve_account_tier(request.user)
     python_indicator = get_python_indicator(code)
     builtin_chanlun = python_indicator is not None
-    if not python_indicator:
+    if python_indicator:
+        if not is_fixed_indicator_enabled(python_indicator):
+            return json({"error": "固定公式已停用", "code": "fixed_indicator_disabled"}, 404)
+        if python_indicator.code != "CHANLUN" and tier != "pro":
+            return json({"error": "此固定公式需要 PRO 权限", "code": "indicator_not_allowed"}, 403)
+    else:
+        if tier != "pro":
+            return json({"error": "私人通达信公式需要 PRO 权限", "code": "indicator_not_allowed"}, 403)
         try:
             item = Formula.objects.get(code=code.upper(), enabled=True)
         except Formula.DoesNotExist:
@@ -1265,4 +1292,12 @@ def indicator_render(request, code, symbol):
             if isinstance(row, dict)
         ],
     }
+    # A user may be downgraded or a fixed formula disabled during calculation.
+    # Do not return a completed or shared in-flight result after revocation.
+    if (python_indicator and not is_fixed_indicator_enabled(python_indicator)):
+        return json({"error": "固定公式已停用", "code": "fixed_indicator_disabled"}, 404)
+    if resolve_account_tier(request.user) != "pro" and (
+        not python_indicator or python_indicator.code != "CHANLUN"
+    ):
+        return json({"error": "当前会员等级无权使用此指标", "code": "indicator_not_allowed"}, 403)
     return json({"code": python_indicator.code if python_indicator else item.code, "name": python_indicator.name if python_indicator else item.name, "placement": python_indicator.placement if python_indicator else item.placement, "period": period, "drawing": drawing, "calculation": "server", "calculation_bars": len(calculation_bars), "epoch": calculation_snapshot.epoch, "revision": calculation_snapshot.revision, "engine": formula.get("engine", "tongdaxin"), "source": registry.provider_name_for(symbol), "adjustment": "UTC" if str(symbol).upper().startswith("CC.") else "前复权"})
