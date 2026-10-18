@@ -6,10 +6,12 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core import mail
-from django.test import Client, TestCase, override_settings
+from django.core.mail import EmailMessage
+from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from .models import AccountMembership, AuthRateLimit, PendingEmailRegistration
+from .mailers import BrevoEmailBackend
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
@@ -135,3 +137,28 @@ class LoginRateTests(TestCase):
     def test_successful_login_preserves_existing_user(self):
         self.assertEqual(self.login("Correct-password-42").status_code, 200)
         self.assertEqual(self.client.get("/api/auth/session/").status_code, 200)
+
+
+class BrevoSenderContractTests(SimpleTestCase):
+    def test_verified_sender_is_used_by_backend(self):
+        with patch.dict("os.environ", {"BREVO_API_KEY": "only-synthetic-test-key"}):
+            with patch("core.mailers.urlopen") as mocked_request:
+                mocked_request.return_value.__enter__.return_value.status = 201
+                result = BrevoEmailBackend().send_messages([
+                    EmailMessage("SiftAlpha test", "Test message", "mail@siftalpha.com", ["recipient@example.com"])
+                ])
+        self.assertEqual(result, 1)
+        request = mocked_request.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["sender"]["email"], "mail@siftalpha.com")
+        self.assertEqual(payload["to"], [{"email": "recipient@example.com"}])
+        self.assertNotIn("only-synthetic-test-key", request.data.decode("utf-8"))
+
+    def test_backend_refuses_missing_key_without_network_call(self):
+        with patch.dict("os.environ", {"BREVO_API_KEY": ""}):
+            with patch("core.mailers.urlopen") as mocked_request:
+                with self.assertRaises(OSError):
+                    BrevoEmailBackend().send_messages([
+                        EmailMessage("SiftAlpha test", "Test message", "mail@siftalpha.com", ["recipient@example.com"])
+                    ])
+        mocked_request.assert_not_called()
