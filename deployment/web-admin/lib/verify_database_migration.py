@@ -107,7 +107,7 @@ def validate_probe_state(payload: Any) -> dict[str, list[str]]:
     if set(pending) & set(applied) or len(set(applied)) != len(applied):
         raise _reject()
     # Account tables may only follow the already-reviewed Task 012 migration.
-    if "core.0012_auth_verification" in (set(pending) | set(applied)) and "formula_editor.0002_fixedindicatorstate" not in applied:
+    if "core.0012_auth_verification" in pending and "formula_editor.0002_fixedindicatorstate" not in applied:
         raise _reject()
     return {"pending": pending, "applied": applied}
 
