@@ -41,7 +41,7 @@ class MigrationPlanTests(MigrationGuardTestCase):
         }
         self.assertEqual(
             self.guard().validate_probe_state(payload),
-            {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate", "core.0012_auth_verification"]},
+            {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate"]},
         )
 
     def test_probe_state_rejects_unknown_or_ambiguous_applied_migrations(self):
@@ -556,7 +556,7 @@ class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
             self.guard()._integrity(rehearsal)
             self.assertEqual(
                 self.guard().validate_probe_state(self._probe(rehearsal)),
-                {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate"]},
+                {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate", "core.0012_auth_verification"]},
             )
 
             self.guard().copy_database(backup, target)
