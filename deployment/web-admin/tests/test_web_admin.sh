@@ -18,6 +18,9 @@ assert_fail() { if "$@"; then fail "expected failure: $*"; fi; }
 if [[ ! -f "$LIB" ]]; then
   fail "web-admin library is missing: $LIB"
 fi
+if grep -F ',rw"' "$LIB" >/dev/null; then
+  fail "Docker --mount must not use the unsupported rw shorthand"
+fi
 
 FAKE_BIN="$TEST_ROOT/bin"
 STATE_DIR="$TEST_ROOT/state"

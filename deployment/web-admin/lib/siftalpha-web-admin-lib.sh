@@ -723,7 +723,7 @@ isolated_deploy_and_rollback_test() {
     --label "io.siftalpha.web-admin.selftest=$SELF_TEST_ID" \
     --network "$network" --publish "$LOOPBACK_PORT:8000" \
     --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop ALL --security-opt no-new-privileges \
-    --mount "type=bind,src=$DATA_DIR,dst=/data,rw" \
+    --mount "type=bind,src=$DATA_DIR,dst=/data" \
     --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/data/db.sqlite3 \
     "$original_image_id" >/dev/null; then
     abort_isolated_deploy_test 'cannot start isolated prior-version test container'
