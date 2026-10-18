@@ -24,6 +24,7 @@ if SPEC is not None and SPEC.loader is not None and HELPER_PATH.is_file():
 
 
 APPROVED_HASH = "72514513ca8f6b801b2b68fef42f7b35e998c78d7cdcd9cd236e0dbffefa977a"
+ACCOUNT_HASH = "2e02a54d4869e10dcb4da50a66a9656a63c2d120cd33ab8ec9cd757187effdc9"
 
 
 class MigrationGuardTestCase(unittest.TestCase):
@@ -40,7 +41,7 @@ class MigrationPlanTests(MigrationGuardTestCase):
         }
         self.assertEqual(
             self.guard().validate_probe_state(payload),
-            {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate"]},
+            {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate", "core.0012_auth_verification"]},
         )
 
     def test_probe_state_rejects_unknown_or_ambiguous_applied_migrations(self):
@@ -85,6 +86,23 @@ class MigrationPlanTests(MigrationGuardTestCase):
             self.guard().validate_plan(plan),
             ["formula_editor.0002_fixedindicatorstate"],
         )
+
+    def test_exact_account_migration_hash_and_sequence(self):
+        path = ROOT / "core" / "migrations" / "0012_auth_verification.py"
+        self.assertEqual(hashlib.sha256(path.read_bytes().replace(b"\\r\\n", b"\\n")).hexdigest(), ACCOUNT_HASH)
+        item = {"name": "core.0012_auth_verification", "backwards": False, "sha256": ACCOUNT_HASH}
+        self.assertEqual(self.guard().validate_plan({"pending": [item]}), [item["name"]])
+        self.assertEqual(
+            self.guard().validate_probe_state({
+                "pending": [item],
+                "applied": [{"name": "formula_editor.0002_fixedindicatorstate", "sha256": APPROVED_HASH}],
+            }),
+            {"pending": [item["name"]], "applied": ["formula_editor.0002_fixedindicatorstate"]},
+        )
+        with self.assertRaises(ValueError):
+            self.guard().validate_probe_state({"pending": [item], "applied": []})
+        with self.assertRaises(ValueError):
+            self.guard().validate_plan({"pending": [{**item, "sha256": "0" * 64}]})
 
     def test_empty_migration_plan_is_a_noop(self):
         self.assertEqual(self.guard().validate_plan({"pending": []}), [])
@@ -527,7 +545,7 @@ class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
             approved_state = self.guard().validate_probe_state(self._probe(baseline))
             self.assertEqual(
                 approved_state,
-                {"pending": ["formula_editor.0002_fixedindicatorstate"], "applied": []},
+                {"pending": ["formula_editor.0002_fixedindicatorstate"], "applied": ["core.0012_auth_verification"]},
             )
 
             self.guard().copy_database(baseline, backup)
@@ -546,6 +564,53 @@ class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
             self.guard().validate_approved_migration_result(backup, target)
             self.guard().restore_database(backup, target)
             self.guard().compare_database_contents(backup, target)
+
+
+class RealAccountMigrationRehearsalTests(RealDjangoMigrationRehearsalTests):
+    def test_core_0012_rehearsal_has_only_two_new_empty_tables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline, migrated = root / "baseline.sqlite3", root / "migrated.sqlite3"
+            self._run_manage(baseline, "migrate", "--noinput")
+            self._run_manage(baseline, "migrate", "core", "0011_accountmembership", "--noinput")
+            # Django does not automatically delete stale content types on migration rollback.
+            connection = sqlite3.connect(baseline)
+            try:
+                for model in ("pendingemailregistration", "authratelimit"):
+                    rows = connection.execute(
+                        "SELECT id FROM django_content_type WHERE app_label='core' AND model=?",
+                        (model,),
+                    ).fetchall()
+                    for row in rows:
+                        connection.execute("DELETE FROM auth_permission WHERE content_type_id=?", (row[0],))
+                        connection.execute("DELETE FROM django_content_type WHERE id=?", (row[0],))
+                connection.commit()
+            finally:
+                connection.close()
+            state = self.guard().validate_probe_state(self._probe(baseline))
+            self.assertEqual(state, {
+                "pending": ["core.0012_auth_verification"],
+                "applied": ["formula_editor.0002_fixedindicatorstate"],
+            })
+            self.guard().copy_database(baseline, migrated)
+            self._run_manage(migrated, "migrate", "--noinput")
+            self.guard().validate_approved_migration_result(baseline, migrated)
+            self.guard().compare_protected_tables(baseline, migrated)
+            self.assertEqual(
+                self.guard().validate_probe_state(self._probe(migrated)),
+                {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate", "core.0012_auth_verification"]},
+            )
+            # Any change to existing private Formula data must block promotion.
+            connection = sqlite3.connect(migrated)
+            try:
+                connection.execute("UPDATE formula_editor_formula SET source='tampered' WHERE id=(SELECT id FROM formula_editor_formula LIMIT 1)")
+                connection.execute("CREATE TABLE unapproved_extra (id INTEGER PRIMARY KEY)")
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaises(ValueError):
+                self.guard().validate_approved_migration_result(baseline, migrated)
+
 
 
 if __name__ == "__main__":
