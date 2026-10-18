@@ -4,6 +4,8 @@ services:
     image: __IMAGE_REFERENCE__
     env_file:
       - __ENV_FILE__
+    environment:
+      HOME: /tmp
     volumes:
       - __DATA_DIR__:/data
     ports:

@@ -21,6 +21,13 @@ fi
 if grep -F ',rw"' "$LIB" >/dev/null; then
   fail "Docker --mount must not use the unsupported rw shorthand"
 fi
+if ! sed -n '/^isolated_deploy_and_rollback_test()/,/^record_snapshot_database_state()/p' "$LIB" \
+  | grep -F -- '--env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/data/db.sqlite3 --env HOME=/tmp' >/dev/null; then
+  fail "isolated legacy container must use the writable temporary home"
+fi
+if ! grep -F 'HOME: /tmp' "$ROOT/deployment/web-admin/compose.selftest.yaml.template" >/dev/null; then
+  fail "isolated candidate container must use the writable temporary home"
+fi
 
 FAKE_BIN="$TEST_ROOT/bin"
 STATE_DIR="$TEST_ROOT/state"
