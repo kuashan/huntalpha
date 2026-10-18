@@ -356,6 +356,10 @@ inspect_migration_plan() {
       LAST_MIGRATION_PLAN="[\"$SIFTALPHA_APPROVED_MIGRATION\"]"; LAST_APPLIED_MIGRATIONS='[]' ;;
     "{\"pending\":[],\"applied\":[\"$SIFTALPHA_APPROVED_MIGRATION\"]}")
       LAST_MIGRATION_PLAN='[]'; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\"]" ;;
+    "{\"pending\":[\"$SIFTALPHA_ACCOUNT_MIGRATION\"],\"applied\":[\"$SIFTALPHA_APPROVED_MIGRATION\"]}")
+      LAST_MIGRATION_PLAN="[\"$SIFTALPHA_ACCOUNT_MIGRATION\"]"; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\"]" ;;
+    "{\"pending\":[],\"applied\":[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]}")
+      LAST_MIGRATION_PLAN='[]'; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]" ;;
     *) die 'candidate migration plan validation returned an invalid result'; return 1 ;;
   esac
 }
