@@ -8,8 +8,6 @@ services:
       HOME: /tmp
     volumes:
       - __DATA_DIR__:/data
-    ports:
-      - "__LOOPBACK_PORT__:8000"
     restart: "no"
     read_only: true
     tmpfs:

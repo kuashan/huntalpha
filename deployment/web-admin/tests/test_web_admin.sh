@@ -28,6 +28,12 @@ fi
 if ! grep -F 'HOME: /tmp' "$ROOT/deployment/web-admin/compose.selftest.yaml.template" >/dev/null; then
   fail "isolated candidate container must use the writable temporary home"
 fi
+if ! sed -n '/^health_check()/,/^current_container()/p' "$LIB" | grep -F 'docker_cli exec' >/dev/null; then
+  fail "self-test health checks must run inside the isolated container"
+fi
+if grep -F 'ports:' "$ROOT/deployment/web-admin/compose.selftest.yaml.template" >/dev/null; then
+  fail "isolated self-test containers must not publish host ports"
+fi
 
 FAKE_BIN="$TEST_ROOT/bin"
 STATE_DIR="$TEST_ROOT/state"
@@ -169,6 +175,9 @@ PY
       exit $?
     fi
     exit 1 ;;
+  exec)
+    [[ "$*" == *'http://127.0.0.1:8000'* && "$*" == *'/healthz/'* && "$*" == *'/static/'* ]] || exit 1
+    exit 0 ;;
   inspect)
     if [[ "${3:-}" == '{{.State.Status}}' ]]; then cat "$FAKE_CONTAINER_STATE_FILE"; else printf 'siftalpha-task011:ebd23f4\n'; fi
     exit 0 ;;
@@ -296,6 +305,10 @@ source "$LIB"
 load_config "$TEST_ROOT/web-admin.conf"
 PATH="$FAKE_BIN:$PATH"
 export PATH
+
+SELF_TEST_NETWORK_NAME=web-admin-selftest-contract
+assert_ok health_check
+unset SELF_TEST_NETWORK_NAME
 
 assert_ok validate_command status
 assert_ok validate_command health

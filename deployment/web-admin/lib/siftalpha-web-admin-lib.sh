@@ -381,7 +381,31 @@ audit_deployment_event() {
 }
 
 health_check() {
-  local base="http://$LOOPBACK_PORT" page static_path
+  local base="http://$LOOPBACK_PORT" page static_path self_test_container self_test_probe attempt
+  if [[ -n "${SELF_TEST_NETWORK_NAME:-}" ]]; then
+    self_test_container="$(current_container)" || return 1
+    self_test_probe="$(printf '%s\n' \
+      'import re' \
+      'from urllib.request import urlopen' \
+      'base = "http://127.0.0.1:8000"' \
+      'for path in ("/", "/account", "/account/", "/healthz/"):' \
+      '    with urlopen(base + path, timeout=4) as response:' \
+      '        if not 200 <= response.status < 400: raise SystemExit(1)' \
+      'with urlopen(base + "/", timeout=4) as response:' \
+      '    page = response.read().decode("utf-8", "replace")' \
+      'match = re.search("src=" + chr(34) + r"(/static/[A-Za-z0-9._/-]+)" + chr(34), page)' \
+      'if not match or ".." in match.group(1): raise SystemExit(1)' \
+      'with urlopen(base + match.group(1), timeout=4) as response:' \
+      '    response.read(1)')"
+    for attempt in {1..20}; do
+      if docker_cli exec "$self_test_container" python -c "$self_test_probe" >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 1
+    done
+    die 'isolated website container failed health checks'
+    return 1
+  fi
   for page in / /account /account/ /healthz/; do
     "$CURL_BIN" --fail --silent --show-error "$base$page" >/dev/null || { die "health endpoint failed: $page"; return 1; }
   done
@@ -721,7 +745,7 @@ isolated_deploy_and_rollback_test() {
   SELF_TEST_LEGACY_CREATED=yes
   if ! docker_cli run --detach --name "$legacy" \
     --label "io.siftalpha.web-admin.selftest=$SELF_TEST_ID" \
-    --network "$network" --publish "$LOOPBACK_PORT:8000" \
+    --network "$network" \
     --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop ALL --security-opt no-new-privileges \
     --mount "type=bind,src=$DATA_DIR,dst=/data" \
     --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/data/db.sqlite3 --env HOME=/tmp \
