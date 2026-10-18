@@ -4,6 +4,7 @@ services:
     image: __IMAGE_REFERENCE__
     env_file:
       - __ENV_FILE__
+      - __BREVO_ENV_FILE__
     environment:
       HOME: /tmp
     volumes:
