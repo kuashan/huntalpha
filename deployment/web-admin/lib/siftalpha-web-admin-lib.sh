@@ -17,6 +17,8 @@ readonly SIFTALPHA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SIFTALPHA_MIGRATION_GUARD="$SIFTALPHA_LIB_DIR/verify_database_migration.py"
 readonly SIFTALPHA_MIGRATION_PROBE="$SIFTALPHA_LIB_DIR/migration_probe.py"
 readonly SIFTALPHA_APPROVED_MIGRATION='formula_editor.0002_fixedindicatorstate'
+readonly SIFTALPHA_ACCOUNT_MIGRATION='core.0012_auth_verification'
+readonly SIFTALPHA_BREVO_ENV_DEFAULT='/etc/siftalpha/secrets/brevo.env'
 readonly SIFTALPHA_COMPOSE_PROJECT_NAME='siftalpha-web'
 
 LAST_BACKUP_PATH=''
@@ -64,9 +66,10 @@ load_config() {
   unset IMAGE_REPOSITORY GITHUB_REPOSITORY GITHUB_WORKFLOW_NAME RELEASE_BRANCH
   unset LEGACY_CONTAINER COMPOSE_CONTAINER DATA_DIR DATABASE_PATH LOOPBACK_PORT COMPOSE_FILE COMPOSE_TEMPLATE ENV_FILE
   unset STATE_DIR BACKUP_DIR ROLLBACK_DIR RECOVERY_DIR DOCKER_CONFIG_DIR GITHUB_TOKEN_FILE GH_BIN GH_SHA256
-  unset DOCKER_BIN CURL_BIN PYTHON_BIN
+  unset DOCKER_BIN CURL_BIN PYTHON_BIN BREVO_ENV_FILE
   # shellcheck disable=SC1090
   source "$config_path"
+  BREVO_ENV_FILE="${BREVO_ENV_FILE:-$SIFTALPHA_BREVO_ENV_DEFAULT}"
   validate_config
 }
 
@@ -86,7 +89,7 @@ validate_config() {
   [[ "$COMPOSE_CONTAINER" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || { die 'unsafe Compose container name'; return 1; }
   [[ "$LEGACY_CONTAINER" != "$COMPOSE_CONTAINER" ]] || { die 'legacy and Compose container names must differ'; return 1; }
   [[ "$GH_SHA256" =~ ^[0-9a-f]{64}$ ]] || { die 'invalid GitHub CLI checksum'; return 1; }
-  for name in DATA_DIR DATABASE_PATH COMPOSE_FILE COMPOSE_TEMPLATE ENV_FILE STATE_DIR BACKUP_DIR ROLLBACK_DIR RECOVERY_DIR DOCKER_CONFIG_DIR GITHUB_TOKEN_FILE GH_BIN; do
+  for name in BREVO_ENV_FILE DATA_DIR DATABASE_PATH COMPOSE_FILE COMPOSE_TEMPLATE ENV_FILE STATE_DIR BACKUP_DIR ROLLBACK_DIR RECOVERY_DIR DOCKER_CONFIG_DIR GITHUB_TOKEN_FILE GH_BIN; do
     require_safe_absolute_path "$name" || return 1
   done
 }
@@ -319,6 +322,20 @@ PY
   LAST_BACKUP_PATH="$BACKUP_DIR/$backup_filename"
   printf '%s\n' "$output" | sed '/^backup filename:/d'
   printf 'backup path: %s\n' "$LAST_BACKUP_PATH"
+}
+
+verify_brevo_secret_file() {
+  local path="$BREVO_ENV_FILE" dir
+  dir="$(dirname -- "$path")"
+  [[ -f "$path" && ! -L "$path" && -d "$dir" && ! -L "$dir" ]] || { die 'Brevo secret file unavailable'; return 1; }
+  [[ "$(stat -c '%u %a' -- "$path")" == "$EUID 600" && "$(stat -c '%u %a' -- "$dir")" == "$EUID 700" ]] || { die 'Brevo secret permissions unsafe'; return 1; }
+  "$PYTHON_BIN" - "$path" <<'PY'
+from pathlib import Path
+import sys
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+if len(lines) != 1 or not lines[0].startswith("BREVO_API_KEY=") or len(lines[0].split("=", 1)[1]) < 20:
+    raise SystemExit("Brevo secret format invalid")
+PY
 }
 
 inspect_migration_plan() {
@@ -702,6 +719,10 @@ preflight_candidate() {
   LAST_MIGRATION_PLAN='[]'
   LAST_APPLIED_MIGRATIONS='[]'
   image="$(candidate_image "$digest")"
+  if ! verify_brevo_secret_file; then
+    audit_deployment_event preflight blocked "$digest" "$LAST_MIGRATION_PLAN" || true
+    return 1
+  fi
   if ! health_check; then
     audit_deployment_event preflight blocked "$digest" "$LAST_MIGRATION_PLAN" || true
     return 1
