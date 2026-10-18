@@ -1,0 +1,26 @@
+services:
+  web:
+    container_name: __COMPOSE_CONTAINER__
+    image: __IMAGE_REFERENCE__
+    env_file:
+      - __ENV_FILE__
+    volumes:
+      - __DATA_DIR__:/data
+    ports:
+      - "__LOOPBACK_PORT__:8000"
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      io.siftalpha.web-admin.selftest: __SELF_TEST_ID__
+    networks:
+      - isolated
+networks:
+  isolated:
+    external: true
+    name: __SELF_TEST_NETWORK__

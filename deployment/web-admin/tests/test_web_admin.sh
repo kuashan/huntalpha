@@ -24,9 +24,12 @@ STATE_DIR="$TEST_ROOT/state"
 DATA_DIR="$TEST_ROOT/data"
 mkdir -p "$FAKE_BIN" "$STATE_DIR" "$DATA_DIR"
 export FAKE_LOG="$TEST_ROOT/fake.log"
+: > "$FAKE_LOG"
 export FAKE_DIGEST="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 export FAKE_COMMIT="0123456789abcdef0123456789abcdef01234567"
 export FAKE_RUN_ID="424242"
+export FAKE_PLAN_MODE='none'
+export FAKE_LOG
 
 cat > "$FAKE_BIN/docker" <<'EOF'
 #!/usr/bin/env bash
@@ -61,13 +64,105 @@ case "${1:-}" in
   container)
     [[ "${3:-}" == siftalpha-web-compose ]] && exit 1
     exit 0 ;;
+  run)
+    [[ "$*" == *'--network none'* && "$*" == *'--read-only'* ]] || exit 1
+    mount_specs=()
+    previous=''
+    for argument in "$@"; do
+      if [[ "$previous" == --mount ]]; then
+        mount_specs+=("$argument")
+        previous=''
+        continue
+      fi
+      previous="$argument"
+    done
+    mount_source=''
+    for mount_spec in "${mount_specs[@]}"; do
+      IFS=',' read -ra mount_parts <<< "$mount_spec"
+      mount_destination=''
+      candidate_source=''
+      for part in "${mount_parts[@]}"; do
+        [[ "$part" == src=* ]] && candidate_source="${part#src=}"
+        [[ "$part" == dst=* ]] && mount_destination="${part#dst=}"
+      done
+      if [[ "$mount_destination" == /deploy/db.sqlite3 || "$mount_destination" == /deploy ]]; then
+        mount_source="$candidate_source"
+      fi
+    done
+    [[ -n "$mount_source" ]] || exit 1
+    if [[ "$*" == *'migration_probe.py'* ]]; then
+      database_path="$mount_source"
+      [[ -d "$mount_source" ]] && database_path="$mount_source/db.sqlite3"
+      python - "$database_path" "${FAKE_PLAN_MODE:-none}" <<'PY'
+import json
+import sqlite3
+import sys
+
+database_path, mode = sys.argv[1:]
+connection = sqlite3.connect(database_path)
+try:
+    table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='formula_editor_fixedindicatorstate'"
+    ).fetchone() is not None
+    migration_applied = connection.execute(
+        "SELECT 1 FROM django_migrations WHERE app=? AND name=?",
+        ("formula_editor", "0002_fixedindicatorstate"),
+    ).fetchone() is not None
+finally:
+    connection.close()
+
+if mode == "none":
+    pending = []
+elif mode == "unknown":
+    pending = [{"name": "core.9999_unknown", "backwards": False, "sha256": "0" * 64}]
+else:
+    pending = [] if table_exists and migration_applied else [{
+        "name": "formula_editor.0002_fixedindicatorstate",
+        "backwards": False,
+        "sha256": "72514513ca8f6b801b2b68fef42f7b35e998c78d7cdcd9cd236e0dbffefa977a",
+    }]
+applied = [{
+    "name": "formula_editor.0002_fixedindicatorstate",
+    "sha256": "72514513ca8f6b801b2b68fef42f7b35e998c78d7cdcd9cd236e0dbffefa977a",
+}] if migration_applied else []
+print(json.dumps({"pending": pending, "applied": applied}, separators=(",", ":")))
+PY
+      exit $?
+    fi
+    if [[ "$*" == *'manage.py migrate --noinput'* ]]; then
+      [[ "${FAKE_MIGRATE_FAIL:-0}" == 1 ]] && exit 1
+      database_path="$mount_source/db.sqlite3"
+      python - "$database_path" <<'PY'
+import sqlite3
+import sys
+connection = sqlite3.connect(sys.argv[1])
+try:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS formula_editor_fixedindicatorstate "
+        "(code varchar(32) NOT NULL PRIMARY KEY, enabled bool NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO django_migrations (app, name, applied) VALUES (?, ?, ?)",
+        ("formula_editor", "0002_fixedindicatorstate", "2026-01-01 00:01:00"),
+    )
+    connection.commit()
+finally:
+    connection.close()
+PY
+      exit $?
+    fi
+    exit 1 ;;
   inspect)
-    if [[ "${3:-}" == '{{.State.Status}}' ]]; then printf 'running\n'; else printf 'siftalpha-task011:ebd23f4\n'; fi
+    if [[ "${3:-}" == '{{.State.Status}}' ]]; then cat "$FAKE_CONTAINER_STATE_FILE"; else printf 'siftalpha-task011:ebd23f4\n'; fi
     exit 0 ;;
   compose)
     [[ "${FAKE_COMPOSE_FAIL:-0}" == 1 ]] && exit 1
+    printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"
     exit 0 ;;
-  stop|start|rm) exit 0 ;;
+  stop) printf 'exited\n' > "$FAKE_CONTAINER_STATE_FILE"; exit 0 ;;
+  start) printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"; exit 0 ;;
+  rm) exit 0 ;;
   *) exit 0 ;;
 esac
 EOF
@@ -106,7 +201,20 @@ case "${1:-}" in
 esac
 EOF
 chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/curl" "$FAKE_BIN/gh"
+cat > "$FAKE_BIN/chmod" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "${FAKE_CHMOD_FAIL:-0}" == 1 ]]; then
+  printf 'chmod: simulated read-only filesystem\n' >&2
+  exit 1
+fi
+exec /usr/bin/chmod "$@"
+EOF
+chmod +x "$FAKE_BIN/chmod"
 GH_SHA256="$(sha256sum "$FAKE_BIN/gh" | awk '{print $1}')"
+FAKE_CONTAINER_STATE_FILE="$TEST_ROOT/container.state"
+printf 'running\n' > "$FAKE_CONTAINER_STATE_FILE"
+export FAKE_CONTAINER_STATE_FILE
 
 cat > "$TEST_ROOT/web-admin.conf" <<EOF
 IMAGE_REPOSITORY=ghcr.io/kuashan/siftalpha-web
@@ -141,23 +249,51 @@ import sqlite3
 import sys
 
 connection = sqlite3.connect(sys.argv[1])
-connection.execute("create table fixture (id integer primary key, value text)")
-connection.execute("insert into fixture (value) values ('safe')")
-connection.commit()
-connection.close()
+try:
+    connection.executescript("""
+        create table fixture (id integer primary key, value text);
+        insert into fixture (value) values ('safe');
+        create table auth_user (id integer primary key, username text, password text);
+        insert into auth_user values (1, 'synthetic-user', 'synthetic-hash');
+        create table core_accountprofile (id integer primary key, user_id integer, market text);
+        insert into core_accountprofile values (1, 1, 'us');
+        create table core_accountmembership (id integer primary key, user_id integer, tier text);
+        insert into core_accountmembership values (1, 1, 'pro');
+        create table core_watchlistentry (id integer primary key, user_id integer, symbol_id integer);
+        insert into core_watchlistentry values (1, 1, 77);
+        create table formula_editor_formula (id integer primary key, code text, source text);
+        insert into formula_editor_formula values (1, 'SYNTHETIC_ONLY', 'synthetic test content');
+        create table django_migrations (
+            id integer primary key autoincrement, app text, name text, applied text
+        );
+        insert into django_migrations values (1, 'formula_editor', '0001_initial', '2026-01-01 00:00:00');
+    """)
+    connection.commit()
+finally:
+    connection.close()
 PY
 
 source "$LIB"
 load_config "$TEST_ROOT/web-admin.conf"
+PATH="$FAKE_BIN:$PATH"
+export PATH
 
 assert_ok validate_command status
 assert_ok validate_command health
 assert_ok validate_command preflight "$FAKE_DIGEST"
 assert_ok validate_command deploy "$FAKE_DIGEST"
+assert_ok validate_command test-deploy "$FAKE_DIGEST"
 assert_ok validate_command rollback
 assert_fail validate_command deploy
 assert_fail validate_command preflight sha256:bad
+assert_fail validate_command test-deploy sha256:bad
 assert_fail validate_command status unexpected
+assert_fail validate_command
+
+log_before="$(wc -l < "$FAKE_LOG")"
+FAKE_CHMOD_FAIL=1 assert_fail verify_trusted_source "$FAKE_DIGEST"
+[[ "$(wc -l < "$FAKE_LOG")" == "$log_before" ]] || fail "read-only state failure continued into Docker verification"
+find "$RECOVERY_DIR" -mindepth 1 -print -quit | grep -q . && fail "read-only state failure left a temporary provenance copy"
 
 IMAGE_REPOSITORY=ghcr.io/evil/repository
 load_config "$TEST_ROOT/web-admin.conf"
@@ -180,6 +316,39 @@ assert_fail preflight_candidate "$FAKE_DIGEST"
 export FAKE_GH_MODE=run-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
 unset FAKE_GH_MODE
+
+export FAKE_PLAN_MODE=unknown
+assert_fail preflight_candidate "$FAKE_DIGEST"
+export FAKE_PLAN_MODE=approved
+export FAKE_MIGRATE_FAIL=1
+log_before="$(wc -l < "$FAKE_LOG")"
+assert_fail preflight_candidate "$FAKE_DIGEST"
+[[ "$(wc -l < "$FAKE_LOG")" -gt "$log_before" ]] || fail "migration rehearsal was not attempted"
+if tail -n "+$((log_before + 1))" "$FAKE_LOG" | grep -F 'docker stop ' >/dev/null; then
+  fail "preflight failure stopped the running website"
+fi
+unset FAKE_MIGRATE_FAIL
+assert_ok preflight_candidate "$FAKE_DIGEST"
+find "$RECOVERY_DIR" -mindepth 1 -print -quit | grep -q . && fail "migration rehearsal copy was not cleaned"
+
+assert_ok deploy_candidate "$FAKE_DIGEST"
+python - "$DATABASE_PATH" <<'PY'
+import sqlite3
+import sys
+connection = sqlite3.connect(sys.argv[1])
+try:
+    assert connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='formula_editor_fixedindicatorstate'"
+    ).fetchone()
+finally:
+    connection.close()
+PY
+rollback_output="$(rollback)"
+[[ "$rollback_output" == *'database rollback: retained reviewed additive migration formula_editor.0002_fixedindicatorstate'* ]] \
+  || fail "database rollback compatibility was not reported"
+grep -F 'docker stop siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null || fail "migration deploy did not stop the old writer first"
+[[ "$(<"$FAKE_CONTAINER_STATE_FILE")" == running ]] || fail "original website container was not running after rollback"
 
 assert_ok backup_and_restore_check
 find "$BACKUP_DIR" -name '*.sqlite3' -type f | grep -q . || fail "backup was not created"
