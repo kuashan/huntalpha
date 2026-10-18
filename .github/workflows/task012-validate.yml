@@ -213,7 +213,7 @@ jobs:
 
 
   publish-arm64-ghcr:
-    name: Publish verified ARM64 image to GHCR (no server deployment)
+    name: Publish verified ARM64 image to web-admin GHCR package
     if: github.event_name == 'push' && github.ref == 'refs/heads/release/task012-safe-integration-20261018'
     needs: [backend, frontend, diff, arm64-image-smoke, upgrade-from-task011]
     runs-on: ubuntu-24.04-arm
@@ -244,7 +244,7 @@ jobs:
           file: Dockerfile
           platforms: linux/arm64
           push: true
-          tags: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          tags: ghcr.io/kuashan/siftalpha-web:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -254,12 +254,12 @@ jobs:
           set -euo pipefail
           digest='${{ steps.image.outputs.digest }}'
           case "$digest" in sha256:*) ;; *) echo 'IMAGE_DIGEST_MISSING'; exit 1;; esac
-          docker buildx imagetools inspect "ghcr.io/${{ github.repository }}@$digest"
+          docker buildx imagetools inspect "ghcr.io/kuashan/siftalpha-web@$digest"
       - name: Report exact image identity for controlled Work deployment
         run: |
-          echo "IMAGE=ghcr.io/${{ github.repository }}:sha-${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "IMAGE=ghcr.io/kuashan/siftalpha-web:sha-${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
           echo "IMAGE_DIGEST=${{ steps.image.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "IMAGE_IMMUTABLE=ghcr.io/${{ github.repository }}@${{ steps.image.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "IMAGE_IMMUTABLE=ghcr.io/kuashan/siftalpha-web@${{ steps.image.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo "SOURCE_COMMIT=${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
           echo "PLATFORM=linux/arm64" >> "$GITHUB_STEP_SUMMARY"
           echo "DEPLOYED_TO_SERVER=NO" >> "$GITHUB_STEP_SUMMARY"
