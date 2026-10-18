@@ -242,6 +242,6 @@ EMAIL_BACKEND = os.environ.get(
     "HUNTALPHA_EMAIL_BACKEND",
     "django.core.mail.backends.locmem.EmailBackend" if DEBUG else "core.mailers.BrevoEmailBackend",
 )
-DEFAULT_FROM_EMAIL = os.environ.get("HUNTALPHA_VERIFICATION_FROM_EMAIL", "no-reply@siftalpha.com")
+DEFAULT_FROM_EMAIL = os.environ.get("HUNTALPHA_VERIFICATION_FROM_EMAIL", "mail@siftalpha.com")
 # Only enable after confirming the origin is reachable exclusively through trusted Cloudflare.
 HUNTALPHA_TRUST_CLOUDFLARE_IP = _env_bool("HUNTALPHA_TRUST_CLOUDFLARE_IP")
