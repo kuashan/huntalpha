@@ -366,6 +366,15 @@ grep -F 'docker rm siftalpha-task011-ebd23f4' "$FAKE_LOG" >/dev/null && fail "le
 
 assert_ok rollback
 
+for source_file in \
+  deployment/web-admin/install-web-admin.sh \
+  deployment/web-admin/siftalpha-web-admin \
+  deployment/web-admin/lib/siftalpha-web-admin-lib.sh; do
+  eol_attribute="$(git check-attr eol -- "$source_file")"
+  [[ "$eol_attribute" == "$source_file: eol: lf" ]] \
+    || fail "deployment source must be archived with LF line endings: $source_file"
+done
+
 assert_ok "$ROOT/deployment/web-admin/install-web-admin.sh" --check
 
 printf 'web-admin contract: ok\n'
