@@ -28,6 +28,8 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/auth/session/', views.auth_session),
     path('api/auth/register/', views.auth_register),
+    path('api/auth/resend-code/', views.auth_resend_code),
+    path('api/auth/verify-email/', views.auth_verify_email),
     path('api/auth/login/', views.auth_login),
     path('api/auth/logout/', views.auth_logout),
     path('api/auth/guest/', views.auth_guest),
