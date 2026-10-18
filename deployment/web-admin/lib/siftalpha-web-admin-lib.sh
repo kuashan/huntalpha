@@ -452,6 +452,51 @@ health_check() {
   "$CURL_BIN" --fail --silent --show-error "$base$static_path" >/dev/null || { die 'homepage static asset failed'; return 1; }
 }
 
+wait_for_health() {
+  local attempt
+  # Compose starts containers asynchronously; probe readiness once per second,
+  # but keep the isolated self-test retry budget instead of nesting it.
+  if [[ -n "${SELF_TEST_NETWORK_NAME:-}" ]]; then
+    health_check
+    return $?
+  fi
+  for attempt in {1..60}; do
+    if health_check >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ "$attempt" -lt 60 ]]; then
+      sleep 1
+    fi
+  done
+  die 'website did not become healthy within 60 seconds'
+}
+
+candidate_startup_diagnostics() {
+  local summary
+  if summary="$(docker_cli logs --tail 200 "$COMPOSE_CONTAINER" 2>/dev/null | "$PYTHON_BIN" -c '
+import re
+import sys
+
+patterns = {
+    "tracebacks": re.compile(r"Traceback \(most recent call last\)", re.I),
+    "permission_errors": re.compile(r"PermissionError|permission denied|readonly database", re.I),
+    "database_errors": re.compile(r"sqlite|OperationalError|DatabaseError", re.I),
+    "import_errors": re.compile(r"ImportError|ModuleNotFoundError", re.I),
+    "django_config_errors": re.compile(r"ImproperlyConfigured", re.I),
+    "server_start_markers": re.compile(r"Starting gunicorn|Listening at|Booting worker", re.I),
+}
+counts = {name: 0 for name in patterns}
+for line in sys.stdin:
+    for name, pattern in patterns.items():
+        counts[name] += bool(pattern.search(line))
+print(" ".join(f"{name}={count}" for name, count in counts.items()))
+')"; then
+    printf 'candidate startup diagnostics (last 200 log lines; categories only): %s\n' "$summary"
+  else
+    printf 'candidate startup diagnostics: container logs unavailable\n'
+  fi
+}
+
 current_container() {
   if docker_cli container inspect "$COMPOSE_CONTAINER" >/dev/null 2>&1; then
     printf '%s\n' "$COMPOSE_CONTAINER"
@@ -541,7 +586,7 @@ restore_snapshot() {
       ;;
     *) die 'deployment snapshot runtime is invalid'; return 1 ;;
   esac
-  health_check || { die 'restored website service is unhealthy'; return 1; }
+  wait_for_health || { die 'restored website service is unhealthy'; return 1; }
   printf 'rollback: restored snapshot=%s\n' "$snapshot"
   if [[ "$migrations" != '[]' ]]; then
     printf 'database rollback: retained reviewed additive migration %s; it is backward-compatible with the restored application\n' "$SIFTALPHA_APPROVED_MIGRATION"
@@ -642,13 +687,16 @@ first_compose_cutover() {
   docker_cli stop "$LEGACY_CONTAINER"
   if ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate; then
     docker_cli rm -f "$COMPOSE_CONTAINER" || true
-    docker_cli start "$LEGACY_CONTAINER"
+    docker_cli start "$LEGACY_CONTAINER" || { die 'candidate failed to start and legacy website could not be restarted'; return 1; }
+    wait_for_health || { die 'candidate failed to start and legacy website did not recover'; return 1; }
     die 'candidate Compose service failed; legacy container was restarted'
     return 1
   fi
-  if ! health_check; then
+  if ! wait_for_health; then
+    candidate_startup_diagnostics
     docker_cli rm -f "$COMPOSE_CONTAINER" || true
-    docker_cli start "$LEGACY_CONTAINER"
+    docker_cli start "$LEGACY_CONTAINER" || { die 'candidate was unhealthy and legacy website could not be restarted'; return 1; }
+    wait_for_health || { die 'candidate was unhealthy and legacy website did not recover'; return 1; }
     die 'candidate Compose service was unhealthy; legacy container was restarted'
     return 1
   fi
@@ -852,7 +900,7 @@ restart_after_migration_preflight_failure() {
   local container="$1"
   docker_cli start "$container" >/dev/null \
     || { die 'cannot restart the original website container'; return 1; }
-  health_check || { die 'original website did not recover after migration was stopped'; return 1; }
+  wait_for_health || { die 'original website did not recover after migration was stopped'; return 1; }
   printf 'migration recovery: no production migration was applied; original container restarted\n'
 }
 
@@ -941,9 +989,16 @@ deploy_candidate() {
       return 1
     fi
   else
-    if ! render_compose "$digest" || ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate || ! health_check; then
+    if ! render_compose "$digest" || ! docker_cli compose -f "$COMPOSE_FILE" --project-name "${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" up -d --force-recreate; then
       restore_snapshot "$(latest_snapshot)" || return 1
       die 'candidate Compose service failed; prior website service was restored'
+      audit_deployment_event deploy blocked "$digest" "$planned" || true
+      return 1
+    fi
+    if ! wait_for_health; then
+      candidate_startup_diagnostics
+      restore_snapshot "$(latest_snapshot)" || return 1
+      die 'candidate Compose service failed health checks; prior website service was restored'
       audit_deployment_event deploy blocked "$digest" "$planned" || true
       return 1
     fi
