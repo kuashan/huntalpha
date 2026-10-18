@@ -435,6 +435,12 @@ def _validate_core_0012_result(before_path: str | Path, after_path: str | Path) 
                 raise ValueError("unapproved account table schema")
             if after.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]:
                 raise ValueError("account table is not initially empty")
+            objects = list(after.execute(
+                "SELECT type FROM sqlite_master WHERE tbl_name=? AND type NOT IN ('table', 'index')",
+                (table,),
+            ))
+            if objects:
+                raise ValueError("unapproved schema object attached to account table")
             indexes = list(after.execute(f'PRAGMA index_list("{table}")'))
             if len(indexes) != 1 or indexes[0][2] != 1 or indexes[0][3] not in ("u", "pk"):
                 raise ValueError("unapproved account index")
