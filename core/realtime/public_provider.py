@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 from collections import defaultdict
+
 from .contracts import NormalizedBar, market_for_symbol, optional_numeric
 from .provider import REALTIME_PERIOD_SUBTYPES, RealtimeMarketProvider, RealtimeProviderError
 
@@ -129,7 +129,7 @@ class PublicMarketRealtimeProvider(RealtimeMarketProvider):
     def subscribe(self, symbol, period, callback):
         if not self.supports_symbol(symbol):
             raise RealtimeProviderError("公开实时轮询仅支持股票市场", status="unavailable")
-        if period not in REALTIME_PERIOD_SUBTYPES or period not in REALTIME_PERIOD_SUBTYPES:
+        if period not in REALTIME_PERIOD_SUBTYPES:
             raise RealtimeProviderError(f"公开实时轮询不支持周期：{period}", status="unavailable")
         key = (str(symbol).upper(), str(period))
         with self._lock:
