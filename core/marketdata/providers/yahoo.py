@@ -121,7 +121,8 @@ def _request_params(timeframe: str, *, start_date: str | None, now_ts: int) -> d
 
 def _is_current_session(ts: int, market: MarketProfile, now_ts: int, regular_start: int | None, regular_end: int | None) -> bool:
     if regular_start is not None and regular_end is not None:
-        return regular_start <= ts <= regular_end
+        # Yahoo's regular window can remain today's session after the close.
+        return regular_start <= ts <= regular_end and now_ts < regular_end
     try:
         tz = ZoneInfo(market.timezone)
         local = datetime.fromtimestamp(ts, tz=tz)
@@ -146,7 +147,8 @@ def _is_complete(ts: int, timeframe: str, market: MarketProfile, now_ts: int, re
         same_period = (timeframe == "周线" and bar_date.isocalendar()[:2] == now_date.isocalendar()[:2]) or (
             timeframe == "月线" and bar_date.year == now_date.year and bar_date.month == now_date.month
         )
-        return not same_period or not _is_current_session(ts, market, now_ts, regular_start, regular_end)
+        # A daily market close does not complete the current week or month.
+        return not same_period
     if timeframe == "日线":
         return not _is_current_session(ts, market, now_ts, regular_start, regular_end)
     seconds = int(_PERIODS[timeframe]["seconds"])
