@@ -38,6 +38,7 @@ urlpatterns = [
     path('api/account/change-password/', views.change_password),
     path('api/account/profile/', views.account_profile),
     path('api/account/preferences/', views.account_preferences),
+    path('api/account/chart-workspace/', views.chart_workspace),
     path('api/account/avatar/', views.account_avatar),
     path('api/watchlist/', views.watchlist),
     path('api/watchlist/<str:code>/', views.watchlist_delete),
