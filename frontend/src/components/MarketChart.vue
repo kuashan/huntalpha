@@ -87,7 +87,9 @@ const cryptoCandleColor = color => ({ '#ef6671': '#ef5350', '#3acba3': '#20bd92'
 
 const backgroundStick = item => item.layer === 'background'
 // The server-owned account layout replaces the old, browser-only height store.
-const savedSubPaneHeights = () => props.paneHeights || {}
+// Visitors may adjust panes for the current tab, without storing them on the server.
+let sessionPaneHeights = {}
+const savedSubPaneHeights = () => ({ ...sessionPaneHeights, ...(props.paneHeights || {}) })
 
 function syncSubTitlePositions(rendered) {
   if (!chart || !el.value) return
@@ -106,6 +108,7 @@ function saveSubPaneHeights(rendered) {
   rendered.filter(result => result.item.placement === 'sub').forEach(result => {
     heights[result.item.code] = chart?.panes()[paneIndex++]?.getHeight() || 150
   })
+  sessionPaneHeights = heights
   emit('pane-heights-changed', heights)
 }
 
