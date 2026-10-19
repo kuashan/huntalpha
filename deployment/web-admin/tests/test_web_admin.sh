@@ -749,6 +749,14 @@ unset FAKE_CANDIDATE_IMAGE_MISMATCH FAKE_CANDIDATE_IMAGE_MISMATCH_FILE FAKE_CAND
 
 assert_ok rollback
 
+# A reviewed additive account migration must be recorded in the snapshot.
+account_snapshot="$(latest_snapshot)"
+approved_account_history='["formula_editor.0002_fixedindicatorstate","core.0012_auth_verification"]'
+assert_ok record_snapshot_database_state "$account_snapshot" "$approved_account_history"
+[[ "$(snapshot_value "$account_snapshot" database_migrations)" == "$approved_account_history" ]] \
+  || fail "approved account migration was not recorded in rollback metadata"
+assert_fail record_snapshot_database_state "$account_snapshot" '["core.9999_unreviewed"]'
+
 for source_file in \
   deployment/web-admin/install-web-admin.sh \
   deployment/web-admin/siftalpha-web-admin \
