@@ -208,8 +208,11 @@ async function refreshIndicatorEntitlements() {
     if (!reply.ok) return
     const payload = await reply.json()
     const allowed = new Set((payload.items || []).filter(item => item.allowed !== false).map(item => item.code))
-    mainInstalled.value = mainInstalled.value.filter(item => allowed.has(item.code))
-    subInstalled.value = subInstalled.value.filter(item => allowed.has(item.code))
+    const keptMain = mainInstalled.value.filter(item => allowed.has(item.code))
+    const keptSub = subInstalled.value.filter(item => allowed.has(item.code))
+    // A routine 30-second permission refresh must not trigger an autosave.
+    if (keptMain.length !== mainInstalled.value.length) mainInstalled.value = keptMain
+    if (keptSub.length !== subInstalled.value.length) subInstalled.value = keptSub
     // The account workspace endpoint also permanently removes revoked codes
     // from stored settings, even when another device is currently active.
     if (workspaceReady.value && !visitor.value) {
