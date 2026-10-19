@@ -713,7 +713,11 @@ restore_snapshot() {
   wait_for_health || { die 'restored website service is unhealthy'; return 1; }
   printf 'rollback: restored snapshot=%s\n' "$snapshot"
   if [[ "$migrations" != '[]' ]]; then
-    printf 'database rollback: retained reviewed additive migration state %s; database was not reversed\n' "$migrations"
+    if [[ "$migrations" == "[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]" ]]; then
+      printf 'database rollback: retained reviewed additive workspace migration %s; database was not reversed\n' "$SIFTALPHA_WORKSPACE_MIGRATION"
+    else
+      printf 'database rollback: retained reviewed additive migration %s; it is backward-compatible with the restored application\n' "$SIFTALPHA_APPROVED_MIGRATION"
+    fi
   else
     printf 'database rollback: no schema migration to reverse\n'
   fi
