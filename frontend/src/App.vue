@@ -1,6 +1,6 @@
 <script setup>
 import { API_BASE } from './apiBase'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import MarketChart from './components/MarketChart.vue'
 import IndicatorManager from './components/IndicatorManager.vue'
 import AuthGate from './components/AuthGate.vue'
@@ -30,7 +30,7 @@ const analysisName = new URLSearchParams(window.location.search).get('name') || 
 const analysisMarket = new URLSearchParams(window.location.search).get('market') || ''
 const installedIndicators = computed(() => [...mainInstalled.value, ...subInstalled.value])
 const workspaceReady = ref(false)
-const workspaceHeights = ref(null)
+const workspaceHeights = ref({})
 const workspaceError = ref('')
 let workspaceGeneration = 0
 let workspaceSaveTimer
@@ -41,7 +41,7 @@ function resetWorkspaceSync() {
   workspaceGeneration += 1
   window.clearTimeout(workspaceSaveTimer)
   workspaceReady.value = false
-  workspaceHeights.value = null
+  workspaceHeights.value = {}
   workspaceError.value = ''
   workspaceDirty = false
 }
@@ -63,7 +63,8 @@ async function restoreAccountWorkspace() {
     subInstalled.value = restored.sub
     workspaceHeights.value = restored.paneHeights
     workspaceError.value = ''
-    workspaceReady.value = true
+    await nextTick()
+    if (generation === workspaceGeneration) workspaceReady.value = true
   } catch {
     if (generation === workspaceGeneration) workspaceError.value = 'workspaceLoadFailed'
     // A failed read must never overwrite the last valid server-side workspace.
