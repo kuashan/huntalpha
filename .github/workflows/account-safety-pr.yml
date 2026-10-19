@@ -34,9 +34,18 @@ jobs:
           python manage.py check
           python manage.py makemigrations --check --dry-run
           python manage.py test core formula_editor --noinput
-      - name: Validate narrow deployment migration and secret security guards
+      # Legacy guard is explicitly locked to the frozen production migration
+      # graph (up to 0012). Do not broaden its production allowlist in Task 005.2.
+      - name: Checkout V1.0.0 for legacy migration guard regression
+        uses: actions/checkout@v4
+        with:
+          ref: 924d6811d1eb3e22daff23f6bd3e941746f12884
+          path: frozen-legacy-guard
+      - name: Verify legacy migration guard against unchanged V1.0.0
+        working-directory: frozen-legacy-guard
+        run: python -m unittest discover -s deployment/web-admin/tests -p test_database_migration.py
+      - name: Verify unchanged deployment admin guards
         run: |
-          python -m unittest discover -s deployment/web-admin/tests -p test_database_migration.py
           python -m unittest discover -s deployment/web-admin/tests -p test_upgrade_web_admin.py
           bash deployment/web-admin/tests/test_web_admin.sh
 
