@@ -175,10 +175,17 @@ async function flushWorkspaceSave() {
       body: JSON.stringify(payload), signal: controller.signal,
     })
     if (reply.status === 403) {
-      if (generation === workspaceGeneration) {
-        await restoreWorkspace() // permissions changed; remove revoked codes without persisting stale state
+      // An expired session or CSRF error is NOT a membership downgrade.
+      // Preserve local edits; only a verified entitlement rejection may
+      // remove restricted indicators from the visible combination.
+      const detail = await reply.json().catch(() => ({}))
+      if (detail.code === 'indicator_not_allowed') {
+        if (generation === workspaceGeneration) {
+          await refreshIndicatorEntitlements()
+          workspaceError.value = t('workspaceSaveError')
+        }
+        return
       }
-      return
     }
     if (!reply.ok) throw new Error('保存失败')
     if (generation === workspaceGeneration) workspaceError.value = ''
