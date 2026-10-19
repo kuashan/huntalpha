@@ -66,7 +66,7 @@ class BuildkitProvenanceTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def _provenance(self, workflow_sha=COMMIT):
+    def _provenance(self, workflow_sha=COMMIT, event_name="push"):
         return {
             "buildDefinition": {
                 "buildType": "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
@@ -79,7 +79,7 @@ class BuildkitProvenanceTests(unittest.TestCase):
                     "github_workflow_sha": workflow_sha,
                     "github_run_id": RUN_ID,
                     "github_ref": SOURCE_REF,
-                    "github_event_name": "push",
+                    "github_event_name": event_name,
                 },
             },
             "runDetails": {"builder": {"id": "https://github.com/moby/buildkit"}, "metadata": {}},
@@ -108,6 +108,15 @@ class BuildkitProvenanceTests(unittest.TestCase):
     def test_accepts_provenance_bound_to_expected_workflow_run(self):
         result = self._run(self._provenance())
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_accepts_manual_workflow_dispatch_provenance(self):
+        result = self._run(self._provenance(event_name="workflow_dispatch"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_unexpected_workflow_event(self):
+        result = self._run(self._provenance(event_name="pull_request"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("OCI BuildKit provenance source identity mismatch", result.stderr)
 
     def test_rejects_provenance_from_a_different_workflow_source_commit(self):
         result = self._run(self._provenance(workflow_sha="0" * 40))

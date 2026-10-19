@@ -89,7 +89,7 @@ def main() -> None:
                 internal.get("github_workflow_sha") != commit,
                 str(internal.get("github_run_id")) != run_id,
                 internal.get("github_ref") != source_ref,
-                internal.get("github_event_name") != "push",
+                internal.get("github_event_name") not in {"push", "workflow_dispatch"},
             )
         ):
             fail("OCI BuildKit provenance source identity mismatch")
