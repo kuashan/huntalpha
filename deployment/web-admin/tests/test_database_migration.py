@@ -587,7 +587,14 @@ class RealAccountMigrationRehearsalTests(RealDjangoMigrationRehearsalTests):
                 connection.commit()
             finally:
                 connection.close()
-            state = self.guard().validate_probe_state(self._probe(baseline))
+            probe = self._probe(baseline)
+            if any(item["name"] == "core.0013_chartworkspace" for item in probe["pending"]):
+                # V1.0.0 production guard must reject the NEW unapproved schema.
+                # Review/allowlist of 0013 belongs to a separately authorized release.
+                with self.assertRaisesRegex(ValueError, "unapproved Django migration plan"):
+                    self.guard().validate_probe_state(probe)
+                return
+            state = self.guard().validate_probe_state(probe)
             self.assertEqual(state, {
                 "pending": ["core.0012_auth_verification"],
                 "applied": ["formula_editor.0002_fixedindicatorstate"],
