@@ -346,7 +346,7 @@ case "${1:-}" in
     [[ "${FAKE_GH_MODE:-ok}" == manifest-missing ]] && exit 0
     [[ "${FAKE_GH_MODE:-ok}" == manifest-mismatch ]] && digest='sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' || digest="$FAKE_DIGEST"
     [[ "${FAKE_GH_MODE:-ok}" == metadata-forged ]] && record_commit='deadbeef' || record_commit="$FAKE_COMMIT"
-    printf '{"image":"ghcr.io/kuashan/siftalpha-web","digest":"%s","source_commit":"%s","run_id":"%s","run_url":"https://github.com/kuashan/huntalpha/actions/runs/%s","ref":"release/siftalpha-web-v1","source_ref":"refs/heads/release/siftalpha-web-v1","workflow":"SiftAlpha Web CI and ARM64","platform":"linux/arm64","tags":["sha-%s","v1.0.0-sha-%s"],"provenance":"buildkit-oci-slsa"}\n' "$digest" "$record_commit" "$FAKE_RUN_ID" "$FAKE_RUN_ID" "$record_commit" "$record_commit" > "$destination/siftalpha-web-build-manifest.json"
+    printf '{"image":"ghcr.io/kuashan/siftalpha-web","digest":"%s","source_commit":"%s","run_id":"%s","run_url":"https://github.com/kuashan/huntalpha/actions/runs/%s","ref":"release/siftalpha-web-v1","source_ref":"refs/heads/release/siftalpha-web-v1","workflow":"SiftAlpha Web CI and ARM64","platform":"linux/arm64","tags":["sha-%s","v1.1.0-sha-%s"],"provenance":"buildkit-oci-slsa"}\n' "$digest" "$record_commit" "$FAKE_RUN_ID" "$FAKE_RUN_ID" "$record_commit" "$record_commit" > "$destination/siftalpha-web-build-manifest.json"
     ;;
   *) exit 1 ;;
 esac
