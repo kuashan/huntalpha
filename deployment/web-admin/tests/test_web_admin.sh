@@ -392,6 +392,7 @@ LOOPBACK_PORT=127.0.0.1:19091
 COMPOSE_FILE=$STATE_DIR/compose.yaml
 COMPOSE_TEMPLATE=$ROOT/deployment/web-admin/compose.yaml.template
 ENV_FILE=$TEST_ROOT/web-admin.env
+BREVO_ENV_FILE=$TEST_ROOT/secret/brevo.env
 STATE_DIR=$STATE_DIR
 BACKUP_DIR=$STATE_DIR/backups
 ROLLBACK_DIR=$STATE_DIR/rollbacks
@@ -406,6 +407,11 @@ PYTHON_BIN=python
 EOF
 printf 'test-token\n' > "$TEST_ROOT/github-token"
 printf 'DJANGO_SECRET_KEY=test-only\n' > "$TEST_ROOT/web-admin.env"
+mkdir -p "$TEST_ROOT/secret"
+chmod 700 "$TEST_ROOT/secret"
+printf 'BREVO_API_KEY=synthetic-not-real-key-for-tests-only\n' > "$TEST_ROOT/secret/brevo.env"
+chmod 600 "$TEST_ROOT/secret/brevo.env"
+
 
 python - "$DATA_DIR/db.sqlite3" <<'PY'
 import sqlite3
@@ -450,6 +456,21 @@ PY
 
 source "$LIB"
 load_config "$TEST_ROOT/web-admin.conf"
+assert_ok verify_brevo_secret_file
+chmod 644 "$BREVO_ENV_FILE"
+assert_fail verify_brevo_secret_file
+chmod 600 "$BREVO_ENV_FILE"
+printf 'BREVO_API_KEY=\n' > "$BREVO_ENV_FILE"
+assert_fail verify_brevo_secret_file
+printf 'BREVO_API_KEY=synthetic-not-real-key-for-tests-only\n' > "$BREVO_ENV_FILE"
+assert_ok verify_brevo_secret_file
+for template in "$ROOT/deployment/web-admin/compose.yaml.template" "$ROOT/deployment/web-admin/compose.selftest.yaml.template"; do
+  grep -F -- '- __BREVO_ENV_FILE__' "$template" >/dev/null || fail "Compose must inject Brevo secret only into website service"
+done
+assert_ok render_compose "$FAKE_DIGEST"
+grep -F "$BREVO_ENV_FILE" "$COMPOSE_FILE" >/dev/null || fail "rendered website Compose lacks secret env_file"
+
+
 PATH="$FAKE_BIN:$PATH"
 export PATH
 
@@ -533,6 +554,9 @@ assert_ok validate_command health
 assert_ok validate_command preflight "$FAKE_DIGEST"
 assert_ok validate_command deploy "$FAKE_DIGEST"
 assert_ok validate_command test-deploy "$FAKE_DIGEST"
+assert_ok validate_command upgrade "$FAKE_COMMIT"
+assert_fail validate_command upgrade "not-a-sha"
+assert_fail validate_command upgrade "${FAKE_COMMIT}extra"
 assert_ok validate_command rollback
 assert_fail validate_command deploy
 assert_fail validate_command preflight sha256:bad
@@ -734,6 +758,10 @@ for source_file in \
     || fail "deployment source must be archived with LF line endings: $source_file"
 done
 
+grep -F 'upgrade_web_admin.py' "$ROOT/deployment/web-admin/install-web-admin.sh" >/dev/null \
+  || fail "initial installer must deploy self-upgrade helper"
+grep -F 'deploy|rollback|test-deploy|upgrade' "$LIB" >/dev/null \
+  || fail "upgrade must participate in existing deployment operation lock"
 assert_ok "$ROOT/deployment/web-admin/install-web-admin.sh" --check
 
 printf 'web-admin contract: ok\n'

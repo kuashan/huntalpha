@@ -14,6 +14,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.http import FileResponse, JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
@@ -22,6 +23,8 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from formula_editor.models import Formula
 from formula_editor.fixed_indicators import installed_fixed_indicators, is_fixed_indicator_enabled
 from .models import AccountProfile, MarketSymbol, WatchlistEntry
+from .account_security import (RateLimited, VerificationUnavailable, client_ip, take_limit,
+                               limit_reached, clear_limit, issue_signup, resend_signup, claim_signup)
 from .account import (
     AvatarValidationError, account_avatar_url, account_display_name, account_preferences as account_preferences_data,
     delete_avatar, save_avatar,
@@ -327,43 +330,118 @@ def auth_body(request):
 @csrf_exempt
 @require_POST
 def auth_register(request):
+    # Account is not created until the email code is proven.
+    try:
+        if not take_limit("signup-ip", client_ip(request), 3, 600):
+            return json({"error": "注册请求过于频繁，请稍后再试"}, 429)
+    except OperationalError:
+        return json({"error": "注册暂时不可用，请稍后再试"}, 503)
     payload = auth_body(request)
     if not isinstance(payload, dict):
         return json({"error": "请求格式无效"}, 400)
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
     name = str(payload.get("name", "")).strip()
-    if not email or "@" not in email:
-        return json({"error": "请输入有效的邮箱地址"}, 400)
     if len(email) > 150:
         return json({"error": "邮箱地址过长"}, 400)
+    try:
+        validate_email(email)
+    except ValidationError:
+        return json({"error": "请输入有效的邮箱地址"}, 400)
     User = get_user_model()
     if User.objects.filter(email__iexact=email).exists() or User.objects.filter(username__iexact=email).exists():
         return json({"error": "该邮箱已经注册，请直接登录"}, 409)
     candidate = User(username=email, email=email, first_name=name[:150])
     try:
         validate_password(password, candidate)
+        issue_signup(email, password, name[:150])
     except ValidationError as exc:
         return json({"error": " ".join(exc.messages)}, 400)
-    candidate.set_password(password)
-    candidate.save()
+    except RateLimited:
+        return json({"error": "请等待 60 秒后再发送验证码"}, 429)
+    except VerificationUnavailable:
+        return json({"error": "验证邮件发送失败，请稍后重试"}, 503)
+    except OperationalError:
+        return json({"error": "注册暂时不可用，请稍后再试"}, 503)
+    return json({"status": "verification_required", "email": email}, 202)
+
+
+@csrf_exempt
+@require_POST
+def auth_resend_code(request):
+    try:
+        if not take_limit("signup-ip", client_ip(request), 3, 600):
+            return json({"error": "请求过于频繁，请稍后再试"}, 429)
+        payload = auth_body(request)
+        if not isinstance(payload, dict):
+            return json({"error": "请求格式无效"}, 400)
+        email = str(payload.get("email", "")).strip().lower()
+        if not email or len(email) > 150:
+            return json({"error": "邮箱格式无效"}, 400)
+        if not resend_signup(email):
+            return json({"error": "验证码已过期，请重新注册"}, 400)
+    except RateLimited:
+        return json({"error": "验证码发送过于频繁，请稍后再试"}, 429)
+    except VerificationUnavailable:
+        return json({"error": "验证邮件发送失败，请稍后重试"}, 503)
+    except OperationalError:
+        return json({"error": "验证码暂时不可用，请稍后再试"}, 503)
+    return json({"status": "sent"})
+
+
+@csrf_exempt
+@require_POST
+def auth_verify_email(request):
+    payload = auth_body(request)
+    if not isinstance(payload, dict):
+        return json({"error": "请求格式无效"}, 400)
+    email = str(payload.get("email", "")).strip().lower()
+    code = str(payload.get("code", "")).strip()
+    if not email or len(email) > 150 or len(code) != 6 or not code.isascii() or not code.isdigit():
+        return json({"error": "验证码无效"}, 400)
+    try:
+        user, status = claim_signup(email, code)
+    except (IntegrityError, OperationalError):
+        return json({"error": "验证暂时不可用，请稍后再试"}, 503)
+    if status == "expired":
+        return json({"error": "验证码已过期，请重新注册"}, 400)
+    if status == "locked":
+        return json({"error": "验证码输入次数过多，请重新注册"}, 429)
+    if status == "exists":
+        return json({"error": "该邮箱已经注册，请直接登录"}, 409)
+    if status == "invalid":
+        return json({"error": "验证码不正确"}, 400)
     request.session.pop("quantscope_visitor", None)
-    login(request, candidate)
-    return json({"authenticated": True, **account_tier_payload(candidate), "user": user_payload(candidate, request)}, 201)
+    login(request, user)
+    return json({"authenticated": True, **account_tier_payload(user), "user": user_payload(user, request)}, 201)
 
 
 @csrf_exempt
 @require_POST
 def auth_login(request):
+    try:
+        if not take_limit("login-ip", client_ip(request), 10, 60):
+            return json({"error": "登录请求过于频繁，请稍后重试"}, 429)
+    except OperationalError:
+        return json({"error": "登录暂时不可用，请稍后再试"}, 503)
     payload = auth_body(request)
     if not isinstance(payload, dict):
         return json({"error": "请求格式无效"}, 400)
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
-    User = get_user_model()
-    user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
-    if not user or not user.is_active or not user.check_password(password):
+    if len(email) > 150:
         return json({"error": "邮箱或密码不正确"}, 401)
+    try:
+        if limit_reached("login-account", email, 5):
+            return json({"error": "登录失败次数过多，请 15 分钟后再试"}, 429)
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
+        if not user or not user.is_active or not user.check_password(password):
+            take_limit("login-account", email, 5, 900)
+            return json({"error": "邮箱或密码不正确"}, 401)
+        clear_limit("login-account", email)
+    except OperationalError:
+        return json({"error": "登录暂时不可用，请稍后再试"}, 503)
     request.session.pop("quantscope_visitor", None)
     login(request, user)
     return json({"authenticated": True, **account_tier_payload(user), "user": user_payload(user, request)})

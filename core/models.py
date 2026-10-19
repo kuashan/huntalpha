@@ -192,3 +192,20 @@ class AccountMembership(models.Model):
 
     def __str__(self):
         return f"{self.user_id} · {self.tier.upper()}"
+
+class PendingEmailRegistration(models.Model):
+    """Unverified signups are NOT users and have no entitlements."""
+    email = models.EmailField(max_length=150, unique=True)
+    display_name = models.CharField(max_length=150, blank=True)
+    password_hash = models.CharField(max_length=128)
+    code_hash = models.CharField(max_length=128)
+    expires_at = models.DateTimeField()
+    sent_at = models.DateTimeField()
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+
+
+class AuthRateLimit(models.Model):
+    """Shared process-safe counters; keys are HMACs, never raw IPs/emails."""
+    key = models.CharField(max_length=64, primary_key=True)
+    count = models.PositiveIntegerField(default=0)
+    window_ends_at = models.DateTimeField()

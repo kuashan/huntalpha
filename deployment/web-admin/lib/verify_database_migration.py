@@ -23,6 +23,7 @@ from typing import Any
 
 APPROVED_MIGRATIONS = {
     "formula_editor.0002_fixedindicatorstate": "72514513ca8f6b801b2b68fef42f7b35e998c78d7cdcd9cd236e0dbffefa977a",
+    "core.0012_auth_verification": "2e02a54d4869e10dcb4da50a66a9656a63c2d120cd33ab8ec9cd757187effdc9",
 }
 PROTECTED_TABLES = (
     "auth_user",
@@ -90,7 +91,7 @@ def validate_probe_state(payload: Any) -> dict[str, list[str]]:
         raise _reject()
     pending = validate_plan({"pending": payload["pending"]})
     applied_payload = payload["applied"]
-    if not isinstance(applied_payload, list) or len(applied_payload) > 1:
+    if not isinstance(applied_payload, list) or len(applied_payload) > len(APPROVED_MIGRATIONS):
         raise _reject()
     applied: list[str] = []
     for item in applied_payload:
@@ -103,7 +104,10 @@ def validate_probe_state(payload: Any) -> dict[str, list[str]]:
         ):
             raise _reject()
         applied.append(item["name"])
-    if set(pending) & set(applied):
+    if set(pending) & set(applied) or len(set(applied)) != len(applied):
+        raise _reject()
+    # Account tables may only follow the already-reviewed Task 012 migration.
+    if "core.0012_auth_verification" in pending and "formula_editor.0002_fixedindicatorstate" not in applied:
         raise _reject()
     return {"pending": pending, "applied": applied}
 
@@ -259,7 +263,11 @@ def _validate_task012_permission_metadata(
 
 
 def validate_approved_migration_result(before_path: str | Path, after_path: str | Path) -> None:
-    """Allow only Task 012's empty table, history row, and exact Django metadata."""
+    """Allow only reviewed Task 012 or account schema and metadata additions."""
+    with closing(_connect_readonly(before_path)) as baseline, closing(_connect_readonly(after_path)) as candidate:
+        added = _table_names(candidate) - _table_names(baseline)
+    if added == {"core_authratelimit", "core_pendingemailregistration"}:
+        return _validate_core_0012_result(before_path, after_path)
     migration_name = "0002_fixedindicatorstate"
     new_table = "formula_editor_fixedindicatorstate"
     try:
@@ -392,6 +400,131 @@ def validate_approved_migration_result(before_path: str | Path, after_path: str 
         raise
     except (OSError, sqlite3.Error, IndexError, KeyError) as error:
         raise ValueError("approved migration result validation failed") from error
+
+
+
+# Exact reviewed SQL created by core.0012_auth_verification on SQLite.
+ACCOUNT_SCHEMA = {
+    "core_pendingemailregistration": (
+        'CREATE TABLE "core_pendingemailregistration" ("id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, '
+        '"email" varchar(150) NOT NULL UNIQUE, "display_name" varchar(150) NOT NULL, '
+        '"password_hash" varchar(128) NOT NULL, "code_hash" varchar(128) NOT NULL, '
+        '"expires_at" datetime NOT NULL, "sent_at" datetime NOT NULL, '
+        '"failed_attempts" smallint unsigned NOT NULL CHECK ("failed_attempts" >= 0))'
+    ),
+    "core_authratelimit": (
+        'CREATE TABLE "core_authratelimit" ("key" varchar(64) NOT NULL PRIMARY KEY, '
+        '"count" integer unsigned NOT NULL CHECK ("count" >= 0), '
+        '"window_ends_at" datetime NOT NULL)'
+    ),
+}
+
+
+def _validate_core_0012_result(before_path: str | Path, after_path: str | Path) -> None:
+    """Fail closed if account migration alters anything beyond its two empty tables and Django metadata."""
+    with closing(_connect_readonly(before_path)) as before, closing(_connect_readonly(after_path)) as after:
+        new_tables = set(ACCOUNT_SCHEMA)
+        old_tables = _table_names(before)
+        if _table_names(after) - old_tables != new_tables or old_tables - _table_names(after):
+            raise ValueError("unapproved account migration tables")
+        for table, sql in ACCOUNT_SCHEMA.items():
+            actual = after.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if not actual or _normalize_sql(actual[0]) != _normalize_sql(sql):
+                raise ValueError("unapproved account table schema")
+            if after.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]:
+                raise ValueError("account table is not initially empty")
+            objects = list(after.execute(
+                "SELECT type FROM sqlite_master WHERE tbl_name=? AND type NOT IN ('table', 'index')",
+                (table,),
+            ))
+            if objects:
+                raise ValueError("unapproved schema object attached to account table")
+            indexes = list(after.execute(f'PRAGMA index_list("{table}")'))
+            if len(indexes) != 1 or indexes[0][2] != 1 or indexes[0][3] not in ("u", "pk"):
+                raise ValueError("unapproved account index")
+            indexed = [r[2] for r in after.execute(f'PRAGMA index_info("{indexes[0][1]}")')]
+            if indexed != (["email"] if table == "core_pendingemailregistration" else ["key"]):
+                raise ValueError("unapproved account index columns")
+        if [row for row in _schema_rows(before) if row[2] not in new_tables] != [
+            row for row in _schema_rows(after) if row[2] not in new_tables
+        ]:
+            raise ValueError("account migration changed existing schema")
+        meta_tables = {"django_content_type", "auth_permission", "django_migrations", "sqlite_sequence"}
+        if not meta_tables.issubset(old_tables):
+            raise ValueError("Django metadata missing")
+        for table in meta_tables - {"sqlite_sequence"}:
+            if not _rows_equal_schema(before, after, table):
+                raise ValueError("Django metadata schema changed")
+        for table in old_tables - meta_tables:
+            if not _rows_equal(before, after, table):
+                raise ValueError("account migration modified pre-existing data")
+
+        ct_columns = [r[1] for r in before.execute('PRAGMA table_info("django_content_type")')]
+        ct_idx = {k: ct_columns.index(k) for k in ("id", "app_label", "model")}
+        old_ct, new_ct = (
+            Counter(db.execute("SELECT * FROM django_content_type")) for db in (before, after)
+        )
+        added_ct = list((new_ct - old_ct).elements())
+        if old_ct - new_ct or len(added_ct) != 2 or {
+            (r[ct_idx["app_label"]], r[ct_idx["model"]]) for r in added_ct
+        } != {("core", "pendingemailregistration"), ("core", "authratelimit")}:
+            raise ValueError("unapproved Django content types")
+        ct_ids = {r[ct_idx["model"]]: r[ct_idx["id"]] for r in added_ct}
+        if any(not isinstance(n, int) or n <= 0 for n in ct_ids.values()):
+            raise ValueError("invalid content type IDs")
+
+        perm_columns = [r[1] for r in before.execute('PRAGMA table_info("auth_permission")')]
+        perm_idx = {k: perm_columns.index(k) for k in ("id", "name", "content_type_id", "codename")}
+        old_perm, new_perm = (
+            Counter(db.execute("SELECT * FROM auth_permission")) for db in (before, after)
+        )
+        added_perm = list((new_perm - old_perm).elements())
+        expected = {
+            (ct_ids[model], f"{action}_{model}", f"Can {action} {friendly}")
+            for model, friendly in (
+                ("pendingemailregistration", "pending email registration"),
+                ("authratelimit", "auth rate limit"),
+            )
+            for action in ("add", "change", "delete", "view")
+        }
+        if old_perm - new_perm or len(added_perm) != 8 or {
+            (r[perm_idx["content_type_id"]], r[perm_idx["codename"]], r[perm_idx["name"]])
+            for r in added_perm
+        } != expected:
+            raise ValueError("unapproved Django permission changes")
+        permission_ids = [r[perm_idx["id"]] for r in added_perm]
+        if any(not isinstance(n, int) or n <= 0 for n in permission_ids):
+            raise ValueError("invalid permission IDs")
+
+        history_columns = [r[1] for r in before.execute('PRAGMA table_info("django_migrations")')]
+        h_idx = {k: history_columns.index(k) for k in ("id", "app", "name", "applied")}
+        old_history, new_history = (
+            Counter(db.execute("SELECT * FROM django_migrations")) for db in (before, after)
+        )
+        added_history = list((new_history - old_history).elements())
+        if old_history - new_history or len(added_history) != 1:
+            raise ValueError("unapproved migration history changes")
+        history = added_history[0]
+        if (history[h_idx["app"]], history[h_idx["name"]]) != ("core", "0012_auth_verification") or not history[h_idx["applied"]]:
+            raise ValueError("unapproved migration history entry")
+
+        old_seq = dict(before.execute("SELECT name,seq FROM sqlite_sequence"))
+        new_seq = dict(after.execute("SELECT name,seq FROM sqlite_sequence"))
+        expected_seq = {
+            "django_migrations": history[h_idx["id"]],
+            "django_content_type": max(ct_ids.values()),
+            "auth_permission": max(permission_ids),
+        }
+        if set(new_seq) != set(old_seq) | set(expected_seq):
+            raise ValueError("unapproved SQLite sequence changes")
+        for name in set(old_seq) | set(expected_seq):
+            if name in expected_seq:
+                if new_seq[name] != expected_seq[name] or expected_seq[name] < old_seq.get(name, 0):
+                    raise ValueError("invalid SQLite metadata sequence")
+            elif new_seq[name] != old_seq[name]:
+                raise ValueError("existing SQLite sequence changed")
 
 
 def _rows_equal_schema(before: sqlite3.Connection, after: sqlite3.Connection, table: str) -> bool:

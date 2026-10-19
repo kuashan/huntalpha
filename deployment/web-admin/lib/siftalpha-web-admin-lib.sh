@@ -16,7 +16,10 @@ readonly SIFTALPHA_WORKFLOW_PATH='.github/workflows/siftalpha-web-arm64.yml'
 readonly SIFTALPHA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SIFTALPHA_MIGRATION_GUARD="$SIFTALPHA_LIB_DIR/verify_database_migration.py"
 readonly SIFTALPHA_MIGRATION_PROBE="$SIFTALPHA_LIB_DIR/migration_probe.py"
+readonly SIFTALPHA_UPGRADER="$SIFTALPHA_LIB_DIR/upgrade_web_admin.py"
 readonly SIFTALPHA_APPROVED_MIGRATION='formula_editor.0002_fixedindicatorstate'
+readonly SIFTALPHA_ACCOUNT_MIGRATION='core.0012_auth_verification'
+readonly SIFTALPHA_BREVO_ENV_DEFAULT='/etc/siftalpha/secrets/brevo.env'
 readonly SIFTALPHA_COMPOSE_PROJECT_NAME='siftalpha-web'
 
 LAST_BACKUP_PATH=''
@@ -64,9 +67,10 @@ load_config() {
   unset IMAGE_REPOSITORY GITHUB_REPOSITORY GITHUB_WORKFLOW_NAME RELEASE_BRANCH
   unset LEGACY_CONTAINER COMPOSE_CONTAINER DATA_DIR DATABASE_PATH LOOPBACK_PORT COMPOSE_FILE COMPOSE_TEMPLATE ENV_FILE
   unset STATE_DIR BACKUP_DIR ROLLBACK_DIR RECOVERY_DIR DOCKER_CONFIG_DIR GITHUB_TOKEN_FILE GH_BIN GH_SHA256
-  unset DOCKER_BIN CURL_BIN PYTHON_BIN
+  unset DOCKER_BIN CURL_BIN PYTHON_BIN BREVO_ENV_FILE
   # shellcheck disable=SC1090
   source "$config_path"
+  BREVO_ENV_FILE="${BREVO_ENV_FILE:-$SIFTALPHA_BREVO_ENV_DEFAULT}"
   validate_config
 }
 
@@ -86,7 +90,7 @@ validate_config() {
   [[ "$COMPOSE_CONTAINER" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || { die 'unsafe Compose container name'; return 1; }
   [[ "$LEGACY_CONTAINER" != "$COMPOSE_CONTAINER" ]] || { die 'legacy and Compose container names must differ'; return 1; }
   [[ "$GH_SHA256" =~ ^[0-9a-f]{64}$ ]] || { die 'invalid GitHub CLI checksum'; return 1; }
-  for name in DATA_DIR DATABASE_PATH COMPOSE_FILE COMPOSE_TEMPLATE ENV_FILE STATE_DIR BACKUP_DIR ROLLBACK_DIR RECOVERY_DIR DOCKER_CONFIG_DIR GITHUB_TOKEN_FILE GH_BIN; do
+  for name in BREVO_ENV_FILE DATA_DIR DATABASE_PATH COMPOSE_FILE COMPOSE_TEMPLATE ENV_FILE STATE_DIR BACKUP_DIR ROLLBACK_DIR RECOVERY_DIR DOCKER_CONFIG_DIR GITHUB_TOKEN_FILE GH_BIN; do
     require_safe_absolute_path "$name" || return 1
   done
 }
@@ -94,11 +98,15 @@ validate_config() {
 validate_command() {
   case "$#:${1:-}" in
     1:status|1:health|1:rollback) return 0 ;;
+    2:upgrade)
+      [[ "$2" =~ ^[0-9a-f]{40}$ ]] || { die 'upgrade requires a complete lowercase Git commit SHA'; return 1; }
+      return 0
+      ;;
     2:preflight|2:deploy|2:test-deploy)
       [[ "$2" =~ $SIFTALPHA_DIGEST_PATTERN ]] || { die 'digest must be lowercase sha256:<64 hexadecimal characters>'; return 1; }
       return 0
       ;;
-    *) die 'usage: status | health | preflight <digest> | deploy <digest> | test-deploy <digest> | rollback' ;;
+    *) die 'usage: status | health | upgrade <commit-sha> | preflight <digest> | deploy <digest> | test-deploy <digest> | rollback' ;;
   esac
 }
 
@@ -321,6 +329,20 @@ PY
   printf 'backup path: %s\n' "$LAST_BACKUP_PATH"
 }
 
+verify_brevo_secret_file() {
+  local path="$BREVO_ENV_FILE" dir
+  dir="$(dirname -- "$path")"
+  [[ -f "$path" && ! -L "$path" && -d "$dir" && ! -L "$dir" ]] || { die 'Brevo secret file unavailable'; return 1; }
+  [[ "$(stat -c '%u %a' -- "$path")" == "$EUID 600" && "$(stat -c '%u %a' -- "$dir")" == "$EUID 700" ]] || { die 'Brevo secret permissions unsafe'; return 1; }
+  "$PYTHON_BIN" - "$path" <<'PY'
+from pathlib import Path
+import sys
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+if len(lines) != 1 or not lines[0].startswith("BREVO_API_KEY=") or len(lines[0].split("=", 1)[1]) < 20:
+    raise SystemExit("Brevo secret format invalid")
+PY
+}
+
 inspect_migration_plan() {
   local image="$1" database_path="$2" raw_plan validated_plan
   raw_plan="$(docker_cli run --rm --network none --read-only \
@@ -339,6 +361,10 @@ inspect_migration_plan() {
       LAST_MIGRATION_PLAN="[\"$SIFTALPHA_APPROVED_MIGRATION\"]"; LAST_APPLIED_MIGRATIONS='[]' ;;
     "{\"pending\":[],\"applied\":[\"$SIFTALPHA_APPROVED_MIGRATION\"]}")
       LAST_MIGRATION_PLAN='[]'; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\"]" ;;
+    "{\"pending\":[\"$SIFTALPHA_ACCOUNT_MIGRATION\"],\"applied\":[\"$SIFTALPHA_APPROVED_MIGRATION\"]}")
+      LAST_MIGRATION_PLAN="[\"$SIFTALPHA_ACCOUNT_MIGRATION\"]"; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\"]" ;;
+    "{\"pending\":[],\"applied\":[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]}")
+      LAST_MIGRATION_PLAN='[]'; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]" ;;
     *) die 'candidate migration plan validation returned an invalid result'; return 1 ;;
   esac
 }
@@ -650,6 +676,7 @@ restore_snapshot() {
   case "$migrations" in
     '[]') ;;
     "[\"$SIFTALPHA_APPROVED_MIGRATION\"]") ;;
+    "[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]") ;;
     *) die 'database migration history is not compatible with automatic rollback'; return 1 ;;
   esac
   if [[ "$migrations" != '[]' ]]; then
@@ -702,6 +729,10 @@ preflight_candidate() {
   LAST_MIGRATION_PLAN='[]'
   LAST_APPLIED_MIGRATIONS='[]'
   image="$(candidate_image "$digest")"
+  if ! verify_brevo_secret_file; then
+    audit_deployment_event preflight blocked "$digest" "$LAST_MIGRATION_PLAN" || true
+    return 1
+  fi
   if ! health_check; then
     audit_deployment_event preflight blocked "$digest" "$LAST_MIGRATION_PLAN" || true
     return 1
@@ -745,19 +776,20 @@ render_compose() {
   local digest="$1" image project_name="${COMPOSE_PROJECT_NAME:-$SIFTALPHA_COMPOSE_PROJECT_NAME}" self_test_network="${SELF_TEST_NETWORK_NAME:-}" self_test_id="${SELF_TEST_ID:-}"
   image="$(candidate_image "$digest")"
   [[ -r "$COMPOSE_TEMPLATE" ]] || { die 'Compose template is unavailable'; return 1; }
-  "$PYTHON_BIN" - "$COMPOSE_TEMPLATE" "$COMPOSE_FILE" "$image" "$COMPOSE_CONTAINER" "$DATA_DIR" "$ENV_FILE" "$LOOPBACK_PORT" "$self_test_network" "$self_test_id" <<'PY'
+  "$PYTHON_BIN" - "$COMPOSE_TEMPLATE" "$COMPOSE_FILE" "$image" "$COMPOSE_CONTAINER" "$DATA_DIR" "$ENV_FILE" "$BREVO_ENV_FILE" "$LOOPBACK_PORT" "$self_test_network" "$self_test_id" <<'PY'
 from pathlib import Path
 import sys
 
 template_path = Path(sys.argv[1])
 output_path = Path(sys.argv[2])
-image, container, data_dir, env_file, port, self_test_network, self_test_id = sys.argv[3:]
+image, container, data_dir, env_file, brevo_env_file, port, self_test_network, self_test_id = sys.argv[3:]
 content = template_path.read_text(encoding="utf-8")
 for key, value in {
     "__IMAGE_REFERENCE__": image,
     "__COMPOSE_CONTAINER__": container,
     "__DATA_DIR__": data_dir,
     "__ENV_FILE__": env_file,
+    "__BREVO_ENV_FILE__": brevo_env_file,
     "__LOOPBACK_PORT__": port,
     "__SELF_TEST_NETWORK__": self_test_network,
     "__SELF_TEST_ID__": self_test_id,
@@ -1089,8 +1121,12 @@ deploy_candidate() {
       die 'production migration promotion failed; website remains stopped for database-state review'
       return 1
     fi
+    local expected_applied="[\"$SIFTALPHA_APPROVED_MIGRATION\"]"
+    if [[ "$planned" == "[\"$SIFTALPHA_ACCOUNT_MIGRATION\"]" ]]; then
+      expected_applied="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]"
+    fi
     if ! inspect_migration_plan "$image" "$DATABASE_PATH" \
-      || [[ "$LAST_MIGRATION_PLAN" != '[]' || "$LAST_APPLIED_MIGRATIONS" != "[\"$SIFTALPHA_APPROVED_MIGRATION\"]" ]]; then
+      || [[ "$LAST_MIGRATION_PLAN" != '[]' || "$LAST_APPLIED_MIGRATIONS" != "$expected_applied" ]]; then
       cleanup_migration_workspace "$LAST_MIGRATION_WORKSPACE" || true
       audit_deployment_event deploy blocked "$digest" "$planned" || true
       die 'production migration state could not be verified; website remains stopped for operator review'
@@ -1155,7 +1191,7 @@ rollback() {
 web_admin_main() {
   validate_command "$@" || return 1
   case "$1" in
-    deploy|rollback|test-deploy)
+    deploy|rollback|test-deploy|upgrade)
       ensure_state_directories || return 1
       command -v flock >/dev/null 2>&1 || { die 'deployment lock utility is unavailable'; return 1; }
       exec 9>"$STATE_DIR/operation.lock" || { die 'cannot open deployment lock'; return 1; }
@@ -1166,6 +1202,11 @@ web_admin_main() {
     status) status ;;
     health) health_check; printf 'health: ok\n' ;;
     preflight) preflight_candidate "$2" ;;
+    upgrade)
+      verify_gh_binary || return 1
+      [[ -f "$SIFTALPHA_UPGRADER" && ! -L "$SIFTALPHA_UPGRADER" ]] || { die 'web-admin upgrade helper not installed'; return 1; }
+      "$PYTHON_BIN" "$SIFTALPHA_UPGRADER" "$2" "$GH_BIN" "$GITHUB_TOKEN_FILE" "$STATE_DIR/gh-cli-config" "$STATE_DIR/tool-backups"
+      ;;
     deploy) deploy_candidate "$2" ;;
     test-deploy) isolated_deploy_and_rollback_test "$2" ;;
     rollback) rollback ;;

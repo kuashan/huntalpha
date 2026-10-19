@@ -236,11 +236,12 @@ SECURE_HSTS_PRELOAD = _env_bool('HUNTALPHA_HSTS_PRELOAD')
 SIMPLEUI_CONFIG = {'system_keep': True}
 
 
-# Email
-# https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
-
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
-}
+# Signup verification uses Django 5.2's EMAIL_BACKEND setting.
+# Local development never sends real mail; production requires Brevo HTTPS API credentials.
+EMAIL_BACKEND = os.environ.get(
+    "HUNTALPHA_EMAIL_BACKEND",
+    "django.core.mail.backends.locmem.EmailBackend" if DEBUG else "core.mailers.BrevoEmailBackend",
+)
+DEFAULT_FROM_EMAIL = os.environ.get("HUNTALPHA_VERIFICATION_FROM_EMAIL", "mail@siftalpha.com")
+# Only enable after confirming the origin is reachable exclusively through trusted Cloudflare.
+HUNTALPHA_TRUST_CLOUDFLARE_IP = _env_bool("HUNTALPHA_TRUST_CLOUDFLARE_IP")

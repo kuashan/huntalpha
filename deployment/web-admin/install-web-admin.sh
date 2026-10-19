@@ -22,6 +22,7 @@ check_sources() {
     "$SCRIPT_DIR/lib/verify_buildkit_provenance.py" \
     "$SCRIPT_DIR/lib/verify_database_migration.py" \
     "$SCRIPT_DIR/lib/migration_probe.py" \
+    "$SCRIPT_DIR/lib/upgrade_web_admin.py" \
     "$SCRIPT_DIR/compose.yaml.template" \
     "$SCRIPT_DIR/compose.selftest.yaml.template" \
     "$SCRIPT_DIR/siftalpha-web-admin.conf.example" \
@@ -30,7 +31,7 @@ check_sources() {
     [[ -f "$file" ]] || die "missing source file: $file"
   done
   bash -n "$SCRIPT_DIR/siftalpha-web-admin" "$SCRIPT_DIR/lib/siftalpha-web-admin-lib.sh"
-  python3 - "$SCRIPT_DIR/lib/verify_database_migration.py" "$SCRIPT_DIR/lib/migration_probe.py" <<'PY'
+  python3 - "$SCRIPT_DIR/lib/verify_database_migration.py" "$SCRIPT_DIR/lib/migration_probe.py" "$SCRIPT_DIR/lib/upgrade_web_admin.py" <<'PY'
 import ast
 import pathlib
 import sys
@@ -66,6 +67,7 @@ install_files() {
   install -o root -g root -m 0750 "$SCRIPT_DIR/lib/verify_buildkit_provenance.py" "$LIB_DIR/verify_buildkit_provenance.py"
   install -o root -g root -m 0750 "$SCRIPT_DIR/lib/verify_database_migration.py" "$LIB_DIR/verify_database_migration.py"
   install -o root -g root -m 0750 "$SCRIPT_DIR/lib/migration_probe.py" "$LIB_DIR/migration_probe.py"
+  install -o root -g root -m 0750 "$SCRIPT_DIR/lib/upgrade_web_admin.py" "$LIB_DIR/upgrade_web_admin.py"
   install -o root -g root -m 0640 "$SCRIPT_DIR/compose.yaml.template" "$LIB_DIR/compose.yaml.template"
   install -o root -g root -m 0640 "$SCRIPT_DIR/compose.selftest.yaml.template" "$LIB_DIR/compose.selftest.yaml.template"
   if [[ ! -e "$CONFIG_PATH" ]]; then

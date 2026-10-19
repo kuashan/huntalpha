@@ -181,20 +181,25 @@ class AuthenticationApiTests(TestCase):
         self.assertIsNone(session.json()['tier_label'])
         self.assertIsNone(session.json()['watchlist_limit'])
 
-    def test_email_registration_creates_a_session(self):
-        response = self.client.post(
-            '/api/auth/register/',
-            data=json.dumps({'email': 'researcher@example.com', 'password': 'A-safe-password-42'}),
-            content_type='application/json',
-        )
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()['user']['email'], 'researcher@example.com')
-        self.assertEqual(response.json()['user']['tier'], 'free')
-        self.assertEqual(response.json()['user']['tier_label'], 'FREE')
-        self.assertEqual(response.json()['user']['watchlist_limit'], 10)
-        self.assertEqual(response.json()['tier'], 'free')
-        self.assertEqual(response.json()['tier_label'], 'FREE')
-        self.assertEqual(response.json()['watchlist_limit'], 10)
+    def test_email_registration_creates_session_only_after_verification(self):
+        import re
+        from django.core import mail
+        with override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+            response = self.client.post(
+                '/api/auth/register/',
+                data=json.dumps({'email': 'researcher@example.com', 'password': 'A-safe-password-42'}),
+                content_type='application/json',
+            )
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(self.client.get('/api/auth/session/').status_code, 401)
+            code = re.search(r'\b[0-9]{6}\b', mail.outbox[-1].body).group()
+            verified = self.client.post('/api/auth/verify-email/',
+                data=json.dumps({'email': 'researcher@example.com', 'code': code}),
+                content_type='application/json')
+        self.assertEqual(verified.status_code, 201)
+        self.assertEqual(verified.json()['user']['email'], 'researcher@example.com')
+        self.assertEqual(verified.json()['tier'], 'free')
+        self.assertEqual(verified.json()['watchlist_limit'], 10)
         self.assertEqual(self.client.get('/api/auth/session/').status_code, 200)
 
     def test_authenticated_tier_uses_free_without_a_real_pro_entitlement(self):

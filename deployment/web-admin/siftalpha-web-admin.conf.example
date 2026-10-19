@@ -12,6 +12,8 @@ LOOPBACK_PORT=127.0.0.1:19091
 COMPOSE_FILE=/srv/siftalpha/web-deployment/compose.yaml
 COMPOSE_TEMPLATE=/usr/local/libexec/siftalpha-web-admin/compose.yaml.template
 ENV_FILE=/etc/siftalpha-web-admin.env
+# Separate root-only email credential file; never copy its value into Git.
+BREVO_ENV_FILE=/etc/siftalpha/secrets/brevo.env
 STATE_DIR=/var/lib/siftalpha-web-admin
 BACKUP_DIR=/var/lib/siftalpha-web-admin/backups
 ROLLBACK_DIR=/var/lib/siftalpha-web-admin/rollbacks
