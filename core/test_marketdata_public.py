@@ -66,7 +66,11 @@ class PublicMarketDataProviderTests(TestCase):
                 }]},
             }], "error": None},
         }
-        with mock.patch.object(provider, "_request_chart", return_value=payload):
+        with mock.patch.object(provider, "_request_chart", return_value=payload), mock.patch.object(
+            TencentPublicMarketDataProvider, "quote", return_value={
+                "updated_at": "20261019153000", "open": 10, "high": 12, "low": 9, "price": 11
+            }
+        ):
             result = provider.fetch_window("SH.600519", "日线", now_ts=at(15, 30))
         self.assertEqual([bar["time"] for bar in result["completed"]], [session_start])
         self.assertIsNone(result["forming"])
