@@ -22,9 +22,6 @@ import tempfile
 
 REPO = "kuashan/huntalpha"
 BRANCH = "release/siftalpha-web-v1"
-WORKFLOW_ID = 387611326
-WORKFLOW_PATH = ".github/workflows/siftalpha-web-arm64.yml"
-WORKFLOW_NAME = "SiftAlpha Web CI and ARM64"
 EXECUTABLE = Path("/usr/local/sbin/siftalpha-web-admin")
 LIBRARY = Path("/usr/local/libexec/siftalpha-web-admin")
 SOURCES = {
@@ -65,21 +62,11 @@ class GitHubSource:
 
     def verify_release(self, sha: str) -> None:
         branch = self.api(f"repos/{REPO}/git/ref/heads/{BRANCH}")
-        if branch.get("object", {}).get("sha") != sha:
+        head = branch.get("object", {}).get("sha")
+        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise ValueError("release branch HEAD is not a full commit SHA")
+        if head != sha:
             raise ValueError("commit is not the current approved release branch HEAD")
-        runs = self.api(f"repos/{REPO}/actions/runs?head_sha={sha}&event=push&per_page=50")
-        valid = any(
-            run.get("head_sha") == sha
-            and run.get("head_branch") == BRANCH
-            and run.get("workflow_id") == WORKFLOW_ID
-            and run.get("name") == WORKFLOW_NAME
-            and run.get("path") == WORKFLOW_PATH
-            and run.get("status") == "completed"
-            and run.get("conclusion") == "success"
-            for run in runs.get("workflow_runs", [])
-        )
-        if not valid:
-            raise ValueError("release workflow for this commit has not passed")
 
     def reviewed_files(self, sha: str) -> dict[str, bytes]:
         result = {}

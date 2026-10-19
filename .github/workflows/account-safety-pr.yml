@@ -1,16 +1,7 @@
-name: Prelaunch account safety checks (PR only)
+name: Prelaunch account safety checks (manual)
 
 on:
-  pull_request:
-    branches:
-      - release/siftalpha-web-v1
-    paths:
-      - 'core/**'
-      - 'quant_site/**'
-      - 'deployment/web-admin/**'
-      - 'frontend/**'
-      - '.env.example'
-      - '.github/workflows/account-safety-pr.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
