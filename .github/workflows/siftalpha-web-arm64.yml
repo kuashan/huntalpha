@@ -53,6 +53,8 @@ jobs:
           npm run test:indicators
           npm run test:realtime
           npm run test:chart
+          npm run test:workspace
+          node src/components/SiteVersionFooter.test.mjs
           npm run build
 
       - uses: docker/setup-qemu-action@v3
