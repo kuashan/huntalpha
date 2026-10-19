@@ -115,3 +115,43 @@ class AccountWorkspaceTests(TestCase):
             content_type="application/json", HTTP_X_CSRFTOKEN=token,
         )
         self.assertEqual(response.status_code, 200)
+
+
+    def test_admin_downgrade_immediately_removes_revoked_codes_without_login(self):
+        User = get_user_model()
+        admin_user = User.objects.create_superuser(
+            username="workspace-admin@example.com", email="workspace-admin@example.com",
+            password="admin-password",
+        )
+        AccountMembership.objects.filter(user=self.member).update(tier="pro")
+        self.put({"main": [self.private.code, "MA"], "sub": [], "heights": {}})
+        self.assertIn(self.private.code, ChartWorkspace.objects.get(user=self.member).state["main"])
+
+        membership = AccountMembership.objects.get(user=self.member)
+        self.client.force_login(admin_user)
+        response = self.client.post(
+            f"/admin/auth/user/{self.member.pk}/change/",
+            {
+                "username": self.member.username,
+                "email": self.member.email,
+                "first_name": self.member.first_name,
+                "last_name": self.member.last_name,
+                "is_active": "on",
+                "date_joined_0": self.member.date_joined.strftime("%Y-%m-%d"),
+                "date_joined_1": self.member.date_joined.strftime("%H:%M:%S"),
+                "account_membership-TOTAL_FORMS": "1",
+                "account_membership-INITIAL_FORMS": "1",
+                "account_membership-MIN_NUM_FORMS": "0",
+                "account_membership-MAX_NUM_FORMS": "1",
+                "account_membership-0-id": str(membership.pk),
+                "account_membership-0-user": str(self.member.pk),
+                "account_membership-0-tier": "free",
+                "_save": "Save",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(AccountMembership.objects.get(user=self.member).tier, "free")
+        self.assertEqual(
+            ChartWorkspace.objects.get(user=self.member).state,
+            {"main": ["MA"], "sub": [], "heights": {}},
+        )
