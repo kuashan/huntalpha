@@ -10,6 +10,7 @@ import AccountPopover from './components/AccountPopover.vue'
 import PersonalCenter from './components/PersonalCenter.vue'
 import SiteVersionFooter from './components/SiteVersionFooter.vue'
 import { commonIndicators, markets } from './data/marketData'
+import { restoreIndicatorItems, workspacePayload } from './workspaceSettings.mjs'
 import { languages, locale, setLocale, t } from './i18n'
 const market = ref(markets[0]); const query = ref(''); const symbols = ref([]); const selected = ref(null); const period = ref('日线'); const mainInstalled = ref([]); const subInstalled = ref([]); const manager = ref(null)
 const user = ref(null); const visitor = ref(false); const checkingSession = ref(true); const quotes = ref({})
@@ -28,6 +29,85 @@ const analysisCode = new URLSearchParams(window.location.search).get('analysis')
 const analysisName = new URLSearchParams(window.location.search).get('name') || analysisCode
 const analysisMarket = new URLSearchParams(window.location.search).get('market') || ''
 const installedIndicators = computed(() => [...mainInstalled.value, ...subInstalled.value])
+const workspaceReady = ref(false)
+const workspaceHeights = ref(null)
+const workspaceError = ref('')
+let workspaceGeneration = 0
+let workspaceSaveTimer
+let workspaceSaveInFlight = false
+let workspaceDirty = false
+
+function resetWorkspaceSync() {
+  workspaceGeneration += 1
+  window.clearTimeout(workspaceSaveTimer)
+  workspaceReady.value = false
+  workspaceHeights.value = null
+  workspaceError.value = ''
+  workspaceDirty = false
+}
+
+async function restoreAccountWorkspace() {
+  if (!user.value || visitor.value) return
+  const generation = ++workspaceGeneration
+  workspaceReady.value = false
+  try {
+    const [indicatorReply, workspaceReply] = await Promise.all([
+      fetch(`${API_BASE}/api/indicators/`, { credentials: 'include', cache: 'no-store' }),
+      fetch(`${API_BASE}/api/account/workspace/`, { credentials: 'include', cache: 'no-store' }),
+    ])
+    if (!indicatorReply.ok || !workspaceReply.ok) throw new Error('workspace load unavailable')
+    const [indicators, saved] = await Promise.all([indicatorReply.json(), workspaceReply.json()])
+    if (generation !== workspaceGeneration || !user.value || visitor.value) return
+    const restored = restoreIndicatorItems(saved.workspace, indicators.items)
+    mainInstalled.value = restored.main
+    subInstalled.value = restored.sub
+    workspaceHeights.value = restored.paneHeights
+    workspaceError.value = ''
+    workspaceReady.value = true
+  } catch {
+    if (generation === workspaceGeneration) workspaceError.value = 'workspaceLoadFailed'
+    // A failed read must never overwrite the last valid server-side workspace.
+  }
+}
+
+function scheduleWorkspaceSave() {
+  if (!workspaceReady.value || !user.value || visitor.value) return
+  workspaceDirty = true
+  window.clearTimeout(workspaceSaveTimer)
+  workspaceSaveTimer = window.setTimeout(saveAccountWorkspace, 650)
+}
+
+async function saveAccountWorkspace() {
+  if (!workspaceDirty || workspaceSaveInFlight || !workspaceReady.value || !user.value || visitor.value) return
+  workspaceDirty = false
+  workspaceSaveInFlight = true
+  const generation = workspaceGeneration
+  const body = workspacePayload(mainInstalled.value, subInstalled.value, workspaceHeights.value)
+  try {
+    const reply = await fetch(`${API_BASE}/api/account/workspace/`, {
+      method: 'PUT', credentials: 'include',
+      headers: { 'Content-Type': 'application/json', ...await csrfHeaders() },
+      body: JSON.stringify(body),
+    })
+    if (!reply.ok) throw new Error('workspace save failed')
+    if (generation === workspaceGeneration) workspaceError.value = ''
+  } catch {
+    if (generation === workspaceGeneration) workspaceError.value = 'workspaceSaveFailed'
+    // Keep the current on-screen configuration. Retry only after another edit.
+  } finally {
+    workspaceSaveInFlight = false
+    if (workspaceDirty && generation === workspaceGeneration) {
+      window.clearTimeout(workspaceSaveTimer)
+      workspaceSaveTimer = window.setTimeout(saveAccountWorkspace, 650)
+    }
+  }
+}
+function onPaneHeightsChanged(heights) {
+  if (!workspaceReady.value || visitor.value) return
+  workspaceHeights.value = heights
+  scheduleWorkspaceSave()
+}
+watch([mainInstalled, subInstalled], scheduleWorkspaceSave)
 const visibleMarkets = computed(() => markets)
 const indexMarketLayout = { cn: ['上证指数', '深证成指'], hk: ['恒生指数', '恒生科技指数'], us: ['标普500', '纳斯达克综合指数', '道琼斯工业平均指数'] }
 const cryptoOverviewRows = [{ code: 'CC.BTC-USD', name: 'BTC' }, { code: 'CC.ETH-USD', name: 'ETH' }]
@@ -130,6 +210,11 @@ async function refreshIndicatorEntitlements() {
     const allowed = new Set((payload.items || []).filter(item => item.allowed !== false).map(item => item.code))
     mainInstalled.value = mainInstalled.value.filter(item => allowed.has(item.code))
     subInstalled.value = subInstalled.value.filter(item => allowed.has(item.code))
+    // The account workspace endpoint also permanently removes revoked codes
+    // from stored settings, even when another device is currently active.
+    if (workspaceReady.value && !visitor.value) {
+      await fetch(`${API_BASE}/api/account/workspace/`, { credentials: 'include', cache: 'no-store' })
+    }
   } catch { /* Keep chart data unchanged on transient connection failures. */ }
 }
 function addIndicator(item) { if (item.allowed === false || (visitor.value && !item.visitor_available)) return; const list = item.placement === 'main' ? mainInstalled : subInstalled; if (item.placement === 'sub' && !list.value.some(current => current.code === item.code) && list.value.length >= 3) return; if (!list.value.some(current => current.code === item.code)) list.value = [...list.value, item] }
@@ -144,7 +229,7 @@ function applyInitialPreferences(currentUser) {
 }
 function handleUserUpdated(updatedUser) { if (updatedUser) { user.value = { ...user.value, ...updatedUser }; refreshIndicatorEntitlements() } }
 function handlePreferencesUpdated(preferences) { if (preferences?.price_color_mode) priceColorMode.value = preferences.price_color_mode; user.value = { ...user.value, preferences: { ...(user.value?.preferences || {}), ...preferences } } }
-function authenticated(currentUser) { applyInitialPreferences(currentUser); user.value = currentUser; visitor.value = Boolean(currentUser.visitor); refreshIndicatorEntitlements(); if (window.location.pathname !== '/' || window.location.search) window.history.replaceState({}, '', '/'); syncRoute() }
+function authenticated(currentUser) { resetWorkspaceSync(); applyInitialPreferences(currentUser); user.value = currentUser; visitor.value = Boolean(currentUser.visitor); refreshIndicatorEntitlements(); if (!visitor.value) void restoreAccountWorkspace(); if (window.location.pathname !== '/' || window.location.search) window.history.replaceState({}, '', '/'); syncRoute() }
 function syncRoute() { const next = routeFromLocation(); route.value = next.page; accountSection.value = next.section }
 function navigateToAccount(section = 'overview') { const next = accountSections.includes(section) ? section : 'overview'; window.history.pushState({}, '', next === 'overview' ? '/account' : `/account?section=${encodeURIComponent(next)}`); syncRoute(); stopMarketIndexRefresh() }
 function navigateToTerminal() { window.history.pushState({}, '', '/'); syncRoute(); if (user.value) { loadSymbols(); startMarketIndexRefresh() } }
@@ -152,7 +237,7 @@ function toggleCommon(item) { const active = (item.placement === 'main' ? mainIn
 function openAiAnalysis() { const url = `/?analysis=${encodeURIComponent(selected.value.code)}&name=${encodeURIComponent(selected.value.name)}&market=${encodeURIComponent(market.value.name)}`; window.open(url, '_blank', 'noopener') }
 async function requestAiAccess() { if (!visitor.value) return openAiAnalysis(); await fetch(`${API_BASE}/api/auth/logout/`, { method: 'POST', credentials: 'include' }); user.value = null; visitor.value = false; window.location.assign('/?register=1') }
 function backToTerminal() { window.location.assign('/') }
-async function signOut() { await fetch(`${API_BASE}/api/auth/logout/`, { method: 'POST', credentials: 'include' }); user.value = null; visitor.value = false; initialPreferencesApplied = false; mainInstalled.value = []; subInstalled.value = []; symbols.value = []; selected.value = null; watchlistTotal.value = null; watchlistLimit.value = null; watchlistRemaining.value = null; watchlistError.value = ''; navigateToTerminal() }
+async function signOut() { resetWorkspaceSync(); await fetch(`${API_BASE}/api/auth/logout/`, { method: 'POST', credentials: 'include' }); user.value = null; visitor.value = false; initialPreferencesApplied = false; mainInstalled.value = []; subInstalled.value = []; symbols.value = []; selected.value = null; watchlistTotal.value = null; watchlistLimit.value = null; watchlistRemaining.value = null; watchlistError.value = ''; navigateToTerminal() }
 async function refreshQuotes(items) {
   const version = ++quoteRequestVersion
   const selectedCode = selected.value?.code
@@ -288,8 +373,8 @@ watch(user, currentUser => {
   else { symbolRequestVersion += 1; quoteRequestVersion += 1; indexRequestVersion += 1; stopMarketIndexRefresh(); indexSnapshots.value = []; quotes.value = {}; symbols.value = []; selected.value = null; watchlistTotal.value = null; watchlistLimit.value = null; watchlistRemaining.value = null }
 })
 function handleRouteChange() { syncRoute(); if (route.value === 'terminal' && user.value) { loadSymbols(); startMarketIndexRefresh(); refreshIndicatorEntitlements() } else stopMarketIndexRefresh() }
-onMounted(async () => { syncRoute(); document.addEventListener('visibilitychange', handleVisibilityChange); window.addEventListener('popstate', handleRouteChange); try { const reply = await fetch(`${API_BASE}/api/auth/session/`, { credentials: 'include' }); const data = await reply.json(); if (reply.ok && data.authenticated) { applyInitialPreferences(data.user); user.value = data.user; visitor.value = Boolean(data.visitor) ; await refreshIndicatorEntitlements() } } catch {} finally { checkingSession.value = false } entitlementRefreshTimer = window.setInterval(refreshIndicatorEntitlements, 30000) })
-onBeforeUnmount(() => { window.clearInterval(entitlementRefreshTimer); window.clearTimeout(searchTimer); stopMarketIndexRefresh(); document.removeEventListener('visibilitychange', handleVisibilityChange); window.removeEventListener('popstate', handleRouteChange) })
+onMounted(async () => { syncRoute(); document.addEventListener('visibilitychange', handleVisibilityChange); window.addEventListener('popstate', handleRouteChange); try { const reply = await fetch(`${API_BASE}/api/auth/session/`, { credentials: 'include' }); const data = await reply.json(); if (reply.ok && data.authenticated) { applyInitialPreferences(data.user); user.value = data.user; visitor.value = Boolean(data.visitor); await refreshIndicatorEntitlements(); if (!visitor.value) await restoreAccountWorkspace() } } catch {} finally { checkingSession.value = false } entitlementRefreshTimer = window.setInterval(refreshIndicatorEntitlements, 30000) })
+onBeforeUnmount(() => { resetWorkspaceSync(); window.clearInterval(entitlementRefreshTimer); window.clearTimeout(searchTimer); stopMarketIndexRefresh(); document.removeEventListener('visibilitychange', handleVisibilityChange); window.removeEventListener('popstate', handleRouteChange) })
 </script>
 <template>
   <div v-if="checkingSession" class="boot-screen">SiftAlpha…</div>
@@ -302,7 +387,7 @@ onBeforeUnmount(() => { window.clearInterval(entitlementRefreshTimer); window.cl
     <div class="workspace"><aside><div class="aside-title" :title="watchlistRemaining == null ? '' : `${watchlistRemaining} ${t('watchlistRemaining')}`"><span>{{ t('watchlistList') }}</span><b>{{ watchlistTotal == null ? '—' : watchlistTotal }} / {{ watchlistLimit == null ? '—' : watchlistLimit }}</b></div><label class="search">⌕ <input v-model="query" :placeholder="t('search')" /></label><div class="heads"><span>{{ t('nameCode') }}</span><span>{{ t('latest') }}</span><span>{{ t('change') }}</span><span aria-label="收藏">☆</span></div><div v-for="item in list" :key="item.code" class="symbol" :class="{selected: selected?.code === item.code}" :title="symbolTitle(item)" :aria-label="symbolTitle(item)" role="button" tabindex="0" @click="selectSymbol(item)" @keydown.enter.prevent="selectSymbol(item)"><span class="symbol-name"><strong>{{ item.name }}</strong><small class="symbol-meta"><span class="symbol-code">{{ item.code }}</span><span class="market-label" :title="marketTitle(item.market)">{{ marketName(item.market) }}</span></small></span><b :style="marketChangeStyle(itemQuote(item)?.change)">{{ displayPrice(itemQuote(item)?.price) }}</b><em :style="marketChangeStyle(itemQuote(item)?.change)" :class="{down:itemQuote(item)?.change < 0}">{{ displayChange(itemQuote(item)?.change) }}</em><button type="button" class="star" :class="{active:item.watchlisted}" :aria-label="item.watchlisted ? t('watchlistUnstar') : t('watchlistStar')" :aria-pressed="item.watchlisted" @click.stop="toggleWatchlist(item)">{{ item.watchlisted ? '★' : '☆' }}</button></div><p v-if="catalogStatusText">{{ catalogStatusText }}</p><p v-if="!catalogLoading && !list.length && !catalogStatusText" class="watchlist-empty">{{ emptyWatchlistText }}<small v-if="!query.trim()">{{ market.code === 'crypto' ? '搜索 BTC 或 ETH 并点击 ☆ 添加' : t('watchlistSearchHint') }}</small></p><p v-if="watchlistError" class="watchlist-message">{{ watchlistError }}</p></aside>
       <section class="content"><div class="security"><div><p>{{ marketTitle(selected?.market || market.code) }} · {{ quoteStatusText }}</p><h1>{{ selected?.name || '—' }} <small>{{ selected?.code || '' }}</small><button v-if="selected && !selected.code.startsWith('CC.')" class="ai-button" @click="requestAiAccess">AI 分析</button></h1></div><div class="price"><strong :style="marketChangeStyle(quoteData?.change)">{{ displayPrice(quoteData?.price) }}</strong><span :style="marketChangeStyle(quoteData?.change)" :class="{down:quoteData?.change < 0}">{{ displayChange(quoteData?.change) }}</span></div><dl><div><dt>{{ t('open') }}</dt><dd>{{ displayPrice(quoteData?.open) }}</dd></div><div><dt>{{ t('high') }}</dt><dd>{{ displayPrice(quoteData?.high) }}</dd></div><div><dt>{{ t('low') }}</dt><dd>{{ displayPrice(quoteData?.low) }}</dd></div></dl></div>
         <div class="toolbar"><div><button v-for="item in ['分时','1分','5分','15分','30分','60分','2小时','4小时','日线','周线','月线']" :key="item" :class="{active:period === item}" @click="period=item">{{ item }}</button></div><div class="common-tools"><button v-for="item in commonIndicators" :key="item.code" :class="{on:installedIndicators.some(current=>current.code===item.code)}" @click="toggleCommon(item)">{{item.name}}</button><button @click="manager.open()">{{ t('manager') }}</button></div></div>
-        <div class="labels"><span>{{ t('main') }}{{ mainInstalled.map(item => item.name).join(' · ') || t('candle') }}</span></div><MarketChart v-if="selected" :symbol="selected" :period="period" :installed-indicators="installedIndicators" :market-color-tokens="marketColorTokens" @indicator-denied="removeIndicator" /><div v-else class="catalog-empty">{{ catalogStatusText }}</div><footer>{{ t('disclaimer') }}</footer>
+        <div class="labels"><span>{{ t('main') }}{{ mainInstalled.map(item => item.name).join(' · ') || t('candle') }}</span><small v-if="workspaceError" role="status">{{ t(workspaceError) }}</small></div><MarketChart v-if="selected" :symbol="selected" :period="period" :installed-indicators="installedIndicators" :market-color-tokens="marketColorTokens" :workspace-heights="visitor ? null : workspaceHeights" @pane-heights-change="onPaneHeightsChanged" @indicator-denied="removeIndicator" /><div v-else class="catalog-empty">{{ catalogStatusText }}</div><footer>{{ t('disclaimer') }}</footer>
       </section></div>
     <IndicatorManager ref="manager" :main="mainInstalled" :sub="subInstalled" :visitor="visitor" @add="addIndicator" @remove="removeIndicator" />
     <SiteVersionFooter />
