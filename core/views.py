@@ -53,6 +53,7 @@ from .realtime.formula_scheduler import FormulaRunRegistry, calculation_input_fi
 from .realtime.provider import REALTIME_PERIOD_SUBTYPES
 from .symbol_catalog import COINBASE_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 from .watchlist import account_tier_payload, active_watchlist_entry_ids, watchlist_limit_for_user, resolve_account_tier
+from .workspace import read_workspace, write_workspace, WorkspaceValidationError
 from .python_indicators import (
     PythonIndicatorExecutionError,
     PythonIndicatorRuntimeUnavailable,
@@ -280,6 +281,20 @@ def account_preferences(request):
         profile.save(update_fields=[*payload.keys(), "updated_at"])
     preferences = account_preferences_data(request.user, profile)
     return json({"status": "ok", "preferences": preferences, "user": user_payload(request.user, request)})
+
+
+@require_http_methods(["GET", "PUT"])
+@api_account_required
+def account_workspace(request):
+    """Account-global indicator selection and sub-pane sizing, never calculated drawing data."""
+    if request.method == "GET":
+        return json({"workspace": read_workspace(request.user, COMMON_INDICATORS)})
+    payload = auth_body(request)
+    try:
+        workspace = write_workspace(request.user, payload, COMMON_INDICATORS)
+    except WorkspaceValidationError:
+        return json({"error": "工作区设置格式无效", "code": "invalid_workspace"}, 400)
+    return json({"status": "ok", "workspace": workspace})
 
 
 @require_http_methods(["POST", "DELETE"])

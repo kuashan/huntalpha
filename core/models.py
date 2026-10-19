@@ -167,6 +167,23 @@ class AccountProfile(models.Model):
         return f"账户 {self.user_id}"
 
 
+class AccountWorkspace(models.Model):
+    """A single durable chart configuration per real account; no market data or Formula source."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, primary_key=True, on_delete=models.CASCADE,
+        related_name="chart_workspace",
+    )
+    main_indicators = models.JSONField(default=list)
+    sub_indicators = models.JSONField(default=list)
+    sub_pane_heights = models.JSONField(default=dict)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "账户图表工作区"
+        verbose_name_plural = "账户图表工作区"
+
+
 class AccountMembership(models.Model):
     """The authoritative persisted FREE/PRO tier, independent of staff flags."""
 
