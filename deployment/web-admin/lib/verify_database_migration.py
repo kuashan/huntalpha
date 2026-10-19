@@ -579,6 +579,13 @@ def _validate_core_0013_result(before_path: str | Path, after_path: str | Path) 
             (0, 0, "auth_user", "user_id", "id", "NO ACTION", "NO ACTION", "NONE")
         ]:
             raise ValueError("unapproved workspace foreign key")
+        # The comparison excludes the new table; reject attached triggers and views.
+        attached = list(after.execute(
+            "SELECT type FROM sqlite_master WHERE tbl_name=? AND type NOT IN ('table', 'index')",
+            (new_table,),
+        ))
+        if attached:
+            raise ValueError("unapproved workspace schema object")
         if after.execute('SELECT COUNT(*) FROM "core_chartworkspace"').fetchone()[0] != 0:
             raise ValueError("workspace table is not initially empty")
         if [r for r in _schema_rows(before) if r[2] != new_table] != [
