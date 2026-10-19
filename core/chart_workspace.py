@@ -105,8 +105,10 @@ def validate_workspace(payload, catalog):
         if not isinstance(code, str) or not code or len(code) > 100 or code in seen:
             raise InvalidWorkspace("指标代码无效或重复")
         seen.add(code)
-        if catalog.get(code) != placement:
-            raise WorkspacePermissionDenied("指标已停用、无权限或位置无效，请刷新后重试")
+        if code not in catalog:
+            raise WorkspacePermissionDenied("指标已停用或无权限，请刷新后重试")
+        if catalog[code] != placement:
+            raise InvalidWorkspace("指标所在主图或副图位置无效")
     if set(heights) - set(sub):
         raise InvalidWorkspace("只允许保存当前副图的高度")
     for value in heights.values():
