@@ -40,6 +40,7 @@ approved_applied = []
 for approved_key in (
     ("formula_editor", "0002_fixedindicatorstate"),
     ("core", "0012_auth_verification"),
+    ("core", "0013_chartworkspace"),
 ):
     if approved_key in executor.loader.applied_migrations:
         module = importlib.import_module(f"{approved_key[0]}.migrations.{approved_key[1]}")

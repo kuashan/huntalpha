@@ -755,6 +755,10 @@ approved_account_history='["formula_editor.0002_fixedindicatorstate","core.0012_
 assert_ok record_snapshot_database_state "$account_snapshot" "$approved_account_history"
 [[ "$(snapshot_value "$account_snapshot" database_migrations)" == "$approved_account_history" ]] \
   || fail "approved account migration was not recorded in rollback metadata"
+approved_workspace_history='["formula_editor.0002_fixedindicatorstate","core.0012_auth_verification","core.0013_chartworkspace"]'
+assert_ok record_snapshot_database_state "$account_snapshot" "$approved_workspace_history"
+[[ "$(snapshot_value "$account_snapshot" database_migrations)" == "$approved_workspace_history" ]] \
+  || fail "approved workspace migration was not recorded in rollback metadata"
 assert_fail record_snapshot_database_state "$account_snapshot" '["core.9999_unreviewed"]'
 
 for source_file in \

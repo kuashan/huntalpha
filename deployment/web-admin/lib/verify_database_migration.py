@@ -24,6 +24,7 @@ from typing import Any
 APPROVED_MIGRATIONS = {
     "formula_editor.0002_fixedindicatorstate": "72514513ca8f6b801b2b68fef42f7b35e998c78d7cdcd9cd236e0dbffefa977a",
     "core.0012_auth_verification": "2e02a54d4869e10dcb4da50a66a9656a63c2d120cd33ab8ec9cd757187effdc9",
+    "core.0013_chartworkspace": "e398a835684bbf3fd216fc57a6539f2f990d92b9862f0f9f96a17974c4ff2cea",
 }
 PROTECTED_TABLES = (
     "auth_user",
@@ -108,6 +109,10 @@ def validate_probe_state(payload: Any) -> dict[str, list[str]]:
         raise _reject()
     # Account tables may only follow the already-reviewed Task 012 migration.
     if "core.0012_auth_verification" in pending and "formula_editor.0002_fixedindicatorstate" not in applied:
+        raise _reject()
+    if "core.0013_chartworkspace" in pending and "core.0012_auth_verification" not in applied:
+        raise _reject()
+    if "core.0013_chartworkspace" in applied and "core.0012_auth_verification" not in applied:
         raise _reject()
     return {"pending": pending, "applied": applied}
 
@@ -268,6 +273,8 @@ def validate_approved_migration_result(before_path: str | Path, after_path: str 
         added = _table_names(candidate) - _table_names(baseline)
     if added == {"core_authratelimit", "core_pendingemailregistration"}:
         return _validate_core_0012_result(before_path, after_path)
+    if added == {"core_chartworkspace"}:
+        return _validate_core_0013_result(before_path, after_path)
     migration_name = "0002_fixedindicatorstate"
     new_table = "formula_editor_fixedindicatorstate"
     try:
@@ -525,6 +532,128 @@ def _validate_core_0012_result(before_path: str | Path, after_path: str | Path) 
                     raise ValueError("invalid SQLite metadata sequence")
             elif new_seq[name] != old_seq[name]:
                 raise ValueError("existing SQLite sequence changed")
+
+
+
+# Exact reviewed Django/SQLite schema of the single Task 005.2 table.
+WORKSPACE_TABLE_SQL = (
+    'CREATE TABLE "core_chartworkspace" '
+    '("id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, '
+    '"main" text NOT NULL CHECK ((JSON_VALID("main") OR "main" IS NULL)), '
+    '"sub" text NOT NULL CHECK ((JSON_VALID("sub") OR "sub" IS NULL)), '
+    '"pane_heights" text NOT NULL CHECK ((JSON_VALID("pane_heights") OR "pane_heights" IS NULL)), '
+    '"updated_at" datetime NOT NULL, '
+    '"user_id" integer NOT NULL UNIQUE REFERENCES "auth_user" ("id") DEFERRABLE INITIALLY DEFERRED)'
+)
+
+
+def _validate_core_0013_result(before_path: str | Path, after_path: str | Path) -> None:
+    """Only the empty workspace table, its Django metadata and migration history may be added."""
+    new_table = "core_chartworkspace"
+    with closing(_connect_readonly(before_path)) as before, closing(_connect_readonly(after_path)) as after:
+        before_tables = _table_names(before)
+        after_tables = _table_names(after)
+        if after_tables - before_tables != {new_table} or before_tables - after_tables:
+            raise ValueError("unapproved workspace migration tables")
+        row = after.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (new_table,)).fetchone()
+        if row is None or _normalize_sql(row[0]) != _normalize_sql(WORKSPACE_TABLE_SQL):
+            raise ValueError("unapproved workspace table schema")
+        fields = [(r[1], r[2].lower(), r[3], r[4], r[5], r[6]) for r in after.execute(
+            'PRAGMA table_xinfo("core_chartworkspace")'
+        )]
+        if fields != [
+            ("id", "integer", 1, None, 1, 0),
+            ("main", "text", 1, None, 0, 0),
+            ("sub", "text", 1, None, 0, 0),
+            ("pane_heights", "text", 1, None, 0, 0),
+            ("updated_at", "datetime", 1, None, 0, 0),
+            ("user_id", "integer", 1, None, 0, 0),
+        ]:
+            raise ValueError("unapproved workspace table columns")
+        indexes = list(after.execute('PRAGMA index_list("core_chartworkspace")'))
+        if len(indexes) != 1 or indexes[0][2:4] != (1, "u") or [
+            r[2] for r in after.execute(f'PRAGMA index_info("{indexes[0][1]}")')
+        ] != ["user_id"]:
+            raise ValueError("unapproved workspace unique index")
+        if list(after.execute('PRAGMA foreign_key_list("core_chartworkspace")')) != [
+            (0, 0, "auth_user", "user_id", "id", "NO ACTION", "NO ACTION", "NONE")
+        ]:
+            raise ValueError("unapproved workspace foreign key")
+        # The comparison excludes the new table; reject attached triggers and views.
+        attached = list(after.execute(
+            "SELECT type FROM sqlite_master WHERE tbl_name=? AND type NOT IN ('table', 'index')",
+            (new_table,),
+        ))
+        if attached:
+            raise ValueError("unapproved workspace schema object")
+        if after.execute('SELECT COUNT(*) FROM "core_chartworkspace"').fetchone()[0] != 0:
+            raise ValueError("workspace table is not initially empty")
+        if [r for r in _schema_rows(before) if r[2] != new_table] != [
+            r for r in _schema_rows(after) if r[2] != new_table
+        ]:
+            raise ValueError("workspace migration changed existing schema")
+        if not {"django_content_type", "auth_permission", "django_migrations", "sqlite_sequence"} <= before_tables:
+            raise ValueError("workspace Django metadata missing")
+        for table in ("django_content_type", "auth_permission", "django_migrations"):
+            if not _rows_equal_schema(before, after, table):
+                raise ValueError("workspace Django metadata schema changed")
+        for table in before_tables - {
+            "django_content_type", "auth_permission", "django_migrations", "sqlite_sequence"
+        }:
+            if not _rows_equal(before, after, table):
+                raise ValueError("workspace migration modified existing data")
+
+        ct_columns = [r[1] for r in before.execute('PRAGMA table_info("django_content_type")')]
+        ct_idx = {k: ct_columns.index(k) for k in ("id", "app_label", "model")}
+        old_ct, new_ct = (Counter(db.execute("SELECT * FROM django_content_type")) for db in (before, after))
+        added_ct = list((new_ct - old_ct).elements())
+        if old_ct - new_ct or len(added_ct) != 1 or (
+            added_ct[0][ct_idx["app_label"]], added_ct[0][ct_idx["model"]]
+        ) != ("core", "chartworkspace"):
+            raise ValueError("unapproved workspace content type")
+        ct_id = added_ct[0][ct_idx["id"]]
+        if type(ct_id) is not int or ct_id < 1:
+            raise ValueError("invalid workspace content type ID")
+
+        perm_columns = [r[1] for r in before.execute('PRAGMA table_info("auth_permission")')]
+        perm_idx = {k: perm_columns.index(k) for k in ("id", "name", "content_type_id", "codename")}
+        old_perm, new_perm = (Counter(db.execute("SELECT * FROM auth_permission")) for db in (before, after))
+        added_perm = list((new_perm - old_perm).elements())
+        expected = {
+            (ct_id, f"{action}_chartworkspace", f"Can {action} 图表工作区")
+            for action in ("add", "change", "delete", "view")
+        }
+        if old_perm - new_perm or len(added_perm) != 4 or {
+            (r[perm_idx["content_type_id"]], r[perm_idx["codename"]], r[perm_idx["name"]])
+            for r in added_perm
+        } != expected:
+            raise ValueError("unapproved workspace permissions")
+
+        history_columns = [r[1] for r in before.execute('PRAGMA table_info("django_migrations")')]
+        h_idx = {k: history_columns.index(k) for k in ("id", "app", "name", "applied")}
+        old_hist, new_hist = (Counter(db.execute("SELECT * FROM django_migrations")) for db in (before, after))
+        added_history = list((new_hist - old_hist).elements())
+        if old_hist - new_hist or len(added_history) != 1 or (
+            added_history[0][h_idx["app"]], added_history[0][h_idx["name"]]
+        ) != ("core", "0013_chartworkspace") or not added_history[0][h_idx["applied"]]:
+            raise ValueError("unapproved workspace migration history")
+
+        old_seq = dict(before.execute("SELECT name,seq FROM sqlite_sequence"))
+        new_seq = dict(after.execute("SELECT name,seq FROM sqlite_sequence"))
+        expected_seq = {
+            "django_migrations": added_history[0][h_idx["id"]],
+            "django_content_type": ct_id,
+            "auth_permission": max(r[perm_idx["id"]] for r in added_perm),
+        }
+        if set(new_seq) != set(old_seq) | set(expected_seq):
+            raise ValueError("unapproved workspace sequence changes")
+        for name in set(old_seq) | set(expected_seq):
+            if name in expected_seq:
+                if new_seq[name] != expected_seq[name] or new_seq[name] < old_seq.get(name, 0):
+                    raise ValueError("unapproved workspace metadata sequence")
+            elif new_seq[name] != old_seq[name]:
+                raise ValueError("existing SQLite sequence changed")
+
 
 
 def _rows_equal_schema(before: sqlite3.Connection, after: sqlite3.Connection, table: str) -> bool:

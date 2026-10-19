@@ -53,6 +53,8 @@ jobs:
           npm run test:indicators
           npm run test:realtime
           npm run test:chart
+          npm run test:workspace
+          node src/components/SiteVersionFooter.test.mjs
           npm run build
 
       - uses: docker/setup-qemu-action@v3
@@ -72,11 +74,11 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/siftalpha-web
           tags: |
             type=raw,value=sha-${{ github.sha }}
-            type=raw,value=v1.0.0-sha-${{ github.sha }}
+            type=raw,value=v1.1.0-sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=V1.0.0
+            org.opencontainers.image.version=V1.1.0
             io.siftalpha.build.run-id=${{ github.run_id }}
             io.siftalpha.build.ref=${{ github.ref_name }}
 

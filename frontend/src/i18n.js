@@ -21,6 +21,34 @@ const watchlistMessages = {
   en: { watchlistList: 'Watchlist', watchlistEmpty: 'No watchlist items', watchlistSearchHint: 'Search a stock and select ☆ to add it', watchlistLoginRequired: 'Sign in or register to use the watchlist', watchlistLimitReached: 'Watchlist limit reached', watchlistAddFailed: 'Could not add to watchlist', watchlistRemoveFailed: 'Could not remove from watchlist', watchlistUnavailable: 'Live data source is not connected', watchlistRemaining: 'watchlist slots remaining', watchlistStar: 'Add to watchlist', watchlistUnstar: 'Remove from watchlist' },
 }
 Object.entries(watchlistMessages).forEach(([code, values]) => { messages[code] = { ...messages[code], ...values } })
+const workspaceMessages = {
+  "zh-CN": {
+    "workspaceLoadError": "图表配置读取失败，请刷新重试（本次修改不会覆盖云端配置）",
+    "workspaceSaveError": "图表配置未能保存，当前页面设置仍然保留"
+  },
+  "zh-TW": {
+    "workspaceLoadError": "圖表設定讀取失敗，請重新整理再試（不會覆寫雲端設定）",
+    "workspaceSaveError": "圖表設定未能儲存，目前頁面設定仍會保留"
+  },
+  "en": {
+    "workspaceLoadError": "Could not load chart settings. Refresh to retry; cloud settings will not be overwritten.",
+    "workspaceSaveError": "Chart settings were not saved. Your current layout is unchanged."
+  },
+  "ja": {
+    "workspaceLoadError": "チャート設定を読み込めません。再読み込みしてください。クラウド設定は上書きされません。",
+    "workspaceSaveError": "チャート設定を保存できませんでした。現在の画面設定は維持されます。"
+  },
+  "ms": {
+    "workspaceLoadError": "Gagal memuatkan tetapan carta. Muat semula untuk cuba lagi; tetapan awan tidak akan ditulis ganti.",
+    "workspaceSaveError": "Tetapan carta tidak dapat disimpan. Susun atur semasa dikekalkan."
+  },
+  "fr": {
+    "workspaceLoadError": "Impossible de charger les paramètres du graphique. Actualisez la page ; les données enregistrées ne seront pas écrasées.",
+    "workspaceSaveError": "Paramètres non enregistrés. La disposition actuelle est conservée."
+  }
+}
+Object.entries(workspaceMessages).forEach(([code, values]) => { messages[code] = { ...messages[code], ...values } })
+
 export const t = key => messages[locale.value]?.[key] ?? messages.en[key] ?? key
 export const languageName = computed(() => languages.find(item => item.code === locale.value)?.label ?? '简体中文')
 export function setLocale(code) { if (!messages[code]) return; locale.value = code; localStorage.setItem('quantscope:locale', code); document.documentElement.lang = code }

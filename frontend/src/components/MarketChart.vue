@@ -12,11 +12,12 @@ import { settleHistoryReconcile } from '../realtime/historyRecovery.mjs'
 import { isCurrentFormulaResult, shouldScheduleFormulaRefresh } from '../realtime/formulaRefreshScheduler.mjs'
 import { classifyChartUpdate, diffIndicatorSets, indicatorKey } from '../realtime/chartUpdatePolicy.mjs'
 
-const emit = defineEmits(['indicator-denied'])
+const emit = defineEmits(['indicator-denied', 'pane-heights-changed'])
 const props = defineProps({
   symbol: Object,
   period: String,
   installedIndicators: { type: Array, default: () => [] },
+  paneHeights: { type: Object, default: () => ({}) },
   marketColorTokens: { type: Object, default: () => ({ up: '#ef5350', down: '#20bd92' }) },
 })
 
@@ -85,9 +86,10 @@ const HISTORY_RECONCILE_RETRY_MS = 2000
 const cryptoCandleColor = color => ({ '#ef6671': '#ef5350', '#3acba3': '#20bd92' })[String(color || '').toLowerCase()] || color
 
 const backgroundStick = item => item.layer === 'background'
-const savedSubPaneHeights = () => {
-  try { return JSON.parse(localStorage.getItem('quantscope:sub-pane-heights') || '{}') } catch { return {} }
-}
+// The server-owned account layout replaces the old, browser-only height store.
+// Visitors may adjust panes for the current tab, without storing them on the server.
+let sessionPaneHeights = {}
+const savedSubPaneHeights = () => ({ ...sessionPaneHeights, ...(props.paneHeights || {}) })
 
 function syncSubTitlePositions(rendered) {
   if (!chart || !el.value) return
@@ -100,12 +102,14 @@ function syncSubTitlePositions(rendered) {
 }
 
 function saveSubPaneHeights(rendered) {
-  const heights = savedSubPaneHeights()
+  // Never mutate a Vue prop: the parent compares old/new heights to decide whether to save.
+  const heights = { ...savedSubPaneHeights() }
   let paneIndex = 1
   rendered.filter(result => result.item.placement === 'sub').forEach(result => {
     heights[result.item.code] = chart?.panes()[paneIndex++]?.getHeight() || 150
   })
-  localStorage.setItem('quantscope:sub-pane-heights', JSON.stringify(heights))
+  sessionPaneHeights = heights
+  emit('pane-heights-changed', heights)
 }
 
 async function requestFormulaDrawing(item, bars, revision = 0) {

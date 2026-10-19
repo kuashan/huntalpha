@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test:indicators": "node src/indicators/commonIndicators.test.mjs",
     "test:realtime": "node src/realtime/realtimeUiBuffer.test.mjs",
-    "test:chart": "node src/realtime/chartUpdatePolicy.test.mjs"
+    "test:chart": "node src/realtime/chartUpdatePolicy.test.mjs",
+    "test:workspace": "node src/workspaceState.test.mjs"
   },
   "dependencies": {
     "@dtrader/formula-ts": "github:DTrader-store/formula-ts",

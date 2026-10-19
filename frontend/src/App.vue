@@ -10,10 +10,13 @@ import AccountPopover from './components/AccountPopover.vue'
 import PersonalCenter from './components/PersonalCenter.vue'
 import SiteVersionFooter from './components/SiteVersionFooter.vue'
 import { commonIndicators, markets } from './data/marketData'
+import { hydrateWorkspace, serializeWorkspace } from './workspaceState.mjs'
 import { languages, locale, setLocale, t } from './i18n'
 const market = ref(markets[0]); const query = ref(''); const symbols = ref([]); const selected = ref(null); const period = ref('日线'); const mainInstalled = ref([]); const subInstalled = ref([]); const manager = ref(null)
 const user = ref(null); const visitor = ref(false); const checkingSession = ref(true); const quotes = ref({})
 const priceColorMode = ref('cn'); let initialPreferencesApplied = false; let entitlementRefreshTimer
+const paneHeights = ref({}); const workspaceReady = ref(false); const workspaceError = ref('')
+let workspaceGeneration = 0; let workspaceSaveTimer; let workspaceSaveRequest = false; let workspaceSaveQueued = false; let workspaceAbort
 const accountSections = ['overview', 'profile', 'membership', 'security', 'preferences']
 const routeFromLocation = () => {
   const path = window.location.pathname.replace(/\/+$/, '') || '/'
@@ -121,6 +124,92 @@ async function csrfHeaders() {
   if (!token) throw new Error(t('watchlistUnavailable'))
   return { 'X-CSRFToken': token }
 }
+function cancelWorkspaceSync() {
+  ++workspaceGeneration
+  window.clearTimeout(workspaceSaveTimer)
+  workspaceAbort?.abort()
+  workspaceAbort = undefined
+  workspaceSaveQueued = false
+  workspaceReady.value = false
+  workspaceError.value = ''
+}
+async function restoreWorkspace() {
+  if (!user.value || visitor.value) return
+  const generation = ++workspaceGeneration
+  workspaceReady.value = false
+  try {
+    const [savedReply, catalogReply] = await Promise.all([
+      fetch(`${API_BASE}/api/account/chart-workspace/`, { credentials: 'include', cache: 'no-store' }),
+      fetch(`${API_BASE}/api/indicators/`, { credentials: 'include', cache: 'no-store' }),
+    ])
+    if (!savedReply.ok || !catalogReply.ok) throw new Error('无法读取保存的图表配置')
+    const saved = await savedReply.json()
+    const catalog = await catalogReply.json()
+    if (generation !== workspaceGeneration || !user.value || visitor.value) return
+    const restored = hydrateWorkspace(saved, catalog.items)
+    mainInstalled.value = restored.main
+    subInstalled.value = restored.sub
+    paneHeights.value = restored.paneHeights
+    workspaceReady.value = true
+    workspaceError.value = ''
+  } catch {
+    if (generation === workspaceGeneration) workspaceError.value = t('workspaceLoadError')
+  }
+}
+function scheduleWorkspaceSave() {
+  if (!user.value || visitor.value || !workspaceReady.value) return
+  window.clearTimeout(workspaceSaveTimer)
+  workspaceSaveTimer = window.setTimeout(() => { void flushWorkspaceSave() }, 600)
+}
+async function flushWorkspaceSave() {
+  if (!user.value || visitor.value || !workspaceReady.value) return
+  if (workspaceSaveRequest) { workspaceSaveQueued = true; return }
+  const generation = workspaceGeneration
+  const payload = serializeWorkspace(mainInstalled.value, subInstalled.value, paneHeights.value)
+  workspaceSaveRequest = true
+  const controller = new AbortController()
+  workspaceAbort = controller
+  try {
+    const reply = await fetch(`${API_BASE}/api/account/chart-workspace/`, {
+      method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json', ...await csrfHeaders() },
+      body: JSON.stringify(payload), signal: controller.signal,
+    })
+    if (reply.status === 403) {
+      // An expired session or CSRF error is NOT a membership downgrade.
+      // Preserve local edits; only a verified entitlement rejection may
+      // remove restricted indicators from the visible combination.
+      const detail = await reply.json().catch(() => ({}))
+      if (detail.code === 'indicator_not_allowed') {
+        if (generation === workspaceGeneration) {
+          await refreshIndicatorEntitlements()
+          workspaceError.value = t('workspaceSaveError')
+        }
+        return
+      }
+    }
+    if (!reply.ok) throw new Error('保存失败')
+    if (generation === workspaceGeneration) workspaceError.value = ''
+  } catch {
+    if (generation === workspaceGeneration && !controller.signal.aborted) {
+      workspaceError.value = t('workspaceSaveError')
+    }
+  } finally {
+    if (workspaceAbort === controller) workspaceAbort = undefined
+    workspaceSaveRequest = false
+    if (workspaceSaveQueued) {
+      workspaceSaveQueued = false
+      if (workspaceReady.value) void flushWorkspaceSave()
+    }
+  }
+}
+function handlePaneHeightsChanged(next) {
+  if (!workspaceReady.value || visitor.value) return
+  const current = serializeWorkspace(mainInstalled.value, subInstalled.value, paneHeights.value).pane_heights
+  const candidate = serializeWorkspace(mainInstalled.value, subInstalled.value, next).pane_heights
+  if (JSON.stringify(current) === JSON.stringify(candidate)) return
+  paneHeights.value = next
+  scheduleWorkspaceSave()
+}
 async function refreshIndicatorEntitlements() {
   if (!user.value) return
   try {
@@ -128,12 +217,29 @@ async function refreshIndicatorEntitlements() {
     if (!reply.ok) return
     const payload = await reply.json()
     const allowed = new Set((payload.items || []).filter(item => item.allowed !== false).map(item => item.code))
-    mainInstalled.value = mainInstalled.value.filter(item => allowed.has(item.code))
-    subInstalled.value = subInstalled.value.filter(item => allowed.has(item.code))
+    const main = mainInstalled.value.filter(item => allowed.has(item.code))
+    const sub = subInstalled.value.filter(item => allowed.has(item.code))
+    if (main.length !== mainInstalled.value.length || sub.length !== subInstalled.value.length) {
+      mainInstalled.value = main
+      subInstalled.value = sub
+      paneHeights.value = Object.fromEntries(Object.entries(paneHeights.value).filter(([code]) => sub.some(item => item.code === code)))
+      scheduleWorkspaceSave()
+    }
   } catch { /* Keep chart data unchanged on transient connection failures. */ }
 }
-function addIndicator(item) { if (item.allowed === false || (visitor.value && !item.visitor_available)) return; const list = item.placement === 'main' ? mainInstalled : subInstalled; if (item.placement === 'sub' && !list.value.some(current => current.code === item.code) && list.value.length >= 3) return; if (!list.value.some(current => current.code === item.code)) list.value = [...list.value, item] }
-function removeIndicator(item) { if (item.placement === 'main') mainInstalled.value = mainInstalled.value.filter(current => current.code !== item.code); else subInstalled.value = subInstalled.value.filter(current => current.code !== item.code) }
+function addIndicator(item) {
+  if (item.allowed === false || (visitor.value && !item.visitor_available)) return
+  if (!visitor.value && !workspaceReady.value) return
+  const list = item.placement === 'main' ? mainInstalled : subInstalled
+  if (item.placement === 'sub' && !list.value.some(current => current.code === item.code) && list.value.length >= 3) return
+  if (!list.value.some(current => current.code === item.code)) { list.value = [...list.value, item]; scheduleWorkspaceSave() }
+}
+function removeIndicator(item) {
+  if (!visitor.value && !workspaceReady.value) return
+  if (item.placement === 'main') mainInstalled.value = mainInstalled.value.filter(current => current.code !== item.code)
+  else subInstalled.value = subInstalled.value.filter(current => current.code !== item.code)
+  scheduleWorkspaceSave()
+}
 function applyInitialPreferences(currentUser) {
   if (initialPreferencesApplied || !currentUser?.preferences) return
   const preferences = currentUser.preferences
@@ -144,7 +250,7 @@ function applyInitialPreferences(currentUser) {
 }
 function handleUserUpdated(updatedUser) { if (updatedUser) { user.value = { ...user.value, ...updatedUser }; refreshIndicatorEntitlements() } }
 function handlePreferencesUpdated(preferences) { if (preferences?.price_color_mode) priceColorMode.value = preferences.price_color_mode; user.value = { ...user.value, preferences: { ...(user.value?.preferences || {}), ...preferences } } }
-function authenticated(currentUser) { applyInitialPreferences(currentUser); user.value = currentUser; visitor.value = Boolean(currentUser.visitor); refreshIndicatorEntitlements(); if (window.location.pathname !== '/' || window.location.search) window.history.replaceState({}, '', '/'); syncRoute() }
+function authenticated(currentUser) { applyInitialPreferences(currentUser); user.value = currentUser; visitor.value = Boolean(currentUser.visitor); if (!visitor.value) void restoreWorkspace(); refreshIndicatorEntitlements(); if (window.location.pathname !== '/' || window.location.search) window.history.replaceState({}, '', '/'); syncRoute() }
 function syncRoute() { const next = routeFromLocation(); route.value = next.page; accountSection.value = next.section }
 function navigateToAccount(section = 'overview') { const next = accountSections.includes(section) ? section : 'overview'; window.history.pushState({}, '', next === 'overview' ? '/account' : `/account?section=${encodeURIComponent(next)}`); syncRoute(); stopMarketIndexRefresh() }
 function navigateToTerminal() { window.history.pushState({}, '', '/'); syncRoute(); if (user.value) { loadSymbols(); startMarketIndexRefresh() } }
@@ -152,7 +258,7 @@ function toggleCommon(item) { const active = (item.placement === 'main' ? mainIn
 function openAiAnalysis() { const url = `/?analysis=${encodeURIComponent(selected.value.code)}&name=${encodeURIComponent(selected.value.name)}&market=${encodeURIComponent(market.value.name)}`; window.open(url, '_blank', 'noopener') }
 async function requestAiAccess() { if (!visitor.value) return openAiAnalysis(); await fetch(`${API_BASE}/api/auth/logout/`, { method: 'POST', credentials: 'include' }); user.value = null; visitor.value = false; window.location.assign('/?register=1') }
 function backToTerminal() { window.location.assign('/') }
-async function signOut() { await fetch(`${API_BASE}/api/auth/logout/`, { method: 'POST', credentials: 'include' }); user.value = null; visitor.value = false; initialPreferencesApplied = false; mainInstalled.value = []; subInstalled.value = []; symbols.value = []; selected.value = null; watchlistTotal.value = null; watchlistLimit.value = null; watchlistRemaining.value = null; watchlistError.value = ''; navigateToTerminal() }
+async function signOut() { cancelWorkspaceSync(); await fetch(`${API_BASE}/api/auth/logout/`, { method: 'POST', credentials: 'include' }); user.value = null; paneHeights.value = {}; visitor.value = false; initialPreferencesApplied = false; mainInstalled.value = []; subInstalled.value = []; symbols.value = []; selected.value = null; watchlistTotal.value = null; watchlistLimit.value = null; watchlistRemaining.value = null; watchlistError.value = ''; navigateToTerminal() }
 async function refreshQuotes(items) {
   const version = ++quoteRequestVersion
   const selectedCode = selected.value?.code
@@ -288,8 +394,8 @@ watch(user, currentUser => {
   else { symbolRequestVersion += 1; quoteRequestVersion += 1; indexRequestVersion += 1; stopMarketIndexRefresh(); indexSnapshots.value = []; quotes.value = {}; symbols.value = []; selected.value = null; watchlistTotal.value = null; watchlistLimit.value = null; watchlistRemaining.value = null }
 })
 function handleRouteChange() { syncRoute(); if (route.value === 'terminal' && user.value) { loadSymbols(); startMarketIndexRefresh(); refreshIndicatorEntitlements() } else stopMarketIndexRefresh() }
-onMounted(async () => { syncRoute(); document.addEventListener('visibilitychange', handleVisibilityChange); window.addEventListener('popstate', handleRouteChange); try { const reply = await fetch(`${API_BASE}/api/auth/session/`, { credentials: 'include' }); const data = await reply.json(); if (reply.ok && data.authenticated) { applyInitialPreferences(data.user); user.value = data.user; visitor.value = Boolean(data.visitor) ; await refreshIndicatorEntitlements() } } catch {} finally { checkingSession.value = false } entitlementRefreshTimer = window.setInterval(refreshIndicatorEntitlements, 30000) })
-onBeforeUnmount(() => { window.clearInterval(entitlementRefreshTimer); window.clearTimeout(searchTimer); stopMarketIndexRefresh(); document.removeEventListener('visibilitychange', handleVisibilityChange); window.removeEventListener('popstate', handleRouteChange) })
+onMounted(async () => { syncRoute(); document.addEventListener('visibilitychange', handleVisibilityChange); window.addEventListener('popstate', handleRouteChange); try { const reply = await fetch(`${API_BASE}/api/auth/session/`, { credentials: 'include' }); const data = await reply.json(); if (reply.ok && data.authenticated) { applyInitialPreferences(data.user); user.value = data.user; visitor.value = Boolean(data.visitor) ; if (!visitor.value) await restoreWorkspace(); await refreshIndicatorEntitlements() } } catch {} finally { checkingSession.value = false } entitlementRefreshTimer = window.setInterval(refreshIndicatorEntitlements, 30000) })
+onBeforeUnmount(() => { cancelWorkspaceSync(); window.clearInterval(entitlementRefreshTimer); window.clearTimeout(searchTimer); stopMarketIndexRefresh(); document.removeEventListener('visibilitychange', handleVisibilityChange); window.removeEventListener('popstate', handleRouteChange) })
 </script>
 <template>
   <div v-if="checkingSession" class="boot-screen">SiftAlpha…</div>
@@ -302,7 +408,7 @@ onBeforeUnmount(() => { window.clearInterval(entitlementRefreshTimer); window.cl
     <div class="workspace"><aside><div class="aside-title" :title="watchlistRemaining == null ? '' : `${watchlistRemaining} ${t('watchlistRemaining')}`"><span>{{ t('watchlistList') }}</span><b>{{ watchlistTotal == null ? '—' : watchlistTotal }} / {{ watchlistLimit == null ? '—' : watchlistLimit }}</b></div><label class="search">⌕ <input v-model="query" :placeholder="t('search')" /></label><div class="heads"><span>{{ t('nameCode') }}</span><span>{{ t('latest') }}</span><span>{{ t('change') }}</span><span aria-label="收藏">☆</span></div><div v-for="item in list" :key="item.code" class="symbol" :class="{selected: selected?.code === item.code}" :title="symbolTitle(item)" :aria-label="symbolTitle(item)" role="button" tabindex="0" @click="selectSymbol(item)" @keydown.enter.prevent="selectSymbol(item)"><span class="symbol-name"><strong>{{ item.name }}</strong><small class="symbol-meta"><span class="symbol-code">{{ item.code }}</span><span class="market-label" :title="marketTitle(item.market)">{{ marketName(item.market) }}</span></small></span><b :style="marketChangeStyle(itemQuote(item)?.change)">{{ displayPrice(itemQuote(item)?.price) }}</b><em :style="marketChangeStyle(itemQuote(item)?.change)" :class="{down:itemQuote(item)?.change < 0}">{{ displayChange(itemQuote(item)?.change) }}</em><button type="button" class="star" :class="{active:item.watchlisted}" :aria-label="item.watchlisted ? t('watchlistUnstar') : t('watchlistStar')" :aria-pressed="item.watchlisted" @click.stop="toggleWatchlist(item)">{{ item.watchlisted ? '★' : '☆' }}</button></div><p v-if="catalogStatusText">{{ catalogStatusText }}</p><p v-if="!catalogLoading && !list.length && !catalogStatusText" class="watchlist-empty">{{ emptyWatchlistText }}<small v-if="!query.trim()">{{ market.code === 'crypto' ? '搜索 BTC 或 ETH 并点击 ☆ 添加' : t('watchlistSearchHint') }}</small></p><p v-if="watchlistError" class="watchlist-message">{{ watchlistError }}</p></aside>
       <section class="content"><div class="security"><div><p>{{ marketTitle(selected?.market || market.code) }} · {{ quoteStatusText }}</p><h1>{{ selected?.name || '—' }} <small>{{ selected?.code || '' }}</small><button v-if="selected && !selected.code.startsWith('CC.')" class="ai-button" @click="requestAiAccess">AI 分析</button></h1></div><div class="price"><strong :style="marketChangeStyle(quoteData?.change)">{{ displayPrice(quoteData?.price) }}</strong><span :style="marketChangeStyle(quoteData?.change)" :class="{down:quoteData?.change < 0}">{{ displayChange(quoteData?.change) }}</span></div><dl><div><dt>{{ t('open') }}</dt><dd>{{ displayPrice(quoteData?.open) }}</dd></div><div><dt>{{ t('high') }}</dt><dd>{{ displayPrice(quoteData?.high) }}</dd></div><div><dt>{{ t('low') }}</dt><dd>{{ displayPrice(quoteData?.low) }}</dd></div></dl></div>
         <div class="toolbar"><div><button v-for="item in ['分时','1分','5分','15分','30分','60分','2小时','4小时','日线','周线','月线']" :key="item" :class="{active:period === item}" @click="period=item">{{ item }}</button></div><div class="common-tools"><button v-for="item in commonIndicators" :key="item.code" :class="{on:installedIndicators.some(current=>current.code===item.code)}" @click="toggleCommon(item)">{{item.name}}</button><button @click="manager.open()">{{ t('manager') }}</button></div></div>
-        <div class="labels"><span>{{ t('main') }}{{ mainInstalled.map(item => item.name).join(' · ') || t('candle') }}</span></div><MarketChart v-if="selected" :symbol="selected" :period="period" :installed-indicators="installedIndicators" :market-color-tokens="marketColorTokens" @indicator-denied="removeIndicator" /><div v-else class="catalog-empty">{{ catalogStatusText }}</div><footer>{{ t('disclaimer') }}</footer>
+        <div class="labels"><span>{{ t('main') }}{{ mainInstalled.map(item => item.name).join(' · ') || t('candle') }}</span><small v-if="workspaceError" role="status">{{ workspaceError }}</small></div><MarketChart v-if="selected" :symbol="selected" :period="period" :installed-indicators="installedIndicators" :pane-heights="paneHeights" :market-color-tokens="marketColorTokens" @indicator-denied="removeIndicator" @pane-heights-changed="handlePaneHeightsChanged" /><div v-else class="catalog-empty">{{ catalogStatusText }}</div><footer>{{ t('disclaimer') }}</footer>
       </section></div>
     <IndicatorManager ref="manager" :main="mainInstalled" :sub="subInstalled" :visitor="visitor" @add="addIndicator" @remove="removeIndicator" />
     <SiteVersionFooter />

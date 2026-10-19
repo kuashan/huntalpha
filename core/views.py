@@ -23,6 +23,7 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from formula_editor.models import Formula
 from formula_editor.fixed_indicators import installed_fixed_indicators, is_fixed_indicator_enabled
 from .models import AccountProfile, MarketSymbol, WatchlistEntry
+from .chart_workspace import InvalidWorkspace, WorkspacePermissionDenied, get_workspace, put_workspace
 from .account_security import (RateLimited, VerificationUnavailable, client_ip, take_limit,
                                limit_reached, clear_limit, issue_signup, resend_signup, claim_signup)
 from .account import (
@@ -280,6 +281,23 @@ def account_preferences(request):
         profile.save(update_fields=[*payload.keys(), "updated_at"])
     preferences = account_preferences_data(request.user, profile)
     return json({"status": "ok", "preferences": preferences, "user": user_payload(request.user, request)})
+
+
+@never_cache
+@require_http_methods(["GET", "PUT"])
+@api_account_required
+def chart_workspace(request):
+    """Account-wide indicator configuration only; no calculations or source."""
+    if request.method == "GET":
+        return json(get_workspace(request.user))
+    payload = auth_body(request)
+    try:
+        state = put_workspace(request.user, payload)
+    except WorkspacePermissionDenied as exc:
+        return json({"error": str(exc), "code": "indicator_not_allowed"}, 403)
+    except InvalidWorkspace as exc:
+        return json({"error": str(exc), "code": "invalid_workspace"}, 400)
+    return json({"status": "ok", **state})
 
 
 @require_http_methods(["POST", "DELETE"])
