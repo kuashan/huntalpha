@@ -8,8 +8,9 @@ MarketProfile、MarketDataFetch 契约和内部证券代码格式。
 """
 
 import json
+import math
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -158,6 +159,53 @@ def _is_complete(ts: int, timeframe: str, market: MarketProfile, now_ts: int, re
     return now_ts >= theoretical_end
 
 
+
+def _closed_recent_a_share_daily_bar(bar: dict, now_ts: int) -> bool:
+    """Only cross-check the latest *closed* daily bar, never historical windows."""
+    if not isinstance(bar, dict) or bar.get("time") is None:
+        return False
+    tz = ZoneInfo(CN_A_SHARE.timezone)
+    try:
+        session_date = datetime.fromtimestamp(int(bar["time"]), tz=tz).date()
+        now = datetime.fromtimestamp(now_ts, tz=tz)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    age = (now.date() - session_date).days
+    return 0 <= age <= 7 and now >= datetime.combine(session_date, datetime_time(15, 0), tzinfo=tz)
+
+
+def _reconcile_closed_a_share_daily_open(bar: dict, quote: dict) -> bool:
+    """Correct a bad latest-day open only when independent H/L/C match exactly.
+
+    Yahoo historical bars and Tencent's adjusted historical series can use
+    different bases. Never splice Tencent history into a Yahoo window.
+    """
+    if not isinstance(quote, dict):
+        return False
+    try:
+        quote_date = datetime.strptime(str(quote.get("updated_at") or "")[:8], "%Y%m%d").date()
+        bar_date = datetime.fromtimestamp(int(bar["time"]), tz=ZoneInfo(CN_A_SHARE.timezone)).date()
+        if quote_date != bar_date:
+            return False
+        check = {name: float(quote[field]) for name, field in (
+            ("open", "open"), ("high", "high"), ("low", "low"), ("close", "price")
+        )}
+        current = {name: float(bar[name]) for name in ("open", "high", "low", "close")}
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    if not all(math.isfinite(value) for value in (*check.values(), *current.values())):
+        return False
+    tolerance = 0.015  # A-share quotations are published to the nearest cent.
+    if any(abs(current[name] - check[name]) > tolerance for name in ("high", "low", "close")):
+        return False  # Different day, adjustment basis, or quote state; do not mix.
+    if not current["low"] - tolerance <= check["open"] <= current["high"] + tolerance:
+        return False
+    if abs(current["open"] - check["open"]) <= tolerance:
+        return False
+    bar["open"] = check["open"]
+    return True
+
+
 def _aggregate_hour_bars(ordered: list[dict], market: MarketProfile, factor: int, now_ts: int) -> list[dict]:
     if not ordered:
         return []
@@ -296,6 +344,18 @@ class YahooFinanceMarketDataProvider:
         now_ts = int(kwargs.get("now_ts") or time.time())
         payload = self._request_chart(symbol, timeframe, start_date=kwargs.get("start_date"), now_ts=now_ts)
         completed, forming, meta = _parse_chart(payload, str(symbol).upper(), timeframe, self.profile, now_ts=now_ts, minimum_completed_bars=int(kwargs.get("minimum_completed_bars", self.minimum_completed_bars)))
+        if (self.profile.market_id == CN_A_SHARE.market_id and timeframe == "日线"
+                and not kwargs.get("before") and forming is None and completed
+                and _closed_recent_a_share_daily_bar(completed[-1], now_ts)):
+            # Validate against a *same-session* independent daily quote.
+            # A failed quote must not replace the original complete window.
+            try:
+                from .tencent import TencentPublicMarketDataProvider
+                check_quote = TencentPublicMarketDataProvider(CN_A_SHARE, timeout=3).quote(symbol)
+                if _reconcile_closed_a_share_daily_open(completed[-1], check_quote):
+                    meta["daily_open_crosscheck"] = "corrected_from_tencent_quote"
+            except Exception:
+                pass
         meta.update({"source": "network", "mode": "historical", "adjustment": "Yahoo adjusted close"})
         return {"completed": completed, "forming": forming, "meta": meta}
 
