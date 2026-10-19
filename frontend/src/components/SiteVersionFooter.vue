@@ -1,5 +1,5 @@
 <script setup>
-const version = 'V1.0.0'
+const version = 'V1.1.0'
 </script>
 
 <template>
