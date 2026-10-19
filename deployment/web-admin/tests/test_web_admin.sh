@@ -554,6 +554,9 @@ assert_ok validate_command health
 assert_ok validate_command preflight "$FAKE_DIGEST"
 assert_ok validate_command deploy "$FAKE_DIGEST"
 assert_ok validate_command test-deploy "$FAKE_DIGEST"
+assert_ok validate_command upgrade "$FAKE_COMMIT"
+assert_fail validate_command upgrade "not-a-sha"
+assert_fail validate_command upgrade "${FAKE_COMMIT}extra"
 assert_ok validate_command rollback
 assert_fail validate_command deploy
 assert_fail validate_command preflight sha256:bad
@@ -755,6 +758,10 @@ for source_file in \
     || fail "deployment source must be archived with LF line endings: $source_file"
 done
 
+grep -F 'upgrade_web_admin.py' "$ROOT/deployment/web-admin/install-web-admin.sh" >/dev/null \
+  || fail "initial installer must deploy self-upgrade helper"
+grep -F 'deploy|rollback|test-deploy|upgrade' "$LIB" >/dev/null \
+  || fail "upgrade must participate in existing deployment operation lock"
 assert_ok "$ROOT/deployment/web-admin/install-web-admin.sh" --check
 
 printf 'web-admin contract: ok\n'
