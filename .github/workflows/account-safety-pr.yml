@@ -72,7 +72,7 @@ jobs:
       - name: Checkout deployed baseline
         uses: actions/checkout@v4
         with:
-          ref: 07903d29e32f23a5e04db1888f2047073808542b
+          ref: 924d6811d1eb3e22daff23f6bd3e941746f12884
           path: old
       - name: Checkout proposed account change
         uses: actions/checkout@v4
