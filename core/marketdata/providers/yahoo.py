@@ -345,7 +345,7 @@ class YahooFinanceMarketDataProvider:
         payload = self._request_chart(symbol, timeframe, start_date=kwargs.get("start_date"), now_ts=now_ts)
         completed, forming, meta = _parse_chart(payload, str(symbol).upper(), timeframe, self.profile, now_ts=now_ts, minimum_completed_bars=int(kwargs.get("minimum_completed_bars", self.minimum_completed_bars)))
         if (self.profile.market_id == CN_A_SHARE.market_id and timeframe == "日线"
-                and not kwargs.get("before") and completed
+                and not kwargs.get("before") and forming is None and completed
                 and _closed_recent_a_share_daily_bar(completed[-1], now_ts)):
             # Validate against a *same-session* independent daily quote.
             # A failed quote must not replace the original complete window.
