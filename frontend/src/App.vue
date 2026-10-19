@@ -153,7 +153,7 @@ async function restoreWorkspace() {
     workspaceReady.value = true
     workspaceError.value = ''
   } catch {
-    if (generation === workspaceGeneration) workspaceError.value = '图表配置读取失败，请刷新重试（本次修改不会覆盖云端配置）'
+    if (generation === workspaceGeneration) workspaceError.value = t('workspaceLoadError')
   }
 }
 function scheduleWorkspaceSave() {
@@ -184,7 +184,7 @@ async function flushWorkspaceSave() {
     if (generation === workspaceGeneration) workspaceError.value = ''
   } catch {
     if (generation === workspaceGeneration && !controller.signal.aborted) {
-      workspaceError.value = '图表配置未能保存，当前页面设置仍然保留'
+      workspaceError.value = t('workspaceSaveError')
     }
   } finally {
     if (workspaceAbort === controller) workspaceAbort = undefined
