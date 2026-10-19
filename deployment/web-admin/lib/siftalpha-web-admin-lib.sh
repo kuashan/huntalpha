@@ -10,9 +10,6 @@ readonly SIFTALPHA_DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
 readonly SIFTALPHA_IMAGE_REPOSITORY='ghcr.io/kuashan/siftalpha-web'
 readonly SIFTALPHA_GITHUB_REPOSITORY='kuashan/huntalpha'
 readonly SIFTALPHA_RELEASE_BRANCH='release/siftalpha-web-v1'
-readonly SIFTALPHA_WORKFLOW_NAME='SiftAlpha Web CI and ARM64'
-readonly SIFTALPHA_WORKFLOW_ID='387611326'
-readonly SIFTALPHA_WORKFLOW_PATH='.github/workflows/siftalpha-web-arm64.yml'
 readonly SIFTALPHA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SIFTALPHA_MIGRATION_GUARD="$SIFTALPHA_LIB_DIR/verify_database_migration.py"
 readonly SIFTALPHA_MIGRATION_PROBE="$SIFTALPHA_LIB_DIR/migration_probe.py"
@@ -65,7 +62,7 @@ load_config() {
   assert_secure_config_file "$config_path" || return 1
   [[ -r "$config_path" ]] || { die "configuration is unreadable"; return 1; }
   # Clear all deploy-sensitive values before sourcing the root-owned config.
-  unset IMAGE_REPOSITORY GITHUB_REPOSITORY GITHUB_WORKFLOW_NAME RELEASE_BRANCH
+  unset IMAGE_REPOSITORY GITHUB_REPOSITORY RELEASE_BRANCH
   unset LEGACY_CONTAINER COMPOSE_CONTAINER DATA_DIR DATABASE_PATH LOOPBACK_PORT COMPOSE_FILE COMPOSE_TEMPLATE ENV_FILE
   unset STATE_DIR BACKUP_DIR ROLLBACK_DIR RECOVERY_DIR DOCKER_CONFIG_DIR GITHUB_TOKEN_FILE GH_BIN GH_SHA256
   unset DOCKER_BIN CURL_BIN PYTHON_BIN BREVO_ENV_FILE
@@ -77,7 +74,7 @@ load_config() {
 
 validate_config() {
   local name
-  for name in IMAGE_REPOSITORY GITHUB_REPOSITORY GITHUB_WORKFLOW_NAME RELEASE_BRANCH \
+  for name in IMAGE_REPOSITORY GITHUB_REPOSITORY RELEASE_BRANCH \
     LEGACY_CONTAINER COMPOSE_CONTAINER DATA_DIR DATABASE_PATH LOOPBACK_PORT COMPOSE_FILE COMPOSE_TEMPLATE ENV_FILE \
     STATE_DIR BACKUP_DIR ROLLBACK_DIR RECOVERY_DIR DOCKER_CONFIG_DIR GITHUB_TOKEN_FILE GH_BIN GH_SHA256 DOCKER_BIN CURL_BIN PYTHON_BIN; do
     require_value "$name" || return 1
@@ -85,7 +82,6 @@ validate_config() {
   [[ "$IMAGE_REPOSITORY" == "$SIFTALPHA_IMAGE_REPOSITORY" ]] || { die 'unexpected image repository'; return 1; }
   [[ "$GITHUB_REPOSITORY" == "$SIFTALPHA_GITHUB_REPOSITORY" ]] || { die 'unexpected GitHub repository'; return 1; }
   [[ "$RELEASE_BRANCH" == "$SIFTALPHA_RELEASE_BRANCH" ]] || { die 'unexpected release branch'; return 1; }
-  [[ "$GITHUB_WORKFLOW_NAME" == "$SIFTALPHA_WORKFLOW_NAME" ]] || { die 'unexpected workflow name'; return 1; }
   [[ "$LOOPBACK_PORT" == '127.0.0.1:19091' ]] || { die 'unexpected website loopback port'; return 1; }
   [[ "$LEGACY_CONTAINER" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || { die 'unsafe legacy container name'; return 1; }
   [[ "$COMPOSE_CONTAINER" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || { die 'unsafe Compose container name'; return 1; }
@@ -139,25 +135,18 @@ image_label() {
 }
 
 verify_arm64_image() {
-  local image="$1" manifest
-  manifest="$(docker_cli buildx imagetools inspect "$image" --raw)" || { die 'cannot inspect image manifest'; return 1; }
-  "$PYTHON_BIN" - "$manifest" <<'PY'
-import json
-import sys
-
-manifest = json.loads(sys.argv[1])
-manifests = manifest.get("manifests", [])
-if not any(item.get("platform", {}).get("os") == "linux" and item.get("platform", {}).get("architecture") == "arm64" for item in manifests):
-    raise SystemExit("candidate image has no linux/arm64 manifest")
-PY
+  local image="$1" platform
+  platform="$(docker_cli image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" \
+    || { die 'cannot inspect pulled image platform'; return 1; }
+  [[ "$platform" == 'linux/arm64' ]] || { die 'candidate image is not linux/arm64'; return 1; }
 }
 
 verify_oci_labels() {
-  local image="$1" expected_commit="$2" expected_run_id="$3"
+  local image="$1" expected_commit="$2" revision
   [[ "$(image_label "$image" 'org.opencontainers.image.source')" == "https://github.com/$GITHUB_REPOSITORY" ]] || { die 'OCI source label mismatch'; return 1; }
-  [[ "$(image_label "$image" 'org.opencontainers.image.revision')" == "$expected_commit" ]] || { die 'OCI revision label mismatch'; return 1; }
-  [[ "$(image_label "$image" 'io.siftalpha.build.run-id')" == "$expected_run_id" ]] || { die 'OCI run-id label mismatch'; return 1; }
-  [[ "$(image_label "$image" 'io.siftalpha.build.ref')" == "$RELEASE_BRANCH" ]] || { die 'OCI ref label mismatch'; return 1; }
+  revision="$(image_label "$image" 'org.opencontainers.image.revision')"
+  [[ "$revision" =~ ^[0-9a-f]{40}$ && "$revision" == "$expected_commit" ]] \
+    || { die 'OCI revision label does not match the complete release commit'; return 1; }
 }
 
 verify_gh_binary() {
@@ -169,81 +158,33 @@ verify_gh_binary() {
 }
 
 verify_trusted_source() {
-  local digest="$1" image run_id run_json temp_dir manifest_file oci_manifest_file oci_provenance_file token gh_config_dir
+  local digest="$1" image token gh_config_dir release_ref expected_commit
   image="$(candidate_image "$digest")"
   verify_gh_binary || return 1
   token="$(<"$GITHUB_TOKEN_FILE")"
   [[ -n "$token" ]] || { die 'GitHub verification token is empty'; return 1; }
   ensure_state_directories || return 1
   gh_config_dir="$STATE_DIR/gh-cli-config"
-  temp_dir="$(mktemp -d "$RECOVERY_DIR/provenance.XXXXXX")" \
-    || { die 'cannot create protected provenance workspace'; return 1; }
-  run_json="$temp_dir/run.json"
-  manifest_file="$temp_dir/siftalpha-web-build-manifest.json"
-  oci_manifest_file="$temp_dir/oci-manifest.json"
-  oci_provenance_file="$temp_dir/oci-provenance.json"
-  docker_cli pull "$image" >/dev/null || { cleanup_provenance "$temp_dir"; return 1; }
-  run_id="$(image_label "$image" 'io.siftalpha.build.run-id')"
-  [[ "$run_id" =~ ^[0-9]+$ ]] || { die 'OCI run-id label is invalid'; cleanup_provenance "$temp_dir"; return 1; }
-  GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$run_json" || { cleanup_provenance "$temp_dir"; return 1; }
-  GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" "$GH_BIN" run download "$run_id" --repo "$GITHUB_REPOSITORY" --name siftalpha-web-build-manifest --dir "$temp_dir" || { cleanup_provenance "$temp_dir"; return 1; }
-  [[ -f "$manifest_file" ]] || { die 'build manifest artifact is unavailable'; cleanup_provenance "$temp_dir"; return 1; }
-  if ! "$PYTHON_BIN" - "$run_json" "$manifest_file" "$digest" "$run_id" \
-    "$RELEASE_BRANCH" "$GITHUB_WORKFLOW_NAME" "$SIFTALPHA_WORKFLOW_ID" "$SIFTALPHA_WORKFLOW_PATH" <<'PY'
+  docker_cli pull "$image" >/dev/null || { die 'cannot pull immutable candidate image'; return 1; }
+  release_ref="$(GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" \
+    "$GH_BIN" api "repos/$GITHUB_REPOSITORY/git/ref/heads/$RELEASE_BRANCH")" \
+    || { die 'cannot verify the current GitHub release branch HEAD'; return 1; }
+  expected_commit="$("$PYTHON_BIN" - "$release_ref" <<'PY'
 import json
+import re
 import sys
 
-run_path, manifest_path, digest, run_id, branch, workflow_name, workflow_id, workflow_path = sys.argv[1:]
-run = json.loads(open(run_path, encoding="utf-8").read())
-manifest = json.loads(open(manifest_path, encoding="utf-8").read())
-if run.get("status") != "completed" or run.get("conclusion") != "success":
-    raise SystemExit("GitHub Actions Run is not successful")
-if (
-    run.get("head_branch") != branch
-    or run.get("name") != workflow_name
-    or str(run.get("workflow_id")) != workflow_id
-    or run.get("path") != workflow_path
-):
-    raise SystemExit("GitHub Actions Run identity mismatch")
-if manifest.get("digest") != digest or str(manifest.get("run_id")) != run_id:
-    raise SystemExit("build manifest digest or Run ID mismatch")
-if manifest.get("source_commit") != run.get("head_sha"):
-    raise SystemExit("build manifest commit mismatch")
-if manifest.get("image") != "ghcr.io/kuashan/siftalpha-web" or manifest.get("platform") != "linux/arm64" or manifest.get("ref") != branch:
-    raise SystemExit("build manifest identity mismatch")
-if manifest.get("source_ref") != f"refs/heads/{branch}" or manifest.get("workflow") != workflow_name:
-    raise SystemExit("build manifest workflow identity mismatch")
-if manifest.get("run_url") != run.get("html_url"):
-    raise SystemExit("build manifest Run URL mismatch")
+try:
+    sha = json.loads(sys.argv[1])["object"]["sha"]
+except (KeyError, TypeError, json.JSONDecodeError):
+    raise SystemExit("release branch response is invalid")
+if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+    raise SystemExit("release branch HEAD is not a full commit SHA")
+print(sha)
 PY
-  then
-    cleanup_provenance "$temp_dir"
-    return 1
-  fi
-  local expected_commit
-  expected_commit="$($PYTHON_BIN - "$run_json" <<'PY'
-import json
-import sys
-print(json.loads(open(sys.argv[1], encoding="utf-8").read())["head_sha"])
-PY
-)" || { cleanup_provenance "$temp_dir"; return 1; }
-  verify_oci_labels "$image" "$expected_commit" "$run_id" || { cleanup_provenance "$temp_dir"; return 1; }
-  docker_cli buildx imagetools inspect "$image" --format '{{json .Manifest}}' > "$oci_manifest_file" \
-    || { die 'cannot read OCI image index from GHCR'; cleanup_provenance "$temp_dir"; return 1; }
-  docker_cli buildx imagetools inspect "$image" --format '{{json .Provenance.SLSA}}' > "$oci_provenance_file" \
-    || { die 'cannot read BuildKit OCI provenance from GHCR'; cleanup_provenance "$temp_dir"; return 1; }
-  "$PYTHON_BIN" "$SIFTALPHA_LIB_DIR/verify_buildkit_provenance.py" \
-    "$manifest_file" "$oci_manifest_file" "$oci_provenance_file" "$digest" "$expected_commit" "$run_id" \
-    "refs/heads/$RELEASE_BRANCH" "$GITHUB_WORKFLOW_NAME" \
-    || { cleanup_provenance "$temp_dir"; return 1; }
-  printf 'trusted source: commit=%s run_id=%s digest=%s\n' "$expected_commit" "$run_id" "$digest"
-  cleanup_provenance "$temp_dir"
-}
-
-cleanup_provenance() {
-  local directory="$1"
-  find "$directory" -depth -type f -delete 2>/dev/null || true
-  find "$directory" -depth -type d -empty -delete 2>/dev/null || true
+)" || { die 'cannot parse the current GitHub release branch HEAD'; return 1; }
+  verify_oci_labels "$image" "$expected_commit" || return 1
+  printf 'trusted source: commit=%s digest=%s\n' "$expected_commit" "$digest"
 }
 
 backup_and_restore_check() {

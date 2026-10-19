@@ -18,33 +18,24 @@ class ApprovedReleaseTests(unittest.TestCase):
     def setUp(self):
         self.client = object.__new__(upgrade.GitHubSource)
 
-    def test_approved_release_head_and_successful_matching_workflow(self):
+    def test_approved_release_head_is_sufficient_without_actions_lookup(self):
+        calls = []
         def api(path):
+            calls.append(path)
             if path.startswith("repos/kuashan/huntalpha/git/ref/"):
                 return {"object": {"sha": GOOD_SHA}}
-            return {"workflow_runs": [{
-                "head_sha": GOOD_SHA,
-                "head_branch": upgrade.BRANCH,
-                "workflow_id": upgrade.WORKFLOW_ID,
-                "name": upgrade.WORKFLOW_NAME,
-                "path": upgrade.WORKFLOW_PATH,
-                "status": "completed",
-                "conclusion": "success",
-            }]}
+            raise AssertionError(f"unexpected GitHub API request: {path}")
         self.client.api = api
         self.client.verify_release(GOOD_SHA)
+        self.assertEqual(calls, [f"repos/{upgrade.REPO}/git/ref/heads/{upgrade.BRANCH}"])
 
-    def test_unknown_commit_or_failed_ci_is_refused(self):
-        self.client.api = lambda path: (
-            {"object": {"sha": "b" * 40}} if "/git/ref/" in path
-            else {"workflow_runs": []}
-        )
+    def test_commit_that_is_not_the_current_release_head_is_refused(self):
+        self.client.api = lambda path: {"object": {"sha": "b" * 40}}
         with self.assertRaises(ValueError):
             self.client.verify_release(GOOD_SHA)
-        self.client.api = lambda path: (
-            {"object": {"sha": GOOD_SHA}} if "/git/ref/" in path
-            else {"workflow_runs": []}
-        )
+
+    def test_malformed_release_head_is_refused(self):
+        self.client.api = lambda path: {"object": {"sha": "not-a-full-commit"}}
         with self.assertRaises(ValueError):
             self.client.verify_release(GOOD_SHA)
 
@@ -71,6 +62,9 @@ class ApprovedReleaseTests(unittest.TestCase):
 
 class AtomicReplacementTests(unittest.TestCase):
     def setUp(self):
+        geteuid = patch.object(upgrade.os, "geteuid", return_value=1000, create=True)
+        geteuid.start()
+        self.addCleanup(geteuid.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)

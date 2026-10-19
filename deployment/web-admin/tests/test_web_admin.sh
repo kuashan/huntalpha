@@ -41,6 +41,14 @@ fi
 if grep -F 'ports:' "$ROOT/deployment/web-admin/compose.selftest.yaml.template" >/dev/null; then
   fail "isolated self-test containers must not publish host ports"
 fi
+for workflow in siftalpha-web-arm64.yml account-safety-pr.yml; do
+  workflow_path="$ROOT/.github/workflows/$workflow"
+  sed -n '1,12p' "$workflow_path" | grep -E '^  workflow_dispatch:[[:space:]]*$' >/dev/null \
+    || fail "$workflow must support manual dispatch"
+  if sed -n '1,12p' "$workflow_path" | grep -E '^  (push|pull_request):[[:space:]]*$' >/dev/null; then
+    fail "$workflow must not run automatically"
+  fi
+done
 
 FAKE_BIN="$TEST_ROOT/bin"
 STATE_DIR="$TEST_ROOT/state"
@@ -50,7 +58,6 @@ export FAKE_LOG="$TEST_ROOT/fake.log"
 : > "$FAKE_LOG"
 export FAKE_DIGEST="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 export FAKE_COMMIT="0123456789abcdef0123456789abcdef01234567"
-export FAKE_RUN_ID="424242"
 export FAKE_PLAN_MODE='none'
 export FAKE_LOG
 
@@ -60,26 +67,12 @@ set -Eeuo pipefail
 { printf 'docker'; printf ' %s' "$@"; printf '\n'; } >> "$FAKE_LOG"
 case "${1:-}" in
   pull) exit 0 ;;
-  buildx)
-    if [[ "$*" == *".Manifest"* ]]; then
-      printf '{"digest":"%s","manifests":[{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","platform":{"architecture":"arm64","os":"linux"}},{"digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","annotations":{"vnd.docker.reference.type":"attestation-manifest","vnd.docker.reference.digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"platform":{"architecture":"unknown","os":"unknown"}}]}\n' "$FAKE_DIGEST"
-    elif [[ "$*" == *".Provenance.SLSA"* ]]; then
-      [[ "${FAKE_GH_MODE:-ok}" == provenance-fail ]] && exit 1
-      if [[ "${FAKE_PROVENANCE_VERSION:-v1}" == v0.2 ]]; then
-        printf '{"buildType":"https://mobyproject.org/buildkit@v1","invocation":{},"metadata":{}}\n'
-      else
-        printf '{"buildDefinition":{"buildType":"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md","externalParameters":{},"internalParameters":{"github_repository":"kuashan/huntalpha","github_workflow":"SiftAlpha Web CI and ARM64","github_workflow_ref":"kuashan/huntalpha/.github/workflows/siftalpha-web-arm64.yml@refs/heads/release/siftalpha-web-v1","github_workflow_sha":"%s","github_run_id":"%s","github_ref":"refs/heads/release/siftalpha-web-v1","github_event_name":"push"},"resolvedDependencies":[]},"runDetails":{"builder":{"id":""},"metadata":{}}}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
-      fi
-    else
-      printf '{"manifests":[{"platform":{"architecture":"arm64","os":"linux"}}]}\n'
-    fi
-    exit 0 ;;
+  buildx) printf 'unexpected BuildKit provenance lookup\n' >&2; exit 99 ;;
   image)
     case "${4:-}" in
-      '{{ index .Config.Labels "org.opencontainers.image.source" }}') [[ "${FAKE_GH_MODE:-ok}" == label-mismatch ]] && printf 'https://github.com/evil/repository\n' || printf 'https://github.com/kuashan/huntalpha\n' ;;
-      '{{ index .Config.Labels "org.opencontainers.image.revision" }}') [[ "${FAKE_GH_MODE:-ok}" == label-mismatch ]] && printf 'deadbeef\n' || printf '%s\n' "$FAKE_COMMIT" ;;
-      '{{ index .Config.Labels "io.siftalpha.build.run-id" }}') [[ "${FAKE_GH_MODE:-ok}" == label-mismatch ]] && printf '999999\n' || printf '%s\n' "$FAKE_RUN_ID" ;;
-      '{{ index .Config.Labels "io.siftalpha.build.ref" }}') printf 'release/siftalpha-web-v1\n' ;;
+      '{{.Os}}/{{.Architecture}}') [[ "${FAKE_GH_MODE:-ok}" == wrong-architecture ]] && printf 'linux/amd64\n' || printf 'linux/arm64\n' ;;
+      '{{ index .Config.Labels "org.opencontainers.image.source" }}') [[ "${FAKE_GH_MODE:-ok}" == source-mismatch ]] && printf 'https://github.com/evil/repository\n' || printf 'https://github.com/kuashan/huntalpha\n' ;;
+      '{{ index .Config.Labels "org.opencontainers.image.revision" }}') [[ "${FAKE_GH_MODE:-ok}" == revision-mismatch ]] && printf 'deadbeef\n' || printf '%s\n' "$FAKE_COMMIT" ;;
       '{{ index .Config.Labels "org.opencontainers.image.version" }}') printf 'V1.0.0\n' ;;
       *) printf 'arm64\n' ;;
     esac
@@ -325,29 +318,18 @@ EOF
 cat > "$FAKE_BIN/gh" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+{ printf 'gh'; printf ' %s' "$@"; printf '\n'; } >> "$FAKE_LOG"
 [[ "${GH_CONFIG_DIR:-}" == */gh-cli-config ]] || { printf 'GitHub CLI config directory is not isolated under web-admin state\n' >&2; exit 1; }
 mkdir -p "$GH_CONFIG_DIR"
 [[ -w "$GH_CONFIG_DIR" ]] || exit 1
 case "${1:-}" in
   api)
-    [[ "${FAKE_GH_MODE:-ok}" == run-mismatch ]] && { printf '{"conclusion":"failure"}\n'; exit 0; }
-    if [[ "${FAKE_GH_MODE:-ok}" == workflow-mismatch ]]; then
-      printf '{"status":"completed","conclusion":"success","head_sha":"%s","head_branch":"release/siftalpha-web-v1","name":"SiftAlpha Web CI and ARM64","workflow_id":123456,"path":".github/workflows/other.yml","html_url":"https://github.com/kuashan/huntalpha/actions/runs/%s"}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
-      exit 0
-    fi
-    printf '{"status":"completed","conclusion":"success","head_sha":"%s","head_branch":"release/siftalpha-web-v1","name":"SiftAlpha Web CI and ARM64","workflow_id":387611326,"path":".github/workflows/siftalpha-web-arm64.yml","html_url":"https://github.com/kuashan/huntalpha/actions/runs/%s"}\n' "$FAKE_COMMIT" "$FAKE_RUN_ID"
+    [[ "$*" == *"repos/kuashan/huntalpha/git/ref/heads/release/siftalpha-web-v1"* ]] \
+      || { printf 'unexpected GitHub API request\n' >&2; exit 98; }
+    [[ "${FAKE_GH_MODE:-ok}" == branch-head-mismatch ]] && printf '{"object":{"sha":"%040d"}}\n' 1 \
+      || printf '{"object":{"sha":"%s"}}\n' "$FAKE_COMMIT"
     ;;
-  run)
-    destination=""
-    for ((i = 1; i <= $#; i++)); do
-      [[ "${!i}" == --dir ]] && { j=$((i + 1)); destination="${!j}"; }
-    done
-    mkdir -p "$destination"
-    [[ "${FAKE_GH_MODE:-ok}" == manifest-missing ]] && exit 0
-    [[ "${FAKE_GH_MODE:-ok}" == manifest-mismatch ]] && digest='sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' || digest="$FAKE_DIGEST"
-    [[ "${FAKE_GH_MODE:-ok}" == metadata-forged ]] && record_commit='deadbeef' || record_commit="$FAKE_COMMIT"
-    printf '{"image":"ghcr.io/kuashan/siftalpha-web","digest":"%s","source_commit":"%s","run_id":"%s","run_url":"https://github.com/kuashan/huntalpha/actions/runs/%s","ref":"release/siftalpha-web-v1","source_ref":"refs/heads/release/siftalpha-web-v1","workflow":"SiftAlpha Web CI and ARM64","platform":"linux/arm64","tags":["sha-%s","v1.1.0-sha-%s"],"provenance":"buildkit-oci-slsa"}\n' "$digest" "$record_commit" "$FAKE_RUN_ID" "$FAKE_RUN_ID" "$record_commit" "$record_commit" > "$destination/siftalpha-web-build-manifest.json"
-    ;;
+  run) printf 'unexpected GitHub Actions artifact request\n' >&2; exit 99 ;;
   *) exit 1 ;;
 esac
 EOF
@@ -382,7 +364,6 @@ export FAKE_CONTAINER_STATE_FILE FAKE_CANDIDATE_MARKER_FILE FAKE_STOP_MARKER_FIL
 cat > "$TEST_ROOT/web-admin.conf" <<EOF
 IMAGE_REPOSITORY=ghcr.io/kuashan/siftalpha-web
 GITHUB_REPOSITORY=kuashan/huntalpha
-GITHUB_WORKFLOW_NAME='SiftAlpha Web CI and ARM64'
 RELEASE_BRANCH=release/siftalpha-web-v1
 LEGACY_CONTAINER=siftalpha-task011-ebd23f4
 COMPOSE_CONTAINER=siftalpha-web-compose
@@ -574,22 +555,16 @@ load_config "$TEST_ROOT/web-admin.conf"
 [[ "$IMAGE_REPOSITORY" == ghcr.io/kuashan/siftalpha-web ]] || fail "environment override changed fixed repository"
 
 assert_ok preflight_candidate "$FAKE_DIGEST"
-export FAKE_PROVENANCE_VERSION=v0.2
+if grep -E 'actions/runs|gh run|\.Provenance\.SLSA|build-manifest' "$FAKE_LOG" >/dev/null; then
+  fail "image verification used a GitHub Actions artifact or SLSA requirement"
+fi
+export FAKE_GH_MODE=source-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
-export FAKE_PROVENANCE_VERSION=v1
-export FAKE_GH_MODE=manifest-mismatch
+export FAKE_GH_MODE=revision-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
-export FAKE_GH_MODE=manifest-missing
+export FAKE_GH_MODE=branch-head-mismatch
 assert_fail preflight_candidate "$FAKE_DIGEST"
-export FAKE_GH_MODE=metadata-forged
-assert_fail preflight_candidate "$FAKE_DIGEST"
-export FAKE_GH_MODE=label-mismatch
-assert_fail preflight_candidate "$FAKE_DIGEST"
-export FAKE_GH_MODE=provenance-fail
-assert_fail preflight_candidate "$FAKE_DIGEST"
-export FAKE_GH_MODE=workflow-mismatch
-assert_fail preflight_candidate "$FAKE_DIGEST"
-export FAKE_GH_MODE=run-mismatch
+export FAKE_GH_MODE=wrong-architecture
 assert_fail preflight_candidate "$FAKE_DIGEST"
 unset FAKE_GH_MODE
 

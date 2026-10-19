@@ -1,9 +1,7 @@
 name: SiftAlpha Web CI and ARM64
 
 on:
-  push:
-    branches:
-      - release/siftalpha-web-v1
+  workflow_dispatch:
 
 permissions:
   contents: read
