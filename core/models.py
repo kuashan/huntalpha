@@ -193,6 +193,24 @@ class AccountMembership(models.Model):
     def __str__(self):
         return f"{self.user_id} · {self.tier.upper()}"
 
+class ChartWorkspace(models.Model):
+    """One global indicator/layout configuration per authenticated account."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="chart_workspace",
+    )
+    main = models.JSONField(default=list)
+    sub = models.JSONField(default=list)
+    pane_heights = models.JSONField(default=dict)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "图表工作区"
+        verbose_name_plural = "图表工作区"
+
+
 class PendingEmailRegistration(models.Model):
     """Unverified signups are NOT users and have no entitlements."""
     email = models.EmailField(max_length=150, unique=True)
