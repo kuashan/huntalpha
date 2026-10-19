@@ -117,6 +117,20 @@ jobs:
           assert AuthRateLimit.objects.count()==0
           print("synthetic upgrade preserves member, PRO, watchlist and 4 formula sources: PASS")
           '
+      - name: Verify frozen V1.0.0 remains readable against the migrated synthetic database
+        working-directory: old
+        run: |
+          python manage.py check
+          python manage.py shell -c '
+          from django.contrib.auth import get_user_model
+          from core.models import AccountMembership, WatchlistEntry
+          from formula_editor.models import Formula
+          u=get_user_model().objects.get(username="synthetic@example.com")
+          assert AccountMembership.objects.get(user=u).tier=="pro"
+          assert WatchlistEntry.objects.filter(user=u).count()==1
+          assert Formula.objects.count()==4
+          print("frozen V1.0.0 reads upgraded synthetic DB: PASS")
+          '
       - name: Check changed files contain no whitespace errors
         working-directory: new
         run: git diff --check ${{ github.event.pull_request.base.sha }} HEAD
