@@ -58,6 +58,7 @@ jobs:
           npm run test:indicators
           npm run test:realtime
           npm run test:chart
+          node src/workspaceState.test.mjs
           npm run build
 
   upgrade:
