@@ -53,6 +53,7 @@ from .realtime.formula_scheduler import FormulaRunRegistry, calculation_input_fi
 from .realtime.provider import REALTIME_PERIOD_SUBTYPES
 from .symbol_catalog import COINBASE_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
 from .watchlist import account_tier_payload, active_watchlist_entry_ids, watchlist_limit_for_user, resolve_account_tier
+from .workspace import COMMON_INDICATORS, WorkspaceValidationError, read_workspace, write_workspace
 from .python_indicators import (
     PythonIndicatorExecutionError,
     PythonIndicatorRuntimeUnavailable,
@@ -109,16 +110,6 @@ def user_payload(user, request=None):
 
 def visitor_payload():
     return {"email": "", "name": "访客模式", **account_tier_payload(None)}
-
-
-COMMON_INDICATORS = [
-    {"id": "builtin-ma", "name": "MA 均线", "code": "MA", "placement": "main"},
-    {"id": "builtin-boll", "name": "BOLL 布林线", "code": "BOLL", "placement": "main"},
-    {"id": "builtin-vol", "name": "VOL 成交量", "code": "VOL", "placement": "sub"},
-    {"id": "builtin-macd", "name": "MACD", "code": "MACD", "placement": "sub"},
-    {"id": "builtin-kdj", "name": "KDJ", "code": "KDJ", "placement": "sub"},
-    {"id": "builtin-rsi", "name": "RSI", "code": "RSI", "placement": "sub"},
-]
 
 
 def is_visitor(request):
@@ -280,6 +271,20 @@ def account_preferences(request):
         profile.save(update_fields=[*payload.keys(), "updated_at"])
     preferences = account_preferences_data(request.user, profile)
     return json({"status": "ok", "preferences": preferences, "user": user_payload(request.user, request)})
+
+
+@require_http_methods(["GET", "PUT"])
+@api_account_required
+def account_workspace(request):
+    """Account-global layout. GET also removes revoked indicators permanently."""
+    if request.method == "GET":
+        return json({"workspace": read_workspace(request.user)})
+    payload = auth_body(request)
+    try:
+        state = write_workspace(request.user, payload)
+    except WorkspaceValidationError:
+        return json({"error": "图表配置无效", "code": "invalid_workspace"}, 400)
+    return json({"status": "ok", "workspace": state})
 
 
 @require_http_methods(["POST", "DELETE"])

@@ -21,6 +21,16 @@ const watchlistMessages = {
   en: { watchlistList: 'Watchlist', watchlistEmpty: 'No watchlist items', watchlistSearchHint: 'Search a stock and select ☆ to add it', watchlistLoginRequired: 'Sign in or register to use the watchlist', watchlistLimitReached: 'Watchlist limit reached', watchlistAddFailed: 'Could not add to watchlist', watchlistRemoveFailed: 'Could not remove from watchlist', watchlistUnavailable: 'Live data source is not connected', watchlistRemaining: 'watchlist slots remaining', watchlistStar: 'Add to watchlist', watchlistUnstar: 'Remove from watchlist' },
 }
 Object.entries(watchlistMessages).forEach(([code, values]) => { messages[code] = { ...messages[code], ...values } })
+
+const workspaceMessages = {
+  'zh-CN': { workspaceLoadFailed: '工作区读取失败，本次修改不会自动保存；刷新页面可重试。', workspaceSaveFailed: '工作区保存失败，请检查网络并重新调整指标或布局。' },
+  'zh-TW': { workspaceLoadFailed: '工作區讀取失敗，本次修改不會自動儲存；重新整理頁面可重試。', workspaceSaveFailed: '工作區儲存失敗，請檢查網路後重新調整指標或版面。' },
+  en: { workspaceLoadFailed: 'Workspace could not load. Changes will not sync; reload to retry.', workspaceSaveFailed: 'Workspace could not save. Check your connection and adjust the chart again.' },
+  ja: { workspaceLoadFailed: 'ワークスペースを読み込めません。変更は保存されません。再読み込みしてください。', workspaceSaveFailed: 'ワークスペースを保存できません。接続を確認して再度変更してください。' },
+  ms: { workspaceLoadFailed: 'Ruang kerja gagal dimuatkan. Perubahan tidak disimpan; muat semula untuk cuba lagi.', workspaceSaveFailed: 'Ruang kerja gagal disimpan. Semak sambungan dan ubah carta sekali lagi.' },
+  fr: { workspaceLoadFailed: 'Chargement de l’espace de travail impossible. Les changements ne seront pas enregistrés. Rechargez la page.', workspaceSaveFailed: 'Enregistrement impossible. Vérifiez la connexion et modifiez le graphique à nouveau.' },
+}
+Object.entries(workspaceMessages).forEach(([code, values]) => { messages[code] = { ...messages[code], ...values } })
 export const t = key => messages[locale.value]?.[key] ?? messages.en[key] ?? key
 export const languageName = computed(() => languages.find(item => item.code === locale.value)?.label ?? '简体中文')
 export function setLocale(code) { if (!messages[code]) return; locale.value = code; localStorage.setItem('quantscope:locale', code); document.documentElement.lang = code }

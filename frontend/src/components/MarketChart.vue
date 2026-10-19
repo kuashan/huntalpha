@@ -12,11 +12,12 @@ import { settleHistoryReconcile } from '../realtime/historyRecovery.mjs'
 import { isCurrentFormulaResult, shouldScheduleFormulaRefresh } from '../realtime/formulaRefreshScheduler.mjs'
 import { classifyChartUpdate, diffIndicatorSets, indicatorKey } from '../realtime/chartUpdatePolicy.mjs'
 
-const emit = defineEmits(['indicator-denied'])
+const emit = defineEmits(['indicator-denied', 'pane-heights-change'])
 const props = defineProps({
   symbol: Object,
   period: String,
   installedIndicators: { type: Array, default: () => [] },
+  savedPaneHeights: { type: Object, default: () => ({}) },
   marketColorTokens: { type: Object, default: () => ({ up: '#ef5350', down: '#20bd92' }) },
 })
 
@@ -85,9 +86,7 @@ const HISTORY_RECONCILE_RETRY_MS = 2000
 const cryptoCandleColor = color => ({ '#ef6671': '#ef5350', '#3acba3': '#20bd92' })[String(color || '').toLowerCase()] || color
 
 const backgroundStick = item => item.layer === 'background'
-const savedSubPaneHeights = () => {
-  try { return JSON.parse(localStorage.getItem('quantscope:sub-pane-heights') || '{}') } catch { return {} }
-}
+const savedSubPaneHeights = () => props.savedPaneHeights || {}
 
 function syncSubTitlePositions(rendered) {
   if (!chart || !el.value) return
@@ -100,12 +99,12 @@ function syncSubTitlePositions(rendered) {
 }
 
 function saveSubPaneHeights(rendered) {
-  const heights = savedSubPaneHeights()
+  const heights = { ...savedSubPaneHeights() }
   let paneIndex = 1
   rendered.filter(result => result.item.placement === 'sub').forEach(result => {
-    heights[result.item.code] = chart?.panes()[paneIndex++]?.getHeight() || 150
+    heights[result.item.code] = Math.max(80, Math.min(800, Math.round(chart?.panes()[paneIndex++]?.getHeight() || 150)))
   })
-  localStorage.setItem('quantscope:sub-pane-heights', JSON.stringify(heights))
+  emit('pane-heights-change', heights)
 }
 
 async function requestFormulaDrawing(item, bars, revision = 0) {

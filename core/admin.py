@@ -3,6 +3,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin
 
 from .models import AccountMembership, AccountProfile, CalibrationDataset, MarketSymbol, WatchlistEntry
+from .workspace import read_workspace
 
 
 @admin.register(AccountProfile)
@@ -72,6 +73,14 @@ class MembershipUserAdmin(UserAdmin):
         # Even a forged POST by non-superuser staff cannot inject a membership
         # formset: the editable inline does not exist for that request.
         return [AccountMembershipInline] if obj is not None and request.user.is_superuser else []
+
+
+    def save_formset(self, request, form, formset, change):
+        super().save_formset(request, form, formset, change)
+        if formset.model is AccountMembership:
+            # The only approved membership editor is this superuser inline.
+            # Removing revoked saved indicators does not modify Formula records.
+            read_workspace(form.instance)
 
 
 UserModel = get_user_model()

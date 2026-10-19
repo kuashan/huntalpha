@@ -167,6 +167,21 @@ class AccountProfile(models.Model):
         return f"账户 {self.user_id}"
 
 
+
+class ChartWorkspace(models.Model):
+    """One global indicator layout per real account; never stores formula source or bars."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="chart_workspace"
+    )
+    state = models.JSONField(default=dict)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "图表工作区"
+        verbose_name_plural = "图表工作区"
+
+
 class AccountMembership(models.Model):
     """The authoritative persisted FREE/PRO tier, independent of staff flags."""
 
