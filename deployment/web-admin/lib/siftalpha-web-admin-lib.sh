@@ -16,6 +16,7 @@ readonly SIFTALPHA_WORKFLOW_PATH='.github/workflows/siftalpha-web-arm64.yml'
 readonly SIFTALPHA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SIFTALPHA_MIGRATION_GUARD="$SIFTALPHA_LIB_DIR/verify_database_migration.py"
 readonly SIFTALPHA_MIGRATION_PROBE="$SIFTALPHA_LIB_DIR/migration_probe.py"
+readonly SIFTALPHA_UPGRADER="$SIFTALPHA_LIB_DIR/upgrade_web_admin.py"
 readonly SIFTALPHA_APPROVED_MIGRATION='formula_editor.0002_fixedindicatorstate'
 readonly SIFTALPHA_ACCOUNT_MIGRATION='core.0012_auth_verification'
 readonly SIFTALPHA_BREVO_ENV_DEFAULT='/etc/siftalpha/secrets/brevo.env'
@@ -97,11 +98,15 @@ validate_config() {
 validate_command() {
   case "$#:${1:-}" in
     1:status|1:health|1:rollback) return 0 ;;
+    2:upgrade)
+      [[ "$2" =~ ^[0-9a-f]{40}$ ]] || { die 'upgrade requires a complete lowercase Git commit SHA'; return 1; }
+      return 0
+      ;;
     2:preflight|2:deploy|2:test-deploy)
       [[ "$2" =~ $SIFTALPHA_DIGEST_PATTERN ]] || { die 'digest must be lowercase sha256:<64 hexadecimal characters>'; return 1; }
       return 0
       ;;
-    *) die 'usage: status | health | preflight <digest> | deploy <digest> | test-deploy <digest> | rollback' ;;
+    *) die 'usage: status | health | upgrade <commit-sha> | preflight <digest> | deploy <digest> | test-deploy <digest> | rollback' ;;
   esac
 }
 
@@ -1186,7 +1191,7 @@ rollback() {
 web_admin_main() {
   validate_command "$@" || return 1
   case "$1" in
-    deploy|rollback|test-deploy)
+    deploy|rollback|test-deploy|upgrade)
       ensure_state_directories || return 1
       command -v flock >/dev/null 2>&1 || { die 'deployment lock utility is unavailable'; return 1; }
       exec 9>"$STATE_DIR/operation.lock" || { die 'cannot open deployment lock'; return 1; }
@@ -1197,6 +1202,11 @@ web_admin_main() {
     status) status ;;
     health) health_check; printf 'health: ok\n' ;;
     preflight) preflight_candidate "$2" ;;
+    upgrade)
+      verify_gh_binary || return 1
+      [[ -f "$SIFTALPHA_UPGRADER" && ! -L "$SIFTALPHA_UPGRADER" ]] || { die 'web-admin upgrade helper not installed'; return 1; }
+      "$PYTHON_BIN" "$SIFTALPHA_UPGRADER" "$2" "$GH_BIN" "$GITHUB_TOKEN_FILE" "$STATE_DIR/gh-cli-config" "$STATE_DIR/tool-backups"
+      ;;
     deploy) deploy_candidate "$2" ;;
     test-deploy) isolated_deploy_and_rollback_test "$2" ;;
     rollback) rollback ;;
