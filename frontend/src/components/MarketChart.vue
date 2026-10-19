@@ -100,7 +100,8 @@ function syncSubTitlePositions(rendered) {
 }
 
 function saveSubPaneHeights(rendered) {
-  const heights = savedSubPaneHeights()
+  // Never mutate a Vue prop: the parent compares old/new heights to decide whether to save.
+  const heights = { ...savedSubPaneHeights() }
   let paneIndex = 1
   rendered.filter(result => result.item.placement === 'sub').forEach(result => {
     heights[result.item.code] = chart?.panes()[paneIndex++]?.getHeight() || 150
