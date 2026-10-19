@@ -21,6 +21,15 @@ const watchlistMessages = {
   en: { watchlistList: 'Watchlist', watchlistEmpty: 'No watchlist items', watchlistSearchHint: 'Search a stock and select ☆ to add it', watchlistLoginRequired: 'Sign in or register to use the watchlist', watchlistLimitReached: 'Watchlist limit reached', watchlistAddFailed: 'Could not add to watchlist', watchlistRemoveFailed: 'Could not remove from watchlist', watchlistUnavailable: 'Live data source is not connected', watchlistRemaining: 'watchlist slots remaining', watchlistStar: 'Add to watchlist', watchlistUnstar: 'Remove from watchlist' },
 }
 Object.entries(watchlistMessages).forEach(([code, values]) => { messages[code] = { ...messages[code], ...values } })
+const workspaceMessages = {
+  'zh-CN': { workspaceLoadFailed: '工作区读取失败；本次调整尚未同步', workspaceSaveFailed: '工作区保存失败；本次调整尚未同步' },
+  'zh-TW': { workspaceLoadFailed: '工作區讀取失敗；本次調整尚未同步', workspaceSaveFailed: '工作區儲存失敗；本次調整尚未同步' },
+  en: { workspaceLoadFailed: 'Could not load workspace; changes are not synced', workspaceSaveFailed: 'Could not save workspace; changes are not synced' },
+  ja: { workspaceLoadFailed: 'ワークスペースの読み込みに失敗しました。変更は同期されていません', workspaceSaveFailed: 'ワークスペースの保存に失敗しました。変更は同期されていません' },
+  ms: { workspaceLoadFailed: 'Gagal memuatkan ruang kerja; perubahan belum disegerakkan', workspaceSaveFailed: 'Gagal menyimpan ruang kerja; perubahan belum disegerakkan' },
+  fr: { workspaceLoadFailed: 'Chargement de l’espace de travail impossible ; modifications non synchronisées', workspaceSaveFailed: 'Enregistrement impossible ; modifications non synchronisées' },
+}
+Object.entries(workspaceMessages).forEach(([code, values]) => { messages[code] = { ...messages[code], ...values } })
 export const t = key => messages[locale.value]?.[key] ?? messages.en[key] ?? key
 export const languageName = computed(() => languages.find(item => item.code === locale.value)?.label ?? '简体中文')
 export function setLocale(code) { if (!messages[code]) return; locale.value = code; localStorage.setItem('quantscope:locale', code); document.documentElement.lang = code }
