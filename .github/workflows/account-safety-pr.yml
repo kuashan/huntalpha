@@ -37,6 +37,7 @@ jobs:
       - name: Validate narrow deployment migration and secret security guards
         run: |
           python -m unittest discover -s deployment/web-admin/tests -p test_database_migration.py
+          python -m unittest discover -s deployment/web-admin/tests -p test_upgrade_web_admin.py
           bash deployment/web-admin/tests/test_web_admin.sh
 
 
