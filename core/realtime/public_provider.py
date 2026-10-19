@@ -4,31 +4,14 @@ import os
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
-
 from .contracts import NormalizedBar, market_for_symbol, optional_numeric
 from .provider import REALTIME_PERIOD_SUBTYPES, RealtimeMarketProvider, RealtimeProviderError
 
 
-_PERIOD_SECONDS = {
-    "1分": 60, "5分": 300, "15分": 900, "30分": 1800, "60分": 3600,
-    "2小时": 7200, "4小时": 14400, "日线": 86400, "周线": 7 * 86400, "月线": 31 * 86400,
-}
-
-
-def _timestamp(value):
-    if isinstance(value, (int, float)):
-        return int(value)
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return int(parsed.astimezone(timezone.utc).timestamp())
+# A public quote contains daily aggregates, not candles for arbitrary periods.
+# Reuse the same full-window provider as /api/kline so the timestamps/OHLC agree.
+_MARKET_IDS = {"cn": "CN_A_SHARE", "hk": "HK_EQUITY", "us": "US_EQUITY"}
+_MIN_POLL_SECONDS = 60.0
 
 
 class PublicMarketRealtimeProvider(RealtimeMarketProvider):
@@ -44,9 +27,9 @@ class PublicMarketRealtimeProvider(RealtimeMarketProvider):
 
     def __init__(self, market_router, *, poll_interval: float | None = None):
         self.market_router = market_router
-        self.poll_interval = max(2.0, float(poll_interval or os.environ.get("PUBLIC_REALTIME_POLL_SECONDS", "15")))
+        self.poll_interval = max(_MIN_POLL_SECONDS, float(poll_interval or os.environ.get("PUBLIC_REALTIME_POLL_SECONDS", "60")))
         self._callbacks = defaultdict(set)
-        self._sequences = defaultdict(int)
+        self._last_emitted = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -66,41 +49,39 @@ class PublicMarketRealtimeProvider(RealtimeMarketProvider):
             "polling": True,
             "public": True,
             "markets": tuple(sorted(self.supported_markets)),
-            "periods": tuple(_PERIOD_SECONDS),
+            "periods": tuple(REALTIME_PERIOD_SUBTYPES),
             "provider": self.provider_name,
         }
 
-    def _quote(self, symbol):
+    def _period_bar(self, symbol, period):
         market = market_for_symbol(symbol)
         if market not in self.supported_markets:
             raise RealtimeProviderError(f"公开行情不支持市场：{market or 'unknown'}", status="unavailable")
-        market_id = {"cn": "CN_A_SHARE", "hk": "HK_EQUITY", "us": "US_EQUITY"}[market]
-        return self.market_router.quote(market_id, symbol)
-
-    def _normalize_quote(self, symbol, period, quote):
-        market = market_for_symbol(symbol)
-        now = int(time.time())
-        stamp = _timestamp(quote.get("updated_at")) or now
-        seconds = _PERIOD_SECONDS[period]
-        bucket = stamp - (stamp % seconds)
-        key = (str(symbol).upper(), period)
-        with self._lock:
-            self._sequences[key] += 1
-            sequence = self._sequences[key]
-        price = optional_numeric(quote.get("price"))
-        open_value = optional_numeric(quote.get("open")) or price
-        high = optional_numeric(quote.get("high")) or price
-        low = optional_numeric(quote.get("low")) or price
-        if price is None or open_value is None or high is None or low is None:
-            raise RealtimeProviderError("公开行情报价缺少有效 OHLC", status="unavailable")
+        fetch = self.market_router.fetch_window(_MARKET_IDS[market], symbol, period)
+        # The router may return a stale cached window when every source fails.
+        # That is valid historical fallback but must not be emitted as live data.
+        if fetch.meta.get("stale") or fetch.meta.get("mode") == "cache":
+            raise RealtimeProviderError("仅有缓存行情，不能作为实时 K 线", status="unavailable")
+        forming = fetch.forming
+        source = forming if forming is not None else (fetch.completed[-1] if fetch.completed else None)
+        if not isinstance(source, dict):
+            raise RealtimeProviderError("行情源没有返回真实周期 K 线", status="unavailable")
+        stamp = source.get("time")
+        try:
+            stamp = int(stamp) if stamp is not None else None
+        except (TypeError, ValueError, OverflowError):
+            stamp = None
+        values = {name: optional_numeric(source.get(name)) for name in ("open", "high", "low", "close")}
+        if stamp is None or any(value is None for value in values.values()):
+            raise RealtimeProviderError("周期 K 线缺少有效时间或 OHLC", status="unavailable")
         return NormalizedBar(
-            provider=str(quote.get("source") or self.provider_name), market=market,
-            symbol=str(symbol).upper(), period=period, time=bucket,
-            open=open_value, high=high, low=low, close=price,
-            volume=optional_numeric(quote.get("volume")), amount=optional_numeric(quote.get("amount")),
-            is_closed=False, provider_timestamp=stamp, sequence=sequence,
-            revision=0, mode="polling", event_kind="live",
-            data_status=str(quote.get("data_status") or "delayed"),
+            provider=fetch.provider_id, market=market,
+            symbol=str(symbol).upper(), period=period, time=stamp,
+            open=values["open"], high=values["high"], low=values["low"], close=values["close"],
+            volume=optional_numeric(source.get("volume")), amount=optional_numeric(source.get("amount")),
+            is_closed=forming is None, provider_timestamp=stamp, sequence=None,
+            revision=0, mode="polling", event_kind="authoritative",
+            data_status=str(fetch.meta.get("data_status") or "historical"),
         )
 
     def _emit_status(self, symbol, period, status, error=None):
@@ -121,15 +102,22 @@ class PublicMarketRealtimeProvider(RealtimeMarketProvider):
             subscriptions = [(key, list(callbacks)) for key, callbacks in self._callbacks.items()]
         for (symbol, period), callbacks in subscriptions:
             try:
-                bar = self._normalize_quote(symbol, period, self._quote(symbol))
+                bar = self._period_bar(symbol, period)
             except RealtimeProviderError as exc:
                 self._emit_status(symbol, period, exc.status, str(exc))
                 continue
             except Exception as exc:
                 self._emit_status(symbol, period, "unavailable", str(exc))
                 continue
+            # An unchanged last candle is not a new tick. Avoid repeated
+            # formula refreshes and SSE traffic while the exchange is closed.
+            fingerprint = (bar.provider, bar.time, bar.open, bar.high, bar.low, bar.close,
+                           bar.volume, bar.amount, bar.is_closed, bar.data_status)
             with self._lock:
                 self._status = "polling"
+                if self._last_emitted.get((symbol, period)) == fingerprint:
+                    continue
+                self._last_emitted[(symbol, period)] = fingerprint
             for callback in callbacks:
                 callback(bar)
 
@@ -141,7 +129,7 @@ class PublicMarketRealtimeProvider(RealtimeMarketProvider):
     def subscribe(self, symbol, period, callback):
         if not self.supports_symbol(symbol):
             raise RealtimeProviderError("公开实时轮询仅支持股票市场", status="unavailable")
-        if period not in REALTIME_PERIOD_SUBTYPES or period not in _PERIOD_SECONDS:
+        if period not in REALTIME_PERIOD_SUBTYPES or period not in REALTIME_PERIOD_SUBTYPES:
             raise RealtimeProviderError(f"公开实时轮询不支持周期：{period}", status="unavailable")
         key = (str(symbol).upper(), str(period))
         with self._lock:
@@ -156,13 +144,14 @@ class PublicMarketRealtimeProvider(RealtimeMarketProvider):
         key = (str(symbol).upper(), str(period))
         with self._lock:
             self._callbacks.pop(key, None)
+            self._last_emitted.pop(key, None)
             if not self._callbacks:
                 self._stop.set()
 
     def latest_snapshot(self, symbol, period):
-        if period not in _PERIOD_SECONDS:
+        if period not in REALTIME_PERIOD_SUBTYPES:
             raise RealtimeProviderError(f"公开实时轮询不支持周期：{period}", status="unavailable")
-        return self._normalize_quote(symbol, period, self._quote(symbol))
+        return self._period_bar(symbol, period)
 
     def health_check(self):
         with self._lock:
@@ -176,6 +165,7 @@ class PublicMarketRealtimeProvider(RealtimeMarketProvider):
             thread = self._thread
             self._thread = None
             self._callbacks.clear()
+            self._last_emitted.clear()
             self._status = "unavailable"
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1)
