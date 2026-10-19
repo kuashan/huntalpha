@@ -273,7 +273,6 @@ def account_preferences(request):
     return json({"status": "ok", "preferences": preferences, "user": user_payload(request.user, request)})
 
 
-
 @require_http_methods(["GET", "PUT"])
 @api_account_required
 def account_workspace(request):
