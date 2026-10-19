@@ -11,6 +11,7 @@ import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from '../re
 import { settleHistoryReconcile } from '../realtime/historyRecovery.mjs'
 import { isCurrentFormulaResult, shouldScheduleFormulaRefresh } from '../realtime/formulaRefreshScheduler.mjs'
 import { classifyChartUpdate, diffIndicatorSets, indicatorKey } from '../realtime/chartUpdatePolicy.mjs'
+import { createChartTimeFormatters } from '../realtime/chartTimeFormat.mjs'
 
 const emit = defineEmits(['indicator-denied', 'pane-heights-changed'])
 const props = defineProps({
@@ -735,12 +736,14 @@ async function draw(options = {}) {
     .reduce((sum, result) => sum + (savedHeights[result.item.code] || 150), 0)
   const chartHeight = 460 + subHeight
   el.value.style.height = `${chartHeight}px`
+  const chartTime = createChartTimeFormatters(props.period)
   chart = createChart(el.value, {
     width: el.value.clientWidth, height: chartHeight,
     layout: { background: { color: '#080d17' }, textColor: '#8798ab', panes: { separatorColor: '#263241' } },
     grid: { vertLines: { color: '#172234' }, horzLines: { color: '#172234' } },
     rightPriceScale: { borderColor: '#263241' },
-    timeScale: { borderColor: '#263241', timeVisible: true, secondsVisible: false, rightOffset: 4, barSpacing: 7, minBarSpacing: 2 },
+    localization: { timeFormatter: chartTime.timeFormatter },
+    timeScale: { borderColor: '#263241', timeVisible: chartTime.timeVisible, tickMarkFormatter: chartTime.tickMarkFormatter, secondsVisible: false, rightOffset: 4, barSpacing: 7, minBarSpacing: 2 },
     crosshair: { mode: 0 },
     handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
     handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },

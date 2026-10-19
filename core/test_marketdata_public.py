@@ -71,6 +71,61 @@ class PublicMarketDataProviderTests(TestCase):
         self.assertEqual([bar["time"] for bar in result["completed"]], [session_start])
         self.assertIsNone(result["forming"])
 
+    def test_a_share_closed_daily_bad_open_requires_matching_independent_quote(self):
+        from .marketdata.providers.yahoo import _reconcile_closed_a_share_daily_open
+
+        day_stamp = int(datetime(2026, 10, 19, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+        original = {"time": day_stamp, "open": 25.28, "high": 25.53, "low": 24.16, "close": 24.86}
+        quote = {"updated_at": "20261019161451", "open": 24.16, "high": 25.53, "low": 24.16, "price": 24.86}
+        for bad in (
+            {**quote, "updated_at": "20261016161451"},
+            {**quote, "high": 25.40},
+            {**quote, "price": 25.00},
+            {**quote, "open": 23.10},
+            {**quote, "open": None},
+        ):
+            with self.subTest(quote=bad):
+                bar = dict(original)
+                self.assertFalse(_reconcile_closed_a_share_daily_open(bar, bad))
+                self.assertEqual(bar, original)
+        bar = dict(original)
+        self.assertTrue(_reconcile_closed_a_share_daily_open(bar, quote))
+        self.assertEqual(bar["open"], 24.16)
+        self.assertEqual((bar["high"], bar["low"], bar["close"]), (25.53, 24.16, 24.86))
+
+    def test_yahoo_daily_crosscheck_changes_only_latest_closed_a_share_open(self):
+        tz = ZoneInfo("Asia/Shanghai")
+        ts0 = int(datetime(2026, 10, 16, 9, 30, tzinfo=tz).timestamp())
+        ts1 = int(datetime(2026, 10, 19, 9, 30, tzinfo=tz).timestamp())
+        now_ts = int(datetime(2026, 10, 19, 16, 15, tzinfo=tz).timestamp())
+        payload = {"chart": {"result": [{
+            "meta": {"currentTradingPeriod": {"regular": {
+                "start": ts1, "end": int(datetime(2026, 10, 19, 15, tzinfo=tz).timestamp())}}},
+            "timestamp": [ts0, ts1], "indicators": {"quote": [{
+                "open": [25.28, 25.28], "high": [25.45, 25.53],
+                "low": [24.01, 24.16], "close": [24.16, 24.86], "volume": [10, 20]
+            }]},
+        }], "error": None}}
+        quote = {"updated_at": "20261019161451", "open": 24.16, "high": 25.53, "low": 24.16, "price": 24.86}
+        provider = YahooFinanceMarketDataProvider(CN_A_SHARE, minimum_completed_bars=1)
+        with mock.patch.object(provider, "_request_chart", return_value=payload), mock.patch.object(
+            TencentPublicMarketDataProvider, "quote", return_value=quote
+        ) as check:
+            out = provider.fetch_window("SZ.002315", "日线", now_ts=now_ts)
+        self.assertEqual(check.call_count, 1)
+        self.assertEqual(out["completed"][0]["open"], 25.28)
+        self.assertEqual(out["completed"][1]["open"], 24.16)
+        self.assertEqual(out["meta"]["daily_open_crosscheck"], "corrected_from_tencent_quote")
+
+        # During trading, do not replace forming candles or introduce extra calls.
+        during = int(datetime(2026, 10, 19, 14, 30, tzinfo=tz).timestamp())
+        with mock.patch.object(provider, "_request_chart", return_value=payload), mock.patch.object(
+            TencentPublicMarketDataProvider, "quote", side_effect=AssertionError("too early")
+        ) as check:
+            out = provider.fetch_window("SZ.002315", "日线", now_ts=during)
+        check.assert_not_called()
+        self.assertIsNotNone(out["forming"])
+
     def test_yahoo_week_month_are_not_completed_by_midperiod_daily_close(self):
         tz = ZoneInfo("Asia/Shanghai")
         stamp = lambda day, hour=15: int(datetime(2026, 10, day, hour, tzinfo=tz).timestamp())
