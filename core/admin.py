@@ -75,7 +75,6 @@ class MembershipUserAdmin(UserAdmin):
         return [AccountMembershipInline] if obj is not None and request.user.is_superuser else []
 
 
-
     def save_formset(self, request, form, formset, change):
         super().save_formset(request, form, formset, change)
         if formset.model is AccountMembership:
