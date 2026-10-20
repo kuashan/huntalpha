@@ -42,6 +42,7 @@ for approved_key in (
     ("core", "0012_auth_verification"),
     ("core", "0013_chartworkspace"),
     ("core", "0014_accountmembership_expires_at"),
+    ("core", "0015_marketdatasourcesetting"),
 ):
     if approved_key in executor.loader.applied_migrations:
         module = importlib.import_module(f"{approved_key[0]}.migrations.{approved_key[1]}")
