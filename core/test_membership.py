@@ -2,12 +2,13 @@
 import json
 from datetime import datetime, timedelta, timezone as dt_timezone
 from django.utils import timezone
+from unittest.mock import patch
 from django.contrib import admin
 from django.contrib.auth.models import Permission
 from django.contrib.auth import get_user_model
 from django.test import Client, RequestFactory, TestCase
 
-from .admin import AccountMembershipInline, MembershipUserAdmin
+from .admin import AccountMembershipForm, AccountMembershipInline, MembershipUserAdmin
 from .models import AccountMembership, MarketSymbol, WatchlistEntry
 from .membership import DURATION_CHOICES, period_end, grant_pro_period
 from .watchlist import resolve_account_tier, resolve_watchlist_limit
@@ -185,6 +186,27 @@ class MembershipExpiryTests(TestCase):
         self.user = get_user_model().objects.create_user(username="expiry-user", password="secure-password")
         self.membership = AccountMembership.objects.get(user=self.user)
         self.client.force_login(self.user)
+
+    def test_superuser_admin_grant_and_renewal_form(self):
+        start = datetime(2026, 11, 10, 15, tzinfo=dt_timezone.utc)
+        with patch("core.membership.timezone.now", return_value=start):
+            form = AccountMembershipForm(data={
+                "tier": "free", "expires_at": "", "grant_duration": "7d",
+            }, instance=self.membership)
+            self.assertTrue(form.is_valid(), form.errors)
+            saved = form.save()
+        self.assertEqual(saved.tier, "pro")
+        self.assertEqual(saved.expires_at, start + timedelta(days=7))
+        # Django admin submits the existing expiration as well as a new duration.
+        with patch("core.membership.timezone.now", return_value=start + timedelta(days=1)):
+            renewal = AccountMembershipForm(data={
+                "tier": "pro",
+                "expires_at": saved.expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "grant_duration": "1m",
+            }, instance=saved)
+            self.assertTrue(renewal.is_valid(), renewal.errors)
+            extended = renewal.save()
+        self.assertEqual(extended.expires_at, datetime(2026, 12, 17, 15, tzinfo=dt_timezone.utc))
 
     def test_five_calendar_periods_preserve_seconds_and_month_ends(self):
         start = datetime(2027, 1, 31, 15, 12, 34, tzinfo=dt_timezone.utc)
