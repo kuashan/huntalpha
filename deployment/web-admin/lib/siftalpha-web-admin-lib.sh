@@ -1087,6 +1087,9 @@ deploy_candidate() {
     if [[ "$planned" == "[\"$SIFTALPHA_WORKSPACE_MIGRATION\"]" ]]; then
       expected_applied="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]"
     fi
+    if [[ "$planned" == "[\"$SIFTALPHA_EXPIRY_MIGRATION\"]" ]]; then
+      expected_applied="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\",\"$SIFTALPHA_EXPIRY_MIGRATION\"]"
+    fi
     if ! inspect_migration_plan "$image" "$DATABASE_PATH" \
       || [[ "$LAST_MIGRATION_PLAN" != '[]' || "$LAST_APPLIED_MIGRATIONS" != "$expected_applied" ]]; then
       cleanup_migration_workspace "$LAST_MIGRATION_WORKSPACE" || true
