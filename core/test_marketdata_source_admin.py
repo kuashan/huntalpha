@@ -45,7 +45,7 @@ class SourceSelectionTests(TestCase):
 
     def test_manual_choice_is_strict_for_quotes_and_kline(self):
         MarketDataSourceSetting.objects.create(market="us", provider="yahoo-finance")
-        self.assertEqual(self.router.provider_ids("US_EQUITY"), ("yahoo-finance",))
+        self.assertEqual(self.router.providers_for("US_EQUITY"), (self.first,))
         with self.assertRaises(Exception):
             self.router.quote("US_EQUITY", "US.AAPL")
         with self.assertRaises(Exception):
