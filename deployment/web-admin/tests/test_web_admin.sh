@@ -614,7 +614,14 @@ assert_fail validate_command status unexpected
 assert_fail validate_command
 
 log_before="$(wc -l < "$FAKE_LOG")"
-FAKE_CHMOD_FAIL=1 assert_fail verify_trusted_source "$FAKE_DIGEST"
+# Isolate the intentional chmod fault: on some Git Bash environments a
+# temporary assignment to a shell function can remain exported afterward.
+# A subshell must not let it contaminate the later expected-success preflight.
+(
+  export FAKE_CHMOD_FAIL=1
+  assert_fail verify_trusted_source "$FAKE_DIGEST"
+)
+unset FAKE_CHMOD_FAIL
 [[ "$(wc -l < "$FAKE_LOG")" == "$log_before" ]] || fail "read-only state failure continued into Docker verification"
 find "$RECOVERY_DIR" -mindepth 1 -print -quit | grep -q . && fail "read-only state failure left a temporary provenance copy"
 
