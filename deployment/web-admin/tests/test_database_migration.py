@@ -812,6 +812,19 @@ class RealSourceSelectionMigrationGuardTests(MigrationGuardTestCase):
     _run_manage = RealDjangoMigrationRehearsalTests._run_manage
     _probe = RealDjangoMigrationRehearsalTests._probe
 
+    def test_probe_resolves_built_in_django_app_labels_and_rejects_unknown_plan(self):
+        # On an empty database Django reports pending apps like contenttypes;
+        # their app labels are not importable top-level Python packages.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            uninitialized = Path(temporary_directory) / "empty.sqlite3"
+            state = self._probe(uninitialized)
+            self.assertIn(
+                "contenttypes.0001_initial",
+                {item["name"] for item in state["pending"]},
+            )
+            with self.assertRaisesRegex(ValueError, "unapproved Django migration plan"):
+                self.guard().validate_probe_state(state)
+
     def test_additive_market_settings_and_frozen_user_data(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
