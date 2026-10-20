@@ -19,6 +19,9 @@ const watchlistMessages = {
   'zh-CN': { watchlistExpand: '展开', watchlistCollapse: '收起', watchlistList: '自选列表', watchlistEmpty: '暂无自选', watchlistSearchHint: '搜索股票并点击 ☆ 添加', watchlistLoginRequired: '登录或注册后使用自选功能', watchlistLimitReached: '自选已满', watchlistAddFailed: '添加自选失败', watchlistRemoveFailed: '取消自选失败', watchlistUnavailable: '真实数据源尚未接入', watchlistRemaining: '个可用额度', watchlistStar: '收藏', watchlistUnstar: '取消收藏' },
   'zh-TW': { watchlistExpand: '展開', watchlistCollapse: '收起', watchlistList: '自選列表', watchlistEmpty: '暫無自選', watchlistSearchHint: '搜尋股票並點擊 ☆ 新增', watchlistLoginRequired: '登入或註冊後使用自選功能', watchlistLimitReached: '自選已滿', watchlistAddFailed: '新增自選失敗', watchlistRemoveFailed: '取消自選失敗', watchlistUnavailable: '尚未接入真實資料源', watchlistRemaining: '個可用額度', watchlistStar: '收藏', watchlistUnstar: '取消收藏' },
   en: { watchlistExpand: 'Expand', watchlistCollapse: 'Collapse', watchlistList: 'Watchlist', watchlistEmpty: 'No watchlist items', watchlistSearchHint: 'Search a stock and select ☆ to add it', watchlistLoginRequired: 'Sign in or register to use the watchlist', watchlistLimitReached: 'Watchlist limit reached', watchlistAddFailed: 'Could not add to watchlist', watchlistRemoveFailed: 'Could not remove from watchlist', watchlistUnavailable: 'Live data source is not connected', watchlistRemaining: 'watchlist slots remaining', watchlistStar: 'Add to watchlist', watchlistUnstar: 'Remove from watchlist' },
+  ja: { watchlistExpand: '展開', watchlistCollapse: '閉じる' },
+  ms: { watchlistExpand: 'Kembangkan', watchlistCollapse: 'Tutup' },
+  fr: { watchlistExpand: 'Déployer', watchlistCollapse: 'Replier' },
 }
 Object.entries(watchlistMessages).forEach(([code, values]) => { messages[code] = { ...messages[code], ...values } })
 const workspaceMessages = {
