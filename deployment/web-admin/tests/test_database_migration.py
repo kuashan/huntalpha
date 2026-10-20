@@ -634,7 +634,7 @@ class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
             self.guard()._integrity(rehearsal)
             self.assertEqual(
                 self.guard().validate_probe_state(self._probe(rehearsal)),
-                {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate", "core.0012_auth_verification", "core.0013_chartworkspace", "core.0014_accountmembership_expires_at"]},
+                {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate", "core.0012_auth_verification", "core.0013_chartworkspace", "core.0014_accountmembership_expires_at", "core.0015_marketdatasourcesetting"]},
             )
 
             self.guard().copy_database(backup, target)
