@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.utils import timezone
 from .models import AccountMembership
 
 
@@ -8,8 +9,11 @@ def resolve_account_tier(user):
         return None
     # A fresh query avoids retaining a stale PRO tier if an admin downgrades
     # the account while the user's session is still active.
-    tier = AccountMembership.objects.filter(user_id=user.pk).values_list("tier", flat=True).first()
-    return tier if tier in {AccountMembership.Tier.FREE, AccountMembership.Tier.PRO} else AccountMembership.Tier.FREE
+    membership = AccountMembership.objects.filter(user_id=user.pk).values("tier", "expires_at").first()
+    if not membership or membership["tier"] != AccountMembership.Tier.PRO:
+        return AccountMembership.Tier.FREE
+    expiry = membership["expires_at"]
+    return AccountMembership.Tier.PRO if expiry is None or expiry > timezone.now() else AccountMembership.Tier.FREE
 
 
 def resolve_watchlist_limit(user):

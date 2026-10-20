@@ -402,38 +402,25 @@ class AccountProfileApiTests(TestCase):
         self.assertEqual(self.client.get('/api/auth/session/').json()['user']['preferences'], expected)
         self.assertEqual(valid.json()['user']['tier'], 'free')
 
-    def test_avatar_requires_auth_csrf_validates_and_replaces_then_deletes(self):
-        upload = self.image_upload()
-        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': upload}).status_code, 403)
+    def test_avatar_upload_paused_preserves_existing_avatar_and_delete(self):
+        from .account import save_avatar
+        saved = save_avatar(self.user, self.image_upload())
+        filename = saved.avatar.name
+        self.assertTrue((self.media_root / filename).exists())
+        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': self.image_upload()}).status_code, 403)
         self.client.force_login(self.user)
-        no_csrf = self.client.post('/api/account/avatar/', {'avatar': self.image_upload()})
-        self.assertEqual(no_csrf.status_code, 403)
+        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': self.image_upload()}).status_code, 403)
         headers = self.csrf_headers()
-        svg = SimpleUploadedFile('avatar.svg', b'<svg xmlns="http://www.w3.org/2000/svg"></svg>', content_type='image/svg+xml')
-        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': svg}, **headers).status_code, 400)
-        oversized = SimpleUploadedFile('avatar.png', b'x' * (5 * 1024 * 1024 + 1), content_type='image/png')
-        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': oversized}, **headers).status_code, 400)
-        too_wide = self.image_upload(size=(4097, 1))
-        self.assertEqual(self.client.post('/api/account/avatar/', {'avatar': too_wide}, **headers).status_code, 400)
-
-        for image_format in ('JPEG', 'PNG', 'WEBP'):
-            response = self.client.post('/api/account/avatar/', {'avatar': self.image_upload(image_format)}, **headers)
-            self.assertEqual(response.status_code, 200)
-            self.assertIsNotNone(response.json()['avatar_url'])
-        profile = AccountProfile.objects.get(user=self.user)
-        old_name = profile.avatar.name
-        old_path = self.media_root / old_name
-        self.assertTrue(old_path.is_file())
-        replacement = self.client.post('/api/account/avatar/', {'avatar': self.image_upload('PNG', 'replacement.png')}, **headers)
-        self.assertEqual(replacement.status_code, 200)
-        new_name = AccountProfile.objects.get(user=self.user).avatar.name
-        self.assertNotEqual(old_name, new_name)
-        self.assertFalse(old_path.exists())
-        self.assertTrue((self.media_root / new_name).is_file())
-        deleted = self.client.delete('/api/account/avatar/', **headers)
-        self.assertEqual(deleted.status_code, 200)
-        self.assertIsNone(deleted.json()['avatar_url'])
-        self.assertFalse((self.media_root / new_name).exists())
+        with patch("core.views.save_avatar", side_effect=AssertionError("upload must be disabled")):
+            denied = self.client.post('/api/account/avatar/', {'avatar': self.image_upload()}, **headers)
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.json()["code"], "avatar_upload_paused")
+        self.assertEqual(AccountProfile.objects.get(user=self.user).avatar.name, filename)
+        self.assertIn(filename, self.client.get('/api/account/summary/').json()['user']['avatar_url'])
+        removed = self.client.delete('/api/account/avatar/', **headers)
+        self.assertEqual(removed.status_code, 200)
+        self.assertIsNone(removed.json()['avatar_url'])
+        self.assertFalse((self.media_root / filename).exists())
 
 
 class SymbolCatalogSyncTests(TestCase):
