@@ -334,16 +334,6 @@ case "${1:-}" in
 esac
 EOF
 chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/curl" "$FAKE_BIN/gh"
-cat > "$FAKE_BIN/chmod" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-if [[ "${FAKE_CHMOD_FAIL:-0}" == 1 ]]; then
-  printf 'chmod: simulated read-only filesystem\n' >&2
-  exit 1
-fi
-exec /usr/bin/chmod "$@"
-EOF
-chmod +x "$FAKE_BIN/chmod"
 cat > "$FAKE_BIN/stat" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -614,14 +604,18 @@ assert_fail validate_command status unexpected
 assert_fail validate_command
 
 log_before="$(wc -l < "$FAKE_LOG")"
-# Isolate the intentional chmod fault: on some Git Bash environments a
-# temporary assignment to a shell function can remain exported afterward.
-# A subshell must not let it contaminate the later expected-success preflight.
+# Intercept only the chmod invoked by this one negative test. Do not pass
+# fault switches through the process environment: Windows Git Bash can reuse
+# native/Unix subprocess environments differently across executable shims.
+# The shell function exists only in this subshell, so the next preflight must
+# use the real chmod binary.
 (
-  export FAKE_CHMOD_FAIL=1
+  chmod() {
+    printf 'chmod: simulated read-only filesystem\n' >&2
+    return 1
+  }
   assert_fail verify_trusted_source "$FAKE_DIGEST"
 )
-unset FAKE_CHMOD_FAIL
 [[ "$(wc -l < "$FAKE_LOG")" == "$log_before" ]] || fail "read-only state failure continued into Docker verification"
 find "$RECOVERY_DIR" -mindepth 1 -print -quit | grep -q . && fail "read-only state failure left a temporary provenance copy"
 
