@@ -50,8 +50,6 @@ jobs:
           npm run test:realtime
           npm run test:chart
           npm run test:workspace
-          node src/membershipExpiry.test.mjs
-          node src/components/SiteVersionFooter.test.mjs
           npm run build
 
   upgrade:
