@@ -22,7 +22,7 @@ class MarketDataRouter:
         self._providers.setdefault(market_id, []).append(provider)
 
     def provider_ids(self, market_id: str) -> tuple[str, ...]:
-        return tuple(provider.provider_id for provider in self.providers_for(market_id))
+        return tuple(provider.provider_id for provider in self.all_providers_for(market_id))
 
     def all_providers_for(self, market_id: str):
         """Registered sources irrespective of the operator's quote/K-line choice."""
