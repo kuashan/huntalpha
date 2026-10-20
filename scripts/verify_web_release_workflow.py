@@ -52,8 +52,13 @@ def main():
         "push: true",
     ):
         require(source, fragment)
+    # PR #53 switched the legacy Actions builder to manual-only; it is not
+    # required for locally built, digest-pinned release images.
+    require(source, "\non:\n  workflow_dispatch:\n")
+    triggers = source.split("\non:\n", 1)[1].split("\npermissions:", 1)[0].strip()
+    if triggers != "workflow_dispatch:":
+        raise ValueError("release workflow must remain manual-only")
     for fragment in (
-        "workflow_dispatch",
         "attestations: write",
         "id-token: write",
         "actions/attest-build-provenance@v2",
