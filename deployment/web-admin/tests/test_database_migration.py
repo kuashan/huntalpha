@@ -817,6 +817,7 @@ class RealSourceSelectionMigrationGuardTests(MigrationGuardTestCase):
             root = Path(temporary_directory)
             before, after = root / "before.sqlite3", root / "after.sqlite3"
             self._run_manage(before, "migrate", "core", "0014_accountmembership_expires_at", "--noinput")
+            self._run_manage(before, "migrate", "formula_editor", "0002_fixedindicatorstate", "--noinput")
             # New models are registered even when their migration has not run.
             # Remove premature post_migrate permission metadata to imitate V1.1.4.
             with closing(sqlite3.connect(before)) as connection, connection:
