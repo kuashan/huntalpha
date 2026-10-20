@@ -287,6 +287,23 @@ if len(lines) != 1 or not lines[0].startswith("BREVO_API_KEY=") or len(lines[0].
 PY
 }
 
+# Candidate Python/Docker stderr is untrusted and may include secrets.
+# Return a fixed classification only; never print a raw traceback or env value.
+migration_probe_failure_category() {
+  case "$1" in
+    *'InconsistentMigrationHistory'*) printf 'inconsistent-django-history' ;;
+    *'ModuleNotFoundError:'*) printf 'missing-python-module' ;;
+    *'ImportError:'*) printf 'python-import-error' ;;
+    *'OperationalError:'*) printf 'database-operational-error' ;;
+    *'PermissionError:'*) printf 'filesystem-permission-error' ;;
+    *'FileNotFoundError:'*) printf 'missing-file' ;;
+    *'ImproperlyConfigured:'*) printf 'django-configuration-error' ;;
+    *'Error response from daemon:'*|*'docker: Error response'*) printf 'docker-runtime-error' ;;
+    *'Traceback (most recent call last):'*) printf 'other-python-exception' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 inspect_migration_plan() {
   local image="$1" database_path="$2" raw_plan validated_plan
   raw_plan="$(docker_cli run --rm --network none --read-only \
@@ -296,7 +313,7 @@ inspect_migration_plan() {
     --mount "type=bind,src=$SIFTALPHA_MIGRATION_PROBE,dst=/deploy/migration_probe.py,readonly" \
     --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 \
     "$image" python /deploy/migration_probe.py 2>&1)" \
-    || { die 'candidate migration plan inspection failed'; return 1; }
+    || { die "candidate migration plan inspection failed ($(migration_probe_failure_category "$raw_plan"))"; return 1; }
   validated_plan="$(printf '%s\n' "$raw_plan" | "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" validate-state)" \
     || { die 'candidate contains an unapproved Django migration plan'; return 1; }
   case "$validated_plan" in
