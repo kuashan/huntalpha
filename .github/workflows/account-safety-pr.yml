@@ -2,8 +2,6 @@ name: Prelaunch account safety checks (manual)
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [release/siftalpha-web-v1]
 
 permissions:
   contents: read
