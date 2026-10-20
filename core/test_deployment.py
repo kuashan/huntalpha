@@ -152,16 +152,16 @@ class ReleaseWorkflowContractTests(SimpleTestCase):
         spec.loader.exec_module(verifier)
         original = verifier.WORKFLOW.read_text(encoding="utf-8")
         for event, additional_trigger in (
-            ("push", "  push:\\n"),
-            ("pull_request", "  pull_request:\\n"),
-            ("schedule", "  schedule:\\n"),
+            ("push", "  push:\n"),
+            ("pull_request", "  pull_request:\n"),
+            ("schedule", "  schedule:\n"),
         ):
             with self.subTest(event=event), TemporaryDirectory() as temporary_directory:
                 candidate = Path(temporary_directory) / "release.yml"
                 candidate.write_text(
                     original.replace(
-                        "  workflow_dispatch:\\n",
-                        "  workflow_dispatch:\\n" + additional_trigger.replace("\\n", "\n"),
+                        "  workflow_dispatch:\n",
+                        "  workflow_dispatch:\n" + additional_trigger,
                         1,
                     ),
                     encoding="utf-8",
