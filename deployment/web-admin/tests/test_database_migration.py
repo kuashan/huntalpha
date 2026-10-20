@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from unittest import mock
 from pathlib import Path
 
@@ -91,7 +92,7 @@ class MigrationPlanTests(MigrationGuardTestCase):
 
     def test_exact_account_migration_hash_and_sequence(self):
         path = ROOT / "core" / "migrations" / "0012_auth_verification.py"
-        self.assertEqual(hashlib.sha256(path.read_bytes().replace(b"\\r\\n", b"\\n")).hexdigest(), ACCOUNT_HASH)
+        self.assertEqual(hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest(), ACCOUNT_HASH)
         item = {"name": "core.0012_auth_verification", "backwards": False, "sha256": ACCOUNT_HASH}
         self.assertEqual(self.guard().validate_plan({"pending": [item]}), [item["name"]])
         self.assertEqual(
@@ -109,7 +110,7 @@ class MigrationPlanTests(MigrationGuardTestCase):
     def test_only_exact_reviewed_workspace_hash_after_account_migration(self):
         source = ROOT / "core" / "migrations" / "0013_chartworkspace.py"
         self.assertEqual(
-            hashlib.sha256(source.read_bytes().replace(b"\\r\\n", b"\\n")).hexdigest(),
+            hashlib.sha256(source.read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
             WORKSPACE_HASH,
         )
         item = {"name": "core.0013_chartworkspace", "backwards": False, "sha256": WORKSPACE_HASH}
@@ -142,7 +143,7 @@ class MigrationPlanTests(MigrationGuardTestCase):
 
     def test_v114_expiry_migration_hash_and_prerequisite(self):
         path = ROOT / "core" / "migrations" / "0014_accountmembership_expires_at.py"
-        self.assertEqual(hashlib.sha256(path.read_bytes().replace(b"\\r\\n", b"\\n")).hexdigest(), EXPIRY_HASH)
+        self.assertEqual(hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest(), EXPIRY_HASH)
         item = {"name": "core.0014_accountmembership_expires_at", "backwards": False, "sha256": EXPIRY_HASH}
         previous = [
             {"name": "formula_editor.0002_fixedindicatorstate", "sha256": APPROVED_HASH},
@@ -589,8 +590,7 @@ class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
             target = temporary / "target.sqlite3"
 
             self._run_manage(baseline, "migrate", "--noinput")
-            # Keep earlier Task 012 rehearsal at its historical 0013 baseline.
-            self._run_manage(baseline, "migrate", "core", "0013_chartworkspace", "--noinput")
+            # Keep the current core chain applied so only the Task 012 migration is pending.
             self._run_manage(
                 baseline,
                 "migrate",
@@ -602,7 +602,7 @@ class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
             approved_state = self.guard().validate_probe_state(self._probe(baseline))
             self.assertEqual(
                 approved_state,
-                {"pending": ["formula_editor.0002_fixedindicatorstate"], "applied": ["core.0012_auth_verification", "core.0013_chartworkspace"]},
+                {"pending": ["formula_editor.0002_fixedindicatorstate"], "applied": ["core.0012_auth_verification", "core.0013_chartworkspace", "core.0014_accountmembership_expires_at"]},
             )
 
             self.guard().copy_database(baseline, backup)
@@ -613,7 +613,7 @@ class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
             self.guard()._integrity(rehearsal)
             self.assertEqual(
                 self.guard().validate_probe_state(self._probe(rehearsal)),
-                {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate", "core.0012_auth_verification", "core.0013_chartworkspace"]},
+                {"pending": [], "applied": ["formula_editor.0002_fixedindicatorstate", "core.0012_auth_verification", "core.0013_chartworkspace", "core.0014_accountmembership_expires_at"]},
             )
 
             self.guard().copy_database(backup, target)
@@ -700,7 +700,7 @@ class RealWorkspaceMigrationGuardTests(RealDjangoMigrationRehearsalTests):
             self._run_manage(baseline, "migrate", "core", "0012_auth_verification", "--noinput")
             # Django retains content types on model migration rollback; remove
             # synthetic residue before comparing a real V1.0.0-shaped baseline.
-            with sqlite3.connect(baseline) as connection:
+            with closing(sqlite3.connect(baseline)) as connection, connection:
                 rows = connection.execute(
                     "SELECT id FROM django_content_type WHERE app_label='core' AND model='chartworkspace'"
                 ).fetchall()
@@ -709,23 +709,28 @@ class RealWorkspaceMigrationGuardTests(RealDjangoMigrationRehearsalTests):
                     connection.execute("DELETE FROM django_content_type WHERE id=?", (identifier,))
                 connection.commit()
 
-            state = self.guard().validate_probe_state(self._probe(baseline))
-            self.assertEqual(state, {
-                "pending": ["core.0013_chartworkspace"],
-                "applied": ["formula_editor.0002_fixedindicatorstate", "core.0012_auth_verification"],
-            })
+            probe = self._probe(baseline)
+            self.assertEqual(
+                [item["name"] for item in probe["pending"]],
+                ["core.0013_chartworkspace", "core.0014_accountmembership_expires_at"],
+            )
+            with self.assertRaisesRegex(ValueError, "unapproved Django migration plan"):
+                self.guard().validate_probe_state(probe)
             self.guard().copy_database(baseline, migrated)
-            self._run_manage(migrated, "migrate", "--noinput")
+            self._run_manage(migrated, "migrate", "core", "0013_chartworkspace", "--noinput")
             self.guard().validate_approved_migration_result(baseline, migrated)
             self.guard().compare_protected_tables(baseline, migrated)
-            self.assertEqual(self.guard().validate_probe_state(self._probe(migrated)), {
-                "pending": [],
-                "applied": [
-                    "formula_editor.0002_fixedindicatorstate",
-                    "core.0012_auth_verification",
-                    "core.0013_chartworkspace",
-                ],
-            })
+            self.assertEqual(
+                self.guard().validate_probe_state(self._probe(migrated)),
+                {
+                    "pending": ["core.0014_accountmembership_expires_at"],
+                    "applied": [
+                        "formula_editor.0002_fixedindicatorstate",
+                        "core.0012_auth_verification",
+                        "core.0013_chartworkspace",
+                    ],
+                },
+            )
             # A nonempty workspace table, a trigger, or an altered protected
             # Formula are each separately forbidden by the production verifier.
             mutations = (
@@ -737,7 +742,7 @@ class RealWorkspaceMigrationGuardTests(RealDjangoMigrationRehearsalTests):
             for name, sql in mutations:
                 bad = root / f"bad-{name}.sqlite3"
                 self.guard().copy_database(migrated, bad)
-                with sqlite3.connect(bad) as connection:
+                with closing(sqlite3.connect(bad)) as connection, connection:
                     connection.execute(sql)
                     connection.commit()
                 with self.subTest(name=name), self.assertRaises(ValueError):
@@ -751,7 +756,7 @@ class RealExpiryMigrationGuardTests(RealDjangoMigrationRehearsalTests):
             baseline, upgraded = root / "before.sqlite3", root / "after.sqlite3"
             self._run_manage(baseline, "migrate", "--noinput")
             self._run_manage(baseline, "migrate", "core", "0013_chartworkspace", "--noinput")
-            with sqlite3.connect(baseline) as connection:
+            with closing(sqlite3.connect(baseline)) as connection, connection:
                 connection.execute('INSERT INTO auth_user (password,last_login,is_superuser,username,first_name,last_name,email,is_staff,is_active,date_joined) '
                                    "VALUES ('test',NULL,0,'expiry-legacy','', '', 'legacy@example.com',0,1,CURRENT_TIMESTAMP)")
                 user_id = connection.execute("SELECT id FROM auth_user WHERE username='expiry-legacy'").fetchone()[0]
@@ -764,7 +769,7 @@ class RealExpiryMigrationGuardTests(RealDjangoMigrationRehearsalTests):
             self._run_manage(upgraded, "migrate", "--noinput")
             self.guard().validate_approved_migration_result(baseline, upgraded)
             self.guard().compare_protected_tables(baseline, upgraded)
-            with sqlite3.connect(upgraded) as connection:
+            with closing(sqlite3.connect(upgraded)) as connection, connection:
                 self.assertEqual(connection.execute(
                     "SELECT tier, expires_at FROM core_accountmembership WHERE user_id=?", (user_id,)
                 ).fetchone(), ("pro", None))
@@ -775,7 +780,7 @@ class RealExpiryMigrationGuardTests(RealDjangoMigrationRehearsalTests):
             ):
                 damaged = root / f"damaged-{name}.sqlite3"
                 self.guard().copy_database(upgraded, damaged)
-                with sqlite3.connect(damaged) as connection:
+                with closing(sqlite3.connect(damaged)) as connection, connection:
                     connection.execute(statement)
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     self.guard().validate_approved_migration_result(baseline, damaged)
