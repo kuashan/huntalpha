@@ -309,7 +309,7 @@ def account_avatar(request):
         profile = delete_avatar(request.user)
         return json({"status": "ok", "avatar_url": account_avatar_url(request, profile)})
     # Uploaded avatars remain readable; no new content may be uploaded.
-    return json({"error": "头像上传功能暂时停用", "code": "avatar_upload_paused"}, 403))
+    return json({"error": "头像上传功能暂时停用", "code": "avatar_upload_paused"}, 403)
 
 
 @require_POST
