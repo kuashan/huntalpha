@@ -163,7 +163,7 @@ class MigrationPlanTests(MigrationGuardTestCase):
 
     def test_v115_source_migration_hash_and_dependency(self):
         path = ROOT / "core" / "migrations" / "0015_marketdatasourcesetting.py"
-        self.assertEqual(hashlib.sha256(path.read_bytes().replace(b"\\r\\n", b"\\n")).hexdigest(), MARKET_SOURCE_HASH)
+        self.assertEqual(hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest(), MARKET_SOURCE_HASH)
         previous = [
             {"name": "formula_editor.0002_fixedindicatorstate", "sha256": APPROVED_HASH},
             {"name": "core.0012_auth_verification", "sha256": ACCOUNT_HASH},
@@ -816,8 +816,11 @@ class RealSourceSelectionMigrationGuardTests(MigrationGuardTestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             before, after = root / "before.sqlite3", root / "after.sqlite3"
+            # Build a complete, realistic V1.1.4 migration state first. Going
+            # straight to 'migrate core 0014' leaves Django built-in apps such
+            # as contenttypes pending and is not a production-like rehearsal.
+            self._run_manage(before, "migrate", "--noinput")
             self._run_manage(before, "migrate", "core", "0014_accountmembership_expires_at", "--noinput")
-            self._run_manage(before, "migrate", "formula_editor", "0002_fixedindicatorstate", "--noinput")
             # New models are registered even when their migration has not run.
             # Remove premature post_migrate permission metadata to imitate V1.1.4.
             with closing(sqlite3.connect(before)) as connection, connection:
