@@ -516,7 +516,7 @@ import sys
 print(sys.argv[1])
 PY
 )"
-grep -Fx -- "      - $rendered_brevo_path" "$COMPOSE_FILE" >/dev/null \
+tr -d '\r' < "$COMPOSE_FILE" | grep -Fx -- "      - $rendered_brevo_path" >/dev/null \
   || fail "rendered website Compose lacks secret env_file"
 
 
