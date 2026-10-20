@@ -26,6 +26,7 @@ if SPEC is not None and SPEC.loader is not None and HELPER_PATH.is_file():
 APPROVED_HASH = "72514513ca8f6b801b2b68fef42f7b35e998c78d7cdcd9cd236e0dbffefa977a"
 ACCOUNT_HASH = "2e02a54d4869e10dcb4da50a66a9656a63c2d120cd33ab8ec9cd757187effdc9"
 WORKSPACE_HASH = "e398a835684bbf3fd216fc57a6539f2f990d92b9862f0f9f96a17974c4ff2cea"
+EXPIRY_HASH = "8e3ce97ca723bceb21a62e59fa9e9f4055180e9304f88a7daf84c9f5f923669e"
 
 
 class MigrationGuardTestCase(unittest.TestCase):
@@ -138,6 +139,25 @@ class MigrationPlanTests(MigrationGuardTestCase):
             self.guard().validate_probe_state({
                 "pending": [], "applied": [previous[0], {"name": item["name"], "sha256": WORKSPACE_HASH}]
             })
+
+    def test_v114_expiry_migration_hash_and_prerequisite(self):
+        path = ROOT / "core" / "migrations" / "0014_accountmembership_expires_at.py"
+        self.assertEqual(hashlib.sha256(path.read_bytes().replace(b"\\r\\n", b"\\n")).hexdigest(), EXPIRY_HASH)
+        item = {"name": "core.0014_accountmembership_expires_at", "backwards": False, "sha256": EXPIRY_HASH}
+        previous = [
+            {"name": "formula_editor.0002_fixedindicatorstate", "sha256": APPROVED_HASH},
+            {"name": "core.0012_auth_verification", "sha256": ACCOUNT_HASH},
+            {"name": "core.0013_chartworkspace", "sha256": WORKSPACE_HASH},
+        ]
+        self.assertEqual(self.guard().validate_probe_state({"pending": [item], "applied": previous}),
+                         {"pending": [item["name"]], "applied": [r["name"] for r in previous]})
+        self.assertEqual(self.guard().validate_probe_state({
+            "pending": [], "applied": [*previous, {"name": item["name"], "sha256": EXPIRY_HASH}]
+        }), {"pending": [], "applied": [r["name"] for r in previous] + [item["name"]]})
+        with self.assertRaises(ValueError):
+            self.guard().validate_probe_state({"pending": [item], "applied": previous[:-1]})
+        with self.assertRaises(ValueError):
+            self.guard().validate_plan({"pending": [{**item, "sha256": "0"*64}]})
 
     def test_empty_migration_plan_is_a_noop(self):
         self.assertEqual(self.guard().validate_plan({"pending": []}), [])
@@ -569,6 +589,8 @@ class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
             target = temporary / "target.sqlite3"
 
             self._run_manage(baseline, "migrate", "--noinput")
+            # Keep earlier Task 012 rehearsal at its historical 0013 baseline.
+            self._run_manage(baseline, "migrate", "core", "0013_chartworkspace", "--noinput")
             self._run_manage(
                 baseline,
                 "migrate",
@@ -720,6 +742,43 @@ class RealWorkspaceMigrationGuardTests(RealDjangoMigrationRehearsalTests):
                     connection.commit()
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     self.guard().validate_approved_migration_result(baseline, bad)
+
+
+class RealExpiryMigrationGuardTests(RealDjangoMigrationRehearsalTests):
+    def test_adds_only_nullable_expiration_and_preserves_account_rows(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            baseline, upgraded = root / "before.sqlite3", root / "after.sqlite3"
+            self._run_manage(baseline, "migrate", "--noinput")
+            self._run_manage(baseline, "migrate", "core", "0013_chartworkspace", "--noinput")
+            with sqlite3.connect(baseline) as connection:
+                connection.execute('INSERT INTO auth_user (password,last_login,is_superuser,username,first_name,last_name,email,is_staff,is_active,date_joined) '
+                                   "VALUES ('test',NULL,0,'expiry-legacy','', '', 'legacy@example.com',0,1,CURRENT_TIMESTAMP)")
+                user_id = connection.execute("SELECT id FROM auth_user WHERE username='expiry-legacy'").fetchone()[0]
+                connection.execute('INSERT INTO core_accountmembership (user_id,tier) VALUES (?,?)', (user_id, "pro"))
+                connection.commit()
+            state = self.guard().validate_probe_state(self._probe(baseline))
+            self.assertEqual(state["pending"], ["core.0014_accountmembership_expires_at"])
+            self.assertEqual(state["applied"][-1], "core.0013_chartworkspace")
+            self.guard().copy_database(baseline, upgraded)
+            self._run_manage(upgraded, "migrate", "--noinput")
+            self.guard().validate_approved_migration_result(baseline, upgraded)
+            self.guard().compare_protected_tables(baseline, upgraded)
+            with sqlite3.connect(upgraded) as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT tier, expires_at FROM core_accountmembership WHERE user_id=?", (user_id,)
+                ).fetchone(), ("pro", None))
+            for name, statement in (
+                ("grant", "UPDATE core_accountmembership SET expires_at='2027-01-01' WHERE tier='pro'"),
+                ("formula", "UPDATE auth_user SET username='tampered' WHERE username='expiry-legacy'"),
+                ("table", "CREATE TABLE unexpected_table (id INTEGER PRIMARY KEY)"),
+            ):
+                damaged = root / f"damaged-{name}.sqlite3"
+                self.guard().copy_database(upgraded, damaged)
+                with sqlite3.connect(damaged) as connection:
+                    connection.execute(statement)
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    self.guard().validate_approved_migration_result(baseline, damaged)
 
 
 if __name__ == "__main__":
