@@ -434,7 +434,7 @@ onBeforeUnmount(() => { cancelWorkspaceSync(); window.clearInterval(entitlementR
 .symbol-meta .symbol-code{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .symbol-meta .market-label{flex:0 0 auto;color:#92a6b8;font-size:9px;white-space:nowrap}
 .symbol{cursor:pointer}
-.star{width:28px;padding:0;border:0;background:transparent;color:#718398;font:20px/1 'Noto Sans SC',sans-serif;text-align:center}
+.star{width:24px;min-height:32px;margin-left:auto;margin-right:-3px;padding:0;border:0;background:transparent;color:#718398;font:16px/1 'Noto Sans SC',sans-serif;text-align:center;cursor:pointer}
 .star.active{color:#f3c453}
 .watchlist-empty,.watchlist-message{padding:4px 18px;text-align:center;line-height:1.6}
 .watchlist-empty{display:grid;gap:3px;color:#9aafbd}
