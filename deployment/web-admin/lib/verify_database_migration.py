@@ -25,6 +25,7 @@ APPROVED_MIGRATIONS = {
     "formula_editor.0002_fixedindicatorstate": "72514513ca8f6b801b2b68fef42f7b35e998c78d7cdcd9cd236e0dbffefa977a",
     "core.0012_auth_verification": "2e02a54d4869e10dcb4da50a66a9656a63c2d120cd33ab8ec9cd757187effdc9",
     "core.0013_chartworkspace": "e398a835684bbf3fd216fc57a6539f2f990d92b9862f0f9f96a17974c4ff2cea",
+    "core.0014_accountmembership_expires_at": "8e3ce97ca723bceb21a62e59fa9e9f4055180e9304f88a7daf84c9f5f923669e",
 }
 PROTECTED_TABLES = (
     "auth_user",
@@ -113,6 +114,8 @@ def validate_probe_state(payload: Any) -> dict[str, list[str]]:
     if "core.0013_chartworkspace" in pending and "core.0012_auth_verification" not in applied:
         raise _reject()
     if "core.0013_chartworkspace" in applied and "core.0012_auth_verification" not in applied:
+        raise _reject()
+    if "core.0014_accountmembership_expires_at" in pending + applied and "core.0013_chartworkspace" not in applied:
         raise _reject()
     return {"pending": pending, "applied": applied}
 
@@ -275,6 +278,8 @@ def validate_approved_migration_result(before_path: str | Path, after_path: str 
         return _validate_core_0012_result(before_path, after_path)
     if added == {"core_chartworkspace"}:
         return _validate_core_0013_result(before_path, after_path)
+    if not added:
+        return _validate_core_0014_result(before_path, after_path)
     migration_name = "0002_fixedindicatorstate"
     new_table = "formula_editor_fixedindicatorstate"
     try:
@@ -679,7 +684,15 @@ def compare_protected_tables(before_path: str | Path, after_path: str | Path) ->
             for table in PROTECTED_TABLES:
                 if table not in before_names or table not in after_names:
                     raise ValueError(f"protected table missing: {table}")
-                if not _rows_equal(before, after, table):
+                if table == "core_accountmembership" and [
+                    r[1] for r in after.execute('PRAGMA table_info("core_accountmembership")')
+                ] == [
+                    r[1] for r in before.execute('PRAGMA table_info("core_accountmembership")')
+                ] + ["expires_at"]:
+                    unchanged = _member_legacy_rows_unchanged(before, after)
+                else:
+                    unchanged = _rows_equal(before, after, table)
+                if not unchanged:
                     raise ValueError(f"protected table changed: {table}")
     except ValueError:
         raise
