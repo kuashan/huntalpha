@@ -623,7 +623,7 @@ class RealDjangoMigrationRehearsalTests(MigrationGuardTestCase):
             approved_state = self.guard().validate_probe_state(self._probe(baseline))
             self.assertEqual(
                 approved_state,
-                {"pending": ["formula_editor.0002_fixedindicatorstate"], "applied": ["core.0012_auth_verification", "core.0013_chartworkspace", "core.0014_accountmembership_expires_at"]},
+                {"pending": ["formula_editor.0002_fixedindicatorstate"], "applied": ["core.0012_auth_verification", "core.0013_chartworkspace", "core.0014_accountmembership_expires_at", "core.0015_marketdatasourcesetting"]},
             )
 
             self.guard().copy_database(baseline, backup)
@@ -733,7 +733,7 @@ class RealWorkspaceMigrationGuardTests(RealDjangoMigrationRehearsalTests):
             probe = self._probe(baseline)
             self.assertEqual(
                 [item["name"] for item in probe["pending"]],
-                ["core.0013_chartworkspace", "core.0014_accountmembership_expires_at"],
+                ["core.0013_chartworkspace", "core.0014_accountmembership_expires_at", "core.0015_marketdatasourcesetting"],
             )
             with self.assertRaisesRegex(ValueError, "unapproved Django migration plan"):
                 self.guard().validate_probe_state(probe)
@@ -741,17 +741,14 @@ class RealWorkspaceMigrationGuardTests(RealDjangoMigrationRehearsalTests):
             self._run_manage(migrated, "migrate", "core", "0013_chartworkspace", "--noinput")
             self.guard().validate_approved_migration_result(baseline, migrated)
             self.guard().compare_protected_tables(baseline, migrated)
-            self.assertEqual(
-                self.guard().validate_probe_state(self._probe(migrated)),
-                {
-                    "pending": ["core.0014_accountmembership_expires_at"],
-                    "applied": [
-                        "formula_editor.0002_fixedindicatorstate",
-                        "core.0012_auth_verification",
-                        "core.0013_chartworkspace",
-                    ],
-                },
-            )
+            # V1.1.5 adds another future migration. The guard must block a
+            # multi-migration leap rather than incorrectly approving both.
+            after_probe = self._probe(migrated)
+            self.assertEqual([row["name"] for row in after_probe["pending"]], [
+                "core.0014_accountmembership_expires_at", "core.0015_marketdatasourcesetting"
+            ])
+            with self.assertRaisesRegex(ValueError, "unapproved Django migration plan"):
+                self.guard().validate_probe_state(after_probe)
             # A nonempty workspace table, a trigger, or an altered protected
             # Formula are each separately forbidden by the production verifier.
             mutations = (
@@ -783,9 +780,12 @@ class RealExpiryMigrationGuardTests(RealDjangoMigrationRehearsalTests):
                 user_id = connection.execute("SELECT id FROM auth_user WHERE username='expiry-legacy'").fetchone()[0]
                 connection.execute('INSERT INTO core_accountmembership (user_id,tier) VALUES (?,?)', (user_id, "pro"))
                 connection.commit()
-            state = self.guard().validate_probe_state(self._probe(baseline))
-            self.assertEqual(state["pending"], ["core.0014_accountmembership_expires_at"])
-            self.assertEqual(state["applied"][-1], "core.0013_chartworkspace")
+            probe = self._probe(baseline)
+            self.assertEqual([row["name"] for row in probe["pending"]], [
+                "core.0014_accountmembership_expires_at", "core.0015_marketdatasourcesetting"
+            ])
+            with self.assertRaisesRegex(ValueError, "unapproved Django migration plan"):
+                self.guard().validate_probe_state(probe)
             self.guard().copy_database(baseline, upgraded)
             self._run_manage(upgraded, "migrate", "core", "0014_accountmembership_expires_at", "--noinput")
             self.guard().validate_approved_migration_result(baseline, upgraded)
