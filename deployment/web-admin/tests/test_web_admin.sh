@@ -463,14 +463,47 @@ for expected in missing-python-module database-operational-error django-configur
 done
 
 load_config "$TEST_ROOT/web-admin.conf"
+# On Windows Git Bash, chmod/stat report NTFS metadata rather than Linux
+# owner/permission semantics. Emulate only this synthetic Brevo fixture's
+# metadata; keep production verify_brevo_secret_file() unchanged.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    test_brevo_file_mode=600
+    test_brevo_dir_mode=700
+    stat() {
+      if [[ "$#" == 4 && "$1" == -c && "$2" == '%u %a' && "$3" == -- ]]; then
+        case "$4" in
+          "$BREVO_ENV_FILE")
+            printf '%s %s\n' "$EUID" "$test_brevo_file_mode"
+            return 0 ;;
+          "$(dirname -- "$BREVO_ENV_FILE")")
+            printf '%s %s\n' "$EUID" "$test_brevo_dir_mode"
+            return 0 ;;
+        esac
+      fi
+      command stat "$@"
+    }
+    ;;
+esac
 assert_ok verify_brevo_secret_file
 chmod 644 "$BREVO_ENV_FILE"
+if [[ -n "${test_brevo_file_mode:-}" ]]; then test_brevo_file_mode=644; fi
 assert_fail verify_brevo_secret_file
 chmod 600 "$BREVO_ENV_FILE"
+if [[ -n "${test_brevo_file_mode:-}" ]]; then
+  test_brevo_file_mode=600
+  test_brevo_dir_mode=755
+  assert_fail verify_brevo_secret_file
+  test_brevo_dir_mode=700
+fi
 printf 'BREVO_API_KEY=\n' > "$BREVO_ENV_FILE"
 assert_fail verify_brevo_secret_file
 printf 'BREVO_API_KEY=synthetic-not-real-key-for-tests-only\n' > "$BREVO_ENV_FILE"
 assert_ok verify_brevo_secret_file
+if [[ -n "${test_brevo_file_mode:-}" ]]; then
+  unset -f stat
+  unset test_brevo_file_mode test_brevo_dir_mode
+fi
 for template in "$ROOT/deployment/web-admin/compose.yaml.template" "$ROOT/deployment/web-admin/compose.selftest.yaml.template"; do
   grep -F -- '- __BREVO_ENV_FILE__' "$template" >/dev/null || fail "Compose must inject Brevo secret only into website service"
 done
