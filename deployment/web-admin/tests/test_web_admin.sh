@@ -508,7 +508,16 @@ for template in "$ROOT/deployment/web-admin/compose.yaml.template" "$ROOT/deploy
   grep -F -- '- __BREVO_ENV_FILE__' "$template" >/dev/null || fail "Compose must inject Brevo secret only into website service"
 done
 assert_ok render_compose "$FAKE_DIGEST"
-grep -F "$BREVO_ENV_FILE" "$COMPOSE_FILE" >/dev/null || fail "rendered website Compose lacks secret env_file"
+# Git Bash converts POSIX argv paths to native Windows paths when invoking
+# Windows Python. Assert the exact path Python received during rendering,
+# not the unconverted Bash spelling of the synthetic fixture path.
+rendered_brevo_path="$("$PYTHON_BIN" - "$BREVO_ENV_FILE" <<'PY'
+import sys
+print(sys.argv[1])
+PY
+)"
+grep -Fx -- "      - $rendered_brevo_path" "$COMPOSE_FILE" >/dev/null \
+  || fail "rendered website Compose lacks secret env_file"
 
 
 PATH="$FAKE_BIN:$PATH"
