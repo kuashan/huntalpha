@@ -28,6 +28,7 @@ APPROVED_HASH = "72514513ca8f6b801b2b68fef42f7b35e998c78d7cdcd9cd236e0dbffefa977
 ACCOUNT_HASH = "2e02a54d4869e10dcb4da50a66a9656a63c2d120cd33ab8ec9cd757187effdc9"
 WORKSPACE_HASH = "e398a835684bbf3fd216fc57a6539f2f990d92b9862f0f9f96a17974c4ff2cea"
 EXPIRY_HASH = "8e3ce97ca723bceb21a62e59fa9e9f4055180e9304f88a7daf84c9f5f923669e"
+MARKET_SOURCE_HASH = "d7bb0c73401a5680c2cdbc0fa3af252f21144fc7ee5cc312942d20bca82527f0"
 
 
 class MigrationGuardTestCase(unittest.TestCase):
@@ -159,6 +160,26 @@ class MigrationPlanTests(MigrationGuardTestCase):
             self.guard().validate_probe_state({"pending": [item], "applied": previous[:-1]})
         with self.assertRaises(ValueError):
             self.guard().validate_plan({"pending": [{**item, "sha256": "0"*64}]})
+
+    def test_v115_source_migration_hash_and_dependency(self):
+        path = ROOT / "core" / "migrations" / "0015_marketdatasourcesetting.py"
+        self.assertEqual(hashlib.sha256(path.read_bytes().replace(b"\\r\\n", b"\\n")).hexdigest(), MARKET_SOURCE_HASH)
+        previous = [
+            {"name": "formula_editor.0002_fixedindicatorstate", "sha256": APPROVED_HASH},
+            {"name": "core.0012_auth_verification", "sha256": ACCOUNT_HASH},
+            {"name": "core.0013_chartworkspace", "sha256": WORKSPACE_HASH},
+            {"name": "core.0014_accountmembership_expires_at", "sha256": EXPIRY_HASH},
+        ]
+        item = {"name": "core.0015_marketdatasourcesetting", "backwards": False, "sha256": MARKET_SOURCE_HASH}
+        self.assertEqual(self.guard().validate_probe_state({"pending": [item], "applied": previous}),
+                         {"pending": ["core.0015_marketdatasourcesetting"], "applied": [r["name"] for r in previous]})
+        self.assertEqual(self.guard().validate_probe_state({"pending": [], "applied": [
+            *previous, {"name": item["name"], "sha256": MARKET_SOURCE_HASH}
+        ]})["pending"], [])
+        with self.assertRaises(ValueError):
+            self.guard().validate_probe_state({"pending": [item], "applied": previous[:-1]})
+        with self.assertRaises(ValueError):
+            self.guard().validate_plan({"pending": [{**item, "sha256": "0" * 64}]})
 
     def test_empty_migration_plan_is_a_noop(self):
         self.assertEqual(self.guard().validate_plan({"pending": []}), [])
@@ -766,7 +787,7 @@ class RealExpiryMigrationGuardTests(RealDjangoMigrationRehearsalTests):
             self.assertEqual(state["pending"], ["core.0014_accountmembership_expires_at"])
             self.assertEqual(state["applied"][-1], "core.0013_chartworkspace")
             self.guard().copy_database(baseline, upgraded)
-            self._run_manage(upgraded, "migrate", "--noinput")
+            self._run_manage(upgraded, "migrate", "core", "0014_accountmembership_expires_at", "--noinput")
             self.guard().validate_approved_migration_result(baseline, upgraded)
             self.guard().compare_protected_tables(baseline, upgraded)
             with closing(sqlite3.connect(upgraded)) as connection, connection:
@@ -784,6 +805,52 @@ class RealExpiryMigrationGuardTests(RealDjangoMigrationRehearsalTests):
                     connection.execute(statement)
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     self.guard().validate_approved_migration_result(baseline, damaged)
+
+
+class RealSourceSelectionMigrationGuardTests(MigrationGuardTestCase):
+    # Reuse the isolated Django migration runner, not the inherited tests.
+    _run_manage = RealDjangoMigrationRehearsalTests._run_manage
+    _probe = RealDjangoMigrationRehearsalTests._probe
+
+    def test_additive_market_settings_and_frozen_user_data(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            before, after = root / "before.sqlite3", root / "after.sqlite3"
+            self._run_manage(before, "migrate", "core", "0014_accountmembership_expires_at", "--noinput")
+            # New models are registered even when their migration has not run.
+            # Remove premature post_migrate permission metadata to imitate V1.1.4.
+            with closing(sqlite3.connect(before)) as connection, connection:
+                row = connection.execute(
+                    "SELECT id FROM django_content_type WHERE app_label='core' AND model='marketdatasourcesetting'"
+                ).fetchone()
+                if row:
+                    connection.execute("DELETE FROM auth_permission WHERE content_type_id=?", (row[0],))
+                    connection.execute("DELETE FROM django_content_type WHERE id=?", (row[0],))
+                connection.commit()
+            self.assertEqual(
+                self.guard().validate_probe_state(self._probe(before))["pending"],
+                ["core.0015_marketdatasourcesetting"],
+            )
+            self.guard().copy_database(before, after)
+            self._run_manage(after, "migrate", "core", "0015_marketdatasourcesetting", "--noinput")
+            self.guard().validate_approved_migration_result(before, after)
+            self.guard().compare_protected_tables(before, after)
+            with closing(sqlite3.connect(after)) as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT COUNT(*) FROM core_marketdatasourcesetting"
+                ).fetchone()[0], 0)
+            for key, sql in (
+                ("config-row", "INSERT INTO core_marketdatasourcesetting (market,provider,updated_at) VALUES ('cn','coinbase',CURRENT_TIMESTAMP)"),
+                ("extra-table", "CREATE TABLE surprise (id integer PRIMARY KEY)"),
+                ("extra-trigger", "CREATE TRIGGER surprise AFTER INSERT ON core_marketdatasourcesetting BEGIN SELECT 1; END"),
+            ):
+                modified = root / f"bad-{key}.sqlite3"
+                self.guard().copy_database(after, modified)
+                with closing(sqlite3.connect(modified)) as connection, connection:
+                    connection.execute(sql)
+                    connection.commit()
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    self.guard().validate_approved_migration_result(before, modified)
 
 
 if __name__ == "__main__":
