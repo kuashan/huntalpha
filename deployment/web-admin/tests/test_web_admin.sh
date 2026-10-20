@@ -436,6 +436,29 @@ finally:
 PY
 
 source "$LIB"
+
+# Verify failed candidate probes report only a bounded error class, not raw
+# Python exceptions, database details, credentials, or container stderr.
+for expected in missing-python-module database-operational-error django-configuration-error docker-runtime-error unknown; do
+  case "$expected" in
+    missing-python-module) simulated="ModuleNotFoundError: No module named secret-db-path-sentinel" ;;
+    database-operational-error) simulated='OperationalError: secret-db-path-sentinel' ;;
+    django-configuration-error) simulated='ImproperlyConfigured: secret-db-path-sentinel' ;;
+    docker-runtime-error) simulated='Error response from daemon: secret-db-path-sentinel' ;;
+    unknown) simulated='secret-db-path-sentinel' ;;
+  esac
+  (
+    docker_cli() { printf '%s\n' "$simulated" >&2; return 1; }
+    if response="$(inspect_migration_plan 'unused-image' '/unused-db' 2>&1)"; then
+      fail "candidate migration probe failure was accepted: $expected"
+    fi
+    [[ "$response" == *"candidate migration plan inspection failed ($expected)"* ]] \
+      || fail "candidate probe failure classification was incorrect: $expected"
+    [[ "$response" != *secret-db-path-sentinel* ]] \
+      || fail "raw candidate stderr was exposed to the caller"
+  )
+done
+
 load_config "$TEST_ROOT/web-admin.conf"
 assert_ok verify_brevo_secret_file
 chmod 644 "$BREVO_ENV_FILE"
