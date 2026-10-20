@@ -3,6 +3,7 @@ import { API_BASE } from '../apiBase'
 import { computed, onMounted, ref } from 'vue'
 import AccountTierBadge from './AccountTierBadge.vue'
 import SiteVersionFooter from './SiteVersionFooter.vue'
+import { membershipExpiryText } from '../membershipExpiry.mjs'
 
 const sections = [
   { key: 'overview', label: '概览' },
@@ -35,7 +36,6 @@ const profileForm = ref({ display_name: '' })
 const profileSaving = ref(false)
 const profileMessage = ref('')
 const profileError = ref('')
-const avatarInput = ref(null)
 const avatarSaving = ref(false)
 const avatarMessage = ref('')
 const avatarError = ref('')
@@ -121,27 +121,6 @@ async function saveProfile() {
   finally { profileSaving.value = false }
 }
 
-function chooseAvatar() { avatarInput.value?.click() }
-
-async function uploadAvatar(event) {
-  const file = event.target.files?.[0]
-  event.target.value = ''
-  if (!file) return
-  avatarMessage.value = ''; avatarError.value = ''; avatarSaving.value = true
-  try {
-    const formData = new FormData(); formData.append('avatar', file)
-    const reply = await fetch(`${API_BASE}/api/account/avatar/`, {
-      method: 'POST', credentials: 'include', headers: { 'X-CSRFToken': await csrfToken() }, body: formData,
-    })
-    const payload = await reply.json()
-    if (!reply.ok) throw new Error(payload.error || '头像上传失败')
-    const nextUser = { ...identity.value, avatar_url: payload.avatar_url }
-    summary.value = { ...summary.value, user: nextUser }; emit('user-updated', nextUser)
-    avatarMessage.value = '头像已更新'
-  } catch (error) { avatarError.value = error.message || '头像上传失败' }
-  finally { avatarSaving.value = false }
-}
-
 async function deleteAvatar() {
   if (!identity.value.avatar_url || !window.confirm('删除当前头像？')) return
   avatarMessage.value = ''; avatarError.value = ''; avatarSaving.value = true
@@ -225,7 +204,7 @@ onMounted(loadSummary)
             <AccountTierBadge :tier="membership?.tier || user.tier" :tier-label="membership?.tier_label || user.tier_label" :watchlist-limit="watchlist?.limit || user.watchlist_limit" :user-name="identity.name" :avatar-url="identity.avatar_url" />
           </div>
           <div class="account-cards">
-            <article><small>会员计划</small><strong>{{ membership?.tier_label || '—' }}</strong><span>当前真实账户状态</span></article>
+            <article><small>会员计划</small><strong>{{ membership?.tier_label || '—' }}</strong><span v-if="membership?.tier === 'pro'">有效期：{{ membershipExpiryText(membership) }}</span><span v-else>当前真实账户状态</span></article>
             <article><small>AI 豆</small><strong>{{ aiBeans?.balance ?? '—' }}</strong><span>{{ aiBeans?.status === 'not_enabled' ? '暂未启用' : '暂不可用' }}</span></article>
             <article><small>自选</small><strong>{{ watchlist ? `${watchlist.total} / ${watchlist.limit}` : '—' }}</strong><span>{{ watchlist ? `剩余 ${watchlist.remaining}` : '暂不可用' }}</span></article>
           </div>
@@ -233,13 +212,13 @@ onMounted(loadSummary)
 
         <section v-else-if="activeSection === 'profile'" class="account-panel detail-panel">
           <div class="profile-row"><div class="profile-avatar"><img v-if="identity.avatar_url" :src="identity.avatar_url" alt="" /><span v-else>{{ avatarInitial }}</span></div><div><h2>{{ identity.name || '—' }}</h2><p>{{ identity.email || '—' }}</p></div></div>
-          <div class="avatar-actions"><input ref="avatarInput" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" @change="uploadAvatar" /><button type="button" @click="chooseAvatar" :disabled="avatarSaving">{{ avatarSaving ? '处理中…' : '上传头像' }}</button><button v-if="identity.avatar_url" type="button" class="subtle-button" @click="deleteAvatar" :disabled="avatarSaving">删除头像</button><small>支持 JPEG、PNG、WebP，最大 5 MB；服务器会统一处理为安全的圆形头像。</small></div>
+          <div class="avatar-actions"><button v-if="identity.avatar_url" type="button" class="subtle-button" @click="deleteAvatar" :disabled="avatarSaving">删除头像</button><small>头像上传暂时停用；已上传的头像继续显示。</small></div>
           <form class="profile-form" @submit.prevent="saveProfile"><label>显示名称<input v-model="profileForm.display_name" maxlength="50" autocomplete="name" required /></label><label>邮箱<input :value="identity.email || '—'" readonly /></label><label>账户等级<input :value="membership?.tier_label || '—'" readonly /></label><button type="submit" :disabled="profileSaving">{{ profileSaving ? '保存中…' : '保存资料' }}</button></form>
           <p v-if="profileMessage" class="form-success">{{ profileMessage }}</p><p v-if="profileError" class="form-error">{{ profileError }}</p><p v-if="avatarMessage" class="form-success">{{ avatarMessage }}</p><p v-if="avatarError" class="form-error">{{ avatarError }}</p>
         </section>
 
         <section v-else-if="activeSection === 'membership'" class="account-panel detail-panel">
-          <div class="membership-block"><small>当前计划</small><strong>{{ membership?.tier_label || '—' }}</strong><p>自选上限：{{ watchlist?.limit ?? '—' }}</p><p v-if="membership?.expires_at">会员到期：{{ membership.expires_at }}</p></div>
+          <div class="membership-block"><small>当前计划</small><strong>{{ membership?.tier_label || '—' }}</strong><p v-if="membership?.tier === 'pro'">有效期：{{ membershipExpiryText(membership) }}</p><p>自选上限：{{ watchlist?.limit ?? '—' }}</p></div>
           <div class="beans-block"><small>AI 豆余额</small><strong>{{ aiBeans?.balance ?? '—' }}</strong><p>{{ aiBeans?.status === 'not_enabled' ? '暂未启用' : '暂不可用' }}</p><p>AI 豆充值后永久有效，使用 AI 功能时按实际消费扣减。</p></div>
         </section>
 

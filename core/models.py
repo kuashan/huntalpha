@@ -185,6 +185,8 @@ class AccountMembership(models.Model):
     tier = models.CharField(
         "会员等级", max_length=4, choices=Tier.choices, default=Tier.FREE
     )
+    # NULL is the legacy unlimited-PRO marker; adding the column preserves users.
+    expires_at = models.DateTimeField("PRO 到期时间", null=True, blank=True)
 
     class Meta:
         verbose_name = "会员等级"

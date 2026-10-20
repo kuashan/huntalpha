@@ -1,12 +1,16 @@
 """Task 011: persisted membership and reversible global watchlist freezing."""
 import json
+from datetime import datetime, timedelta, timezone as dt_timezone
+from django.utils import timezone
+from unittest.mock import patch
 from django.contrib import admin
 from django.contrib.auth.models import Permission
 from django.contrib.auth import get_user_model
 from django.test import Client, RequestFactory, TestCase
 
-from .admin import AccountMembershipInline, MembershipUserAdmin
+from .admin import AccountMembershipForm, AccountMembershipInline, MembershipUserAdmin
 from .models import AccountMembership, MarketSymbol, WatchlistEntry
+from .membership import DURATION_CHOICES, period_end, grant_pro_period
 from .watchlist import resolve_account_tier, resolve_watchlist_limit
 
 
@@ -175,3 +179,83 @@ class MembershipAndFrozenWatchlistTests(TestCase):
         AccountMembership.objects.filter(user=self.member).update(tier="pro")
         self.member.refresh_from_db()
         self.assertEqual((self.member.is_staff, self.member.is_superuser), old)
+
+
+class MembershipExpiryTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="expiry-user", password="secure-password")
+        self.membership = AccountMembership.objects.get(user=self.user)
+        self.client.force_login(self.user)
+
+    def test_superuser_admin_grant_and_renewal_form(self):
+        start = datetime(2026, 11, 10, 15, tzinfo=dt_timezone.utc)
+        with patch("core.membership.timezone.now", return_value=start):
+            form = AccountMembershipForm(data={
+                "tier": "free", "expires_at": "", "grant_duration": "7d",
+            }, instance=self.membership)
+            self.assertTrue(form.is_valid(), form.errors)
+            saved = form.save()
+        self.assertEqual(saved.tier, "pro")
+        self.assertEqual(saved.expires_at, start + timedelta(days=7))
+        # Django admin submits the existing expiration as well as a new duration.
+        with patch("core.membership.timezone.now", return_value=start + timedelta(days=1)):
+            renewal = AccountMembershipForm(data={
+                "tier": "pro",
+                "expires_at": saved.expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "grant_duration": "1m",
+            }, instance=saved)
+            self.assertTrue(renewal.is_valid(), renewal.errors)
+            extended = renewal.save()
+        self.assertEqual(extended.expires_at, datetime(2026, 12, 17, 15, tzinfo=dt_timezone.utc))
+
+    def test_five_calendar_periods_preserve_seconds_and_month_ends(self):
+        start = datetime(2027, 1, 31, 15, 12, 34, tzinfo=dt_timezone.utc)
+        expected = {
+            "7d": datetime(2027, 2, 7, 15, 12, 34, tzinfo=dt_timezone.utc),
+            "1m": datetime(2027, 2, 28, 15, 12, 34, tzinfo=dt_timezone.utc),
+            "3m": datetime(2027, 4, 30, 15, 12, 34, tzinfo=dt_timezone.utc),
+            "6m": datetime(2027, 7, 31, 15, 12, 34, tzinfo=dt_timezone.utc),
+            "1y": datetime(2028, 1, 31, 15, 12, 34, tzinfo=dt_timezone.utc),
+        }
+        self.assertEqual(set(expected), {key for key, _ in DURATION_CHOICES})
+        for duration, end in expected.items():
+            with self.subTest(duration=duration):
+                self.assertEqual(period_end(start, duration), end)
+        self.assertEqual(period_end(datetime(2028, 2, 29, 15, tzinfo=dt_timezone.utc), "1y"),
+                         datetime(2029, 2, 28, 15, tzinfo=dt_timezone.utc))
+        with self.assertRaises(ValueError):
+            period_end(start, "invalid")
+
+    def test_legacy_pro_remains_indefinite_then_extend_exactly(self):
+        start = datetime(2026, 11, 10, 15, tzinfo=dt_timezone.utc)
+        self.membership.tier = "pro"
+        self.membership.save()
+        self.assertEqual(resolve_account_tier(self.user), "pro")
+        self.assertIsNone(self.client.get("/api/account/summary/").json()["membership"]["expires_at"])
+        end = grant_pro_period(self.membership, "7d", now=start)
+        self.assertEqual(end, start + timedelta(days=7))
+        self.membership.save()
+        self.assertEqual(self.client.get("/api/account/summary/").json()["membership"]["expires_at"], end.isoformat())
+        self.assertEqual(grant_pro_period(self.membership, "1m", now=start + timedelta(days=1)),
+                         datetime(2026, 12, 17, 15, tzinfo=dt_timezone.utc))
+
+    def test_expired_pro_is_free_for_all_entitlements_without_deleting_records(self):
+        self.membership.tier = "pro"
+        self.membership.expires_at = timezone.now() - timedelta(seconds=1)
+        self.membership.save()
+        self.assertEqual(resolve_account_tier(self.user), "free")
+        self.assertEqual(resolve_watchlist_limit(self.user), 10)
+        self.assertEqual(self.client.get("/api/auth/session/").json()["user"]["tier"], "free")
+        self.assertEqual(self.client.get("/api/account/summary/").json()["membership"],
+                         {"tier": "free", "tier_label": "FREE", "expires_at": None})
+        items = self.client.get("/api/indicators/").json()["items"]
+        self.assertTrue(all(not item["allowed"] for item in items
+                            if not item.get("common") and item["code"] != "CHANLUN"))
+        self.membership.refresh_from_db()
+        self.assertEqual(self.membership.tier, "pro")
+
+    def test_expired_renewal_starts_from_now(self):
+        now = datetime(2027, 3, 10, 12, 34, 56, tzinfo=dt_timezone.utc)
+        self.membership.tier = "pro"
+        self.membership.expires_at = now - timedelta(days=1)
+        self.assertEqual(grant_pro_period(self.membership, "7d", now=now), now + timedelta(days=7))

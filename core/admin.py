@@ -1,8 +1,11 @@
+from django import forms
 from django.contrib import admin
+from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin
 
 from .models import AccountMembership, AccountProfile, CalibrationDataset, MarketSymbol, WatchlistEntry
+from .membership import DURATION_CHOICES, grant_pro_period
 
 
 @admin.register(AccountProfile)
@@ -36,11 +39,33 @@ class WatchlistEntryAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at",)
 
 
+class AccountMembershipForm(forms.ModelForm):
+    grant_duration = forms.ChoiceField(
+        label="增加会员时长", required=False,
+        choices=(("", "不增加"), *DURATION_CHOICES),
+        help_text="已生效且尚未到期的 PRO 从原到期时刻顺延，否则从保存时刻起算。",
+    )
+
+    class Meta:
+        model = AccountMembership
+        fields = ("tier", "expires_at")
+
+    def save(self, commit=True):
+        membership = super().save(commit=False)
+        if self.cleaned_data.get("grant_duration"):
+            grant_pro_period(membership, self.cleaned_data["grant_duration"])
+        if commit:
+            membership.save()
+            self.save_m2m()
+        return membership
+
+
 class AccountMembershipInline(admin.StackedInline):
     """Only real superusers may create or edit an account's subscription tier."""
 
     model = AccountMembership
-    fields = ("tier",)
+    form = AccountMembershipForm
+    fields = ("tier", "expires_at", "grant_duration")
     extra = 1
     max_num = 1
     can_delete = False
@@ -61,7 +86,10 @@ class MembershipUserAdmin(UserAdmin):
     @admin.display(description="会员等级")
     def account_tier_display(self, obj):
         try:
-            return obj.account_membership.tier.upper()
+            record = obj.account_membership
+            if record.tier == "pro" and record.expires_at and record.expires_at <= timezone.now():
+                return "FREE (PRO 已到期)"
+            return record.tier.upper()
         except AccountMembership.DoesNotExist:
             return "FREE"
 

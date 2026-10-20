@@ -7,5 +7,7 @@ const root = dirname(fileURLToPath(import.meta.url))
 const app = readFileSync(join(root, 'App.vue'), 'utf8')
 const chart = readFileSync(join(root, 'components', 'MarketChart.vue'), 'utf8')
 
-assert.ok(app.includes('source') && app.includes('status'))
+assert.ok(app.includes('quoteStatusText') && app.includes('status'))
+assert.ok(!app.includes("t('quoteSource')"))
+assert.ok(!app.includes('providerLabel'))
 assert.ok(!chart.includes("props.symbol.market === 'crypto' ? 'Coinbase' : '富途 OpenD'"))

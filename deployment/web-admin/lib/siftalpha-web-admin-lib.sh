@@ -17,6 +17,7 @@ readonly SIFTALPHA_UPGRADER="$SIFTALPHA_LIB_DIR/upgrade_web_admin.py"
 readonly SIFTALPHA_APPROVED_MIGRATION='formula_editor.0002_fixedindicatorstate'
 readonly SIFTALPHA_ACCOUNT_MIGRATION='core.0012_auth_verification'
 readonly SIFTALPHA_WORKSPACE_MIGRATION='core.0013_chartworkspace'
+readonly SIFTALPHA_EXPIRY_MIGRATION='core.0014_accountmembership_expires_at'
 readonly SIFTALPHA_BREVO_ENV_DEFAULT='/etc/siftalpha/secrets/brevo.env'
 readonly SIFTALPHA_COMPOSE_PROJECT_NAME='siftalpha-web'
 
@@ -311,6 +312,10 @@ inspect_migration_plan() {
       LAST_MIGRATION_PLAN="[\"$SIFTALPHA_WORKSPACE_MIGRATION\"]"; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]" ;;
     "{\"pending\":[],\"applied\":[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]}")
       LAST_MIGRATION_PLAN='[]'; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]" ;;
+    "{\"pending\":[\"$SIFTALPHA_EXPIRY_MIGRATION\"],\"applied\":[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]}")
+      LAST_MIGRATION_PLAN="[\"$SIFTALPHA_EXPIRY_MIGRATION\"]"; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]" ;;
+    "{\"pending\":[],\"applied\":[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\",\"$SIFTALPHA_EXPIRY_MIGRATION\"]}")
+      LAST_MIGRATION_PLAN='[]'; LAST_APPLIED_MIGRATIONS="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\",\"$SIFTALPHA_EXPIRY_MIGRATION\"]" ;;
     *) die 'candidate migration plan validation returned an invalid result'; return 1 ;;
   esac
 }
@@ -624,6 +629,7 @@ restore_snapshot() {
     "[\"$SIFTALPHA_APPROVED_MIGRATION\"]") ;;
     "[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]") ;;
     "[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]") ;;
+    "[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\",\"$SIFTALPHA_EXPIRY_MIGRATION\"]") ;;
     *) die 'database migration history is not compatible with automatic rollback'; return 1 ;;
   esac
   if [[ "$migrations" != '[]' ]]; then
@@ -654,7 +660,9 @@ restore_snapshot() {
   wait_for_health || { die 'restored website service is unhealthy'; return 1; }
   printf 'rollback: restored snapshot=%s\n' "$snapshot"
   if [[ "$migrations" != '[]' ]]; then
-    if [[ "$migrations" == "[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]" ]]; then
+    if [[ "$migrations" == "[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\",\"$SIFTALPHA_EXPIRY_MIGRATION\"]" ]]; then
+      printf 'database rollback: retained reviewed nullable PRO expiry column; old application does not enforce expiry\n'
+    elif [[ "$migrations" == "[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]" ]]; then
       printf 'database rollback: retained reviewed additive workspace migration %s; database was not reversed\n' "$SIFTALPHA_WORKSPACE_MIGRATION"
     else
       printf 'database rollback: retained reviewed additive migration %s; it is backward-compatible with the restored application\n' "$SIFTALPHA_APPROVED_MIGRATION"
@@ -981,7 +989,7 @@ isolated_deploy_and_rollback_test() {
 record_snapshot_database_state() {
   local snapshot="$1" migrations="$2" staged
   case "$migrations" in
-    '[]'|"[\"$SIFTALPHA_APPROVED_MIGRATION\"]"|"[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]"|"[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]") ;;
+    '[]'|"[\"$SIFTALPHA_APPROVED_MIGRATION\"]"|"[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\"]"|"[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]"|"[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\",\"$SIFTALPHA_EXPIRY_MIGRATION\"]") ;;
     *) die 'refusing to record an unapproved database migration'; return 1 ;;
   esac
   [[ "$LAST_BACKUP_PATH" == "$BACKUP_DIR"/*.sqlite3 && "$LAST_BACKUP_SHA256" =~ ^[0-9a-f]{64}$ ]] \
@@ -1078,6 +1086,9 @@ deploy_candidate() {
     fi
     if [[ "$planned" == "[\"$SIFTALPHA_WORKSPACE_MIGRATION\"]" ]]; then
       expected_applied="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\"]"
+    fi
+    if [[ "$planned" == "[\"$SIFTALPHA_EXPIRY_MIGRATION\"]" ]]; then
+      expected_applied="[\"$SIFTALPHA_APPROVED_MIGRATION\",\"$SIFTALPHA_ACCOUNT_MIGRATION\",\"$SIFTALPHA_WORKSPACE_MIGRATION\",\"$SIFTALPHA_EXPIRY_MIGRATION\"]"
     fi
     if ! inspect_migration_plan "$image" "$DATABASE_PATH" \
       || [[ "$LAST_MIGRATION_PLAN" != '[]' || "$LAST_APPLIED_MIGRATIONS" != "$expected_applied" ]]; then

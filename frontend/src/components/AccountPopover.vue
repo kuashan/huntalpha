@@ -2,6 +2,7 @@
 import { API_BASE } from '../apiBase'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AccountTierBadge from './AccountTierBadge.vue'
+import { membershipExpiryText } from '../membershipExpiry.mjs'
 
 const props = defineProps({
   user: { type: Object, required: true },
@@ -162,7 +163,7 @@ onBeforeUnmount(() => {
 
         <div class="account-section">
           <div class="account-row"><span>会员计划</span><b>{{ membership?.tier_label || '—' }}</b></div>
-          <div v-if="membership?.expires_at" class="account-row"><span>会员到期</span><b>{{ membership.expires_at }}</b></div>
+          <div v-if="membership?.tier === 'pro'" class="account-row"><span>有效期</span><b>{{ membershipExpiryText(membership) }}</b></div>
         </div>
 
         <div class="account-section">

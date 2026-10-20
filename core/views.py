@@ -22,7 +22,7 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from formula_editor.models import Formula
 from formula_editor.fixed_indicators import installed_fixed_indicators, is_fixed_indicator_enabled
-from .models import AccountProfile, MarketSymbol, WatchlistEntry
+from .models import AccountMembership, AccountProfile, MarketSymbol, WatchlistEntry
 from .chart_workspace import InvalidWorkspace, WorkspacePermissionDenied, get_workspace, put_workspace
 from .account_security import (RateLimited, VerificationUnavailable, client_ip, take_limit,
                                limit_reached, clear_limit, issue_signup, resend_signup, claim_signup)
@@ -215,6 +215,8 @@ def account_summary(request):
     limit = watchlist_limit_for_user(request.user)
     total = min(WatchlistEntry.objects.filter(user=request.user).count(), limit)
     profile = AccountProfile.objects.filter(user=request.user).first()
+    expiry = (AccountMembership.objects.filter(user=request.user).values_list("expires_at", flat=True).first()
+              if tier["tier"] == "pro" else None)
     return json({
         "user": {
             "name": account_display_name(request.user),
@@ -224,7 +226,7 @@ def account_summary(request):
         "membership": {
             "tier": tier["tier"],
             "tier_label": tier["tier_label"],
-            "expires_at": None,
+            "expires_at": expiry.isoformat() if expiry else None,
         },
         "ai_beans": {
             "status": "not_enabled",
@@ -306,11 +308,8 @@ def account_avatar(request):
     if request.method == "DELETE":
         profile = delete_avatar(request.user)
         return json({"status": "ok", "avatar_url": account_avatar_url(request, profile)})
-    try:
-        profile = save_avatar(request.user, request.FILES.get("avatar"))
-    except AvatarValidationError as exc:
-        return json({"error": str(exc), "code": "avatar_invalid"}, 400)
-    return json({"status": "ok", "avatar_url": account_avatar_url(request, profile)})
+    # Uploaded avatars remain readable; no new content may be uploaded.
+    return json({"error": "头像上传功能暂时停用", "code": "avatar_upload_paused"}, 403)
 
 
 @require_POST
