@@ -767,6 +767,11 @@ def _validate_core_0015_result(before_path: str | Path, after_path: str | Path) 
             raise ValueError("unexpected market source primary key")
         if list(after.execute(f'PRAGMA foreign_key_list("{table}")')):
             raise ValueError("unapproved market source foreign key")
+        if after.execute(
+            "SELECT 1 FROM sqlite_master WHERE tbl_name=? AND type NOT IN ('table', 'index')",
+            (table,),
+        ).fetchone():
+            raise ValueError("unapproved market source trigger or view")
         if after.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]:
             raise ValueError("market source table not empty on installation")
         if [r for r in _schema_rows(before) if r[2] != table] != [
