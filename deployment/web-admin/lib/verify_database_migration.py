@@ -661,6 +661,72 @@ def _validate_core_0013_result(before_path: str | Path, after_path: str | Path) 
 
 
 
+def _member_legacy_rows_unchanged(before: sqlite3.Connection, after: sqlite3.Connection) -> bool:
+    """Preserve every existing membership column; all new expirations must be NULL."""
+    old_cols = [r[1] for r in before.execute('PRAGMA table_info("core_accountmembership")')]
+    new_cols = [r[1] for r in after.execute('PRAGMA table_info("core_accountmembership")')]
+    if not old_cols or new_cols != old_cols + ["expires_at"]:
+        return False
+    if after.execute('SELECT COUNT(*) FROM "core_accountmembership" WHERE "expires_at" IS NOT NULL').fetchone()[0]:
+        return False
+    columns = ", ".join(_quote_identifier(c) for c in old_cols)
+    sql = f'SELECT {columns} FROM "core_accountmembership" ORDER BY {columns}'
+    lhs, rhs = before.execute(sql), after.execute(sql)
+    while True:
+        x, y = lhs.fetchmany(256), rhs.fetchmany(256)
+        if x != y:
+            return False
+        if not x:
+            return True
+
+
+def _validate_core_0014_result(before_path: str | Path, after_path: str | Path) -> None:
+    """Permit only the exact reviewed nullable column and Django migration marker."""
+    table = "core_accountmembership"
+    with closing(_connect_readonly(before_path)) as before, closing(_connect_readonly(after_path)) as after:
+        tables = _table_names(before)
+        if tables != _table_names(after) or table not in tables:
+            raise ValueError("unapproved membership schema change")
+        old_schema, new_schema = _schema_rows(before), _schema_rows(after)
+        old_sql = next((r[3] for r in old_schema if r[0] == "table" and r[1] == table), None)
+        new_sql = next((r[3] for r in new_schema if r[0] == "table" and r[1] == table), None)
+        if not old_sql or not old_sql.rstrip().endswith(")") or not new_sql:
+            raise ValueError("invalid membership table SQL")
+        expected_sql = old_sql.rstrip()[:-1] + ', "expires_at" datetime NULL)'
+        if _normalize_sql(new_sql) != _normalize_sql(expected_sql):
+            raise ValueError("unapproved membership column SQL")
+        def without_membership_table(rows):
+            return [r for r in rows if not (r[0] == "table" and r[1] == table)]
+        if without_membership_table(old_schema) != without_membership_table(new_schema):
+            raise ValueError("migration changed unrelated schema")
+        original = list(before.execute('PRAGMA table_info("core_accountmembership")'))
+        actual = list(after.execute('PRAGMA table_info("core_accountmembership")'))
+        if actual[:-1] != original or not actual or tuple(actual[-1][1:6]) != ("expires_at", "datetime", 0, None, 0):
+            raise ValueError("unapproved membership field specification")
+        if not _member_legacy_rows_unchanged(before, after):
+            raise ValueError("existing membership records changed")
+        for other in tables - {table, "django_migrations", "sqlite_sequence"}:
+            if not _rows_equal(before, after, other):
+                raise ValueError("migration changed existing user/application data")
+        old_history, new_history = (
+            Counter(db.execute('SELECT * FROM "django_migrations"')) for db in (before, after)
+        )
+        added = list((new_history - old_history).elements())
+        if old_history - new_history or len(added) != 1:
+            raise ValueError("unapproved migration history change")
+        cols = [r[1] for r in before.execute('PRAGMA table_info("django_migrations")')]
+        indexes = {key: cols.index(key) for key in ("id", "app", "name", "applied")}
+        marker = added[0]
+        if (marker[indexes["app"]], marker[indexes["name"]]) != ("core", "0014_accountmembership_expires_at") or not marker[indexes["applied"]]:
+            raise ValueError("unexpected migration record")
+        old_seq = dict(before.execute('SELECT name,seq FROM sqlite_sequence'))
+        new_seq = dict(after.execute('SELECT name,seq FROM sqlite_sequence'))
+        if old_seq.keys() != new_seq.keys() or new_seq.get("django_migrations") != marker[indexes["id"]]:
+            raise ValueError("unapproved migration sequence update")
+        if any(new_seq[key] != value for key, value in old_seq.items() if key != "django_migrations"):
+            raise ValueError("existing SQLite sequence changed")
+
+
 def _rows_equal_schema(before: sqlite3.Connection, after: sqlite3.Connection, table: str) -> bool:
     before_columns = list(before.execute(f"PRAGMA table_info({_quote_identifier(table)})"))
     after_columns = list(after.execute(f"PRAGMA table_info({_quote_identifier(table)})"))
