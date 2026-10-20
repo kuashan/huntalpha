@@ -1,0 +1,28 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div id="content-main">
+  <p>为四个市场分别选择报价、K 线及对应指数的行情来源。证券搜索目录独立，不随此设置切换。</p>
+  <p><strong>自动选择：</strong>保持当前来源优先级及失败回退。<strong>指定来源：</strong>仅使用所选来源，不会悄悄切换；该来源没有权限、不可用或不支持所选 K 线周期／指数时，会显示不可用。</p>
+  <form method="post">
+    {% csrf_token %}
+    {% if form.non_field_errors %}<div class="errornote">{{ form.non_field_errors }}</div>{% endif %}
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;max-width:1020px;margin:20px 0;">
+      {% for field in form %}
+      <section class="module" style="padding-bottom:16px;">
+        <h2>{{ field.label }}</h2>
+        <div style="padding:12px 16px 0;">
+          <label for="{{ field.id_for_label }}">行情来源</label>
+          <div style="margin-top:8px;">{{ field }}</div>
+          {% if field.errors %}<div class="errornote">{{ field.errors }}</div>{% endif %}
+        </div>
+      </section>
+      {% endfor %}
+    </div>
+    <div class="submit-row" style="max-width:990px;">
+      <input type="submit" value="保存四个市场设置" class="default">
+    </div>
+  </form>
+</div>
+{% endblock %}
