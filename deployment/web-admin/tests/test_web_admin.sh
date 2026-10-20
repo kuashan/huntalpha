@@ -448,6 +448,9 @@ for expected in missing-python-module database-operational-error django-configur
     unknown) simulated='secret-db-path-sentinel' ;;
   esac
   (
+    # This isolated probe test runs before load_config; provide the normally
+    # configured env-file path so nounset cannot abort before docker_cli runs.
+    ENV_FILE="$TEST_ROOT/probe-only.env"
     docker_cli() { printf '%s\n' "$simulated" >&2; return 1; }
     if response="$(inspect_migration_plan 'unused-image' '/unused-db' 2>&1)"; then
       fail "candidate migration probe failure was accepted: $expected"
