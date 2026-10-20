@@ -1,9 +1,9 @@
 <script setup>
-const version = 'V1.1.0'
+const version = 'V1.1.3'
 </script>
 
 <template>
-  <footer class="site-version-footer">SiftAlpha.com • {{ version }}</footer>
+  <footer class="site-version-footer">SiftAlpha • {{ version }}</footer>
 </template>
 
 <style scoped>
