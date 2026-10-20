@@ -140,6 +140,37 @@ class ReleaseWorkflowContractTests(SimpleTestCase):
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
 
+    def test_release_workflow_verifier_rejects_automatic_triggers(self):
+        """The retained Actions fallback must not start on push, PR or schedule."""
+        import importlib.util
+        from unittest.mock import patch
+
+        base_dir = Path(__file__).resolve().parents[1]
+        verifier_path = base_dir / "scripts" / "verify_web_release_workflow.py"
+        spec = importlib.util.spec_from_file_location("release_workflow_check", verifier_path)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        original = verifier.WORKFLOW.read_text(encoding="utf-8")
+        for event, additional_trigger in (
+            ("push", "  push:\\n"),
+            ("pull_request", "  pull_request:\\n"),
+            ("schedule", "  schedule:\\n"),
+        ):
+            with self.subTest(event=event), TemporaryDirectory() as temporary_directory:
+                candidate = Path(temporary_directory) / "release.yml"
+                candidate.write_text(
+                    original.replace(
+                        "  workflow_dispatch:\\n",
+                        "  workflow_dispatch:\\n" + additional_trigger.replace("\\n", "\n"),
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                with patch.object(verifier, "WORKFLOW", candidate):
+                    with self.assertRaisesRegex(ValueError, "manual-only"):
+                        verifier.main()
+
+
 class WebReleaseRunbookContractTests(SimpleTestCase):
     def test_runbook_requires_immutable_provenance_and_explicit_approval(self):
         """Operators must not treat a registry label or tag as deployment authority."""
