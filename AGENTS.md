@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件是 HuntAlpha 仓库中 Codex 开始任何实现工作前必须阅读的最高级协作规则。
+本文件定义仓库协作和安全边界。**SiftAlpha.com 网站的最新分工、开发、构建及发布流程以 [docs/DEVELOPMENT_HANDBOOK.md](docs/DEVELOPMENT_HANDBOOK.md) 为准**；旧的 Codex 开发、`main` 或 GitHub Actions 构建约定不适用于网站。
 
 ## 1. 项目定位
 
@@ -12,54 +12,37 @@ HuntAlpha 是准备正式上线、长期维护的真实产品，不是演示项�
 4. 不泄露私有指标源码、凭据或本地业务数据；
 5. 为未来生产部署保留清晰边界。
 
-## 2. 角色
+## 2. 三方角色（网站）
 
-- **用户**：产品方向、业务目标、最终取舍与验收意见。
-- **ChatGPT**：澄清需求、检查 GitHub 当前状态、形成任务规格、记录关键决策、审查实现结果。
-- **Codex**：读取任务与仓库、在独立分支实现、运行检查、提交并 Push、报告结果。
-- **GitHub**：代码、任务、架构、决策和审查历史的事实来源（source of truth）。
+- **用户：**需求与发布授权、最终真实网站验收、认可基线。
+- **ChatGPT：**负责定位问题、修改代码和必要测试、提升版本号、提交并 Push GitHub；部署后协助核查真实页面。
+- **Codex：**只负责本地必要构建前检查、本地 ARM64 构建、GHCR 推送、受控预检/备份/迁移与部署，以及**一次最小技术健康检查**。不承担网站业务开发修复，也不反复做复杂部署后功能测试。
+- **GitHub：**代码和审查记录事实源。以 `docs/DEVELOPMENT_HANDBOOK.md` 为完整操作依据。
 
-## 3. 开工前必须做的事
+## 3. 开始工作前
 
-每次收到实现任务时，Codex 必须按顺序：
+ChatGPT 开发时必须核查真实远端 HEAD、已认可基线和最小需求边界，再提交代码与必要测试。
 
-1. 阅读本文件 `AGENTS.md`；
-2. 阅读被指定的 `docs/tasks/<task>.md`；
-3. 阅读该任务引用的 `docs/architecture/` 或 `docs/decisions/` 文件；
-4. 检查当前分支、Git 状态和相关现有代码；
-5. 若需求与仓库现状冲突或存在歧义，停止并报告，不得静默猜测。
+Codex 执行构建与部署时必须先读 `AGENTS.md`、`docs/DEVELOPMENT_HANDBOOK.md`、当前 `docs/tasks/` 的任务文件，核对分支、版本及真实 Commit。若必要构建测试失败，应停止并交由 ChatGPT 修复代码，不自行扩大开发范围，不反复尝试。
 
-除非任务明确要求，否则不要把 `agent.md` 当成当前流程规则。`agent.md` 保留了大量历史项目约定和领域细节，可用于理解背景；如与本文件、正式 task 或 `docs/decisions/` 冲突，以本文件和较新的正式文档为准。
+除非明确需要，不使用含大量旧约定的 `agent.md` 替代当前操作规则。
 
-## 4. 分支与 main 规则
+## 4. 分支和版本规则
 
-`main` 代表已经认可的稳定版本。
+- 网站正式分支是 **`release/siftalpha-web-v1`**，当前已认可基线 V1.1.4；后续修复必须升级版本号。
+- ChatGPT 在独立 `feat/`、`fix/`、`docs/` 分支上开发和提交 PR，不直接在正式分支或生产环境开发。
+- Codex 使用**合并后正式分支的完整 Commit SHA**本地构建；禁止 GitHub Actions 或生产服务器构建。
+- 其他项目若使用 `main`，遵循其各自规则，不将网站发布流程混入其他项目。
+- 不得未经授权 force push、重写历史、大范围删除或不可逆操作。
 
-- 常规功能、修复、重构、生产配置修改：**不得直接在 `main` 上开发**。
-- 每个任务使用独立分支，例如：
-  - `feat/<short-name>`
-  - `fix/<short-name>`
-  - `chore/<short-name>`
-  - `docs/<short-name>`
-- 开始任务前应从最新 `main` 创建分支。
-- Codex 完成后 Push 分支并报告 commit / PR。
-- 在 ChatGPT 审查和用户需要的验证完成前，不合并到 `main`。
-- 禁止未经明确授权的 force push、历史重写、`reset --hard`、大范围删除或不可逆操作。
+## 5. 状态与验收
 
-仓库首次协作基础设施搭建可作为例外，但完成后应执行上述规则。
+- **开发完成：**ChatGPT 完成代码、版本号、GitHub 提交及已执行的针对性检查。
+- **构建完成：**Codex 完成本地 ARM64 镜像并验证 GHCR Digest。
+- **部署完成：**受控预检、数据保护、部署和最小技术健康检查通过。
+- **最终验收完成：**用户在真实网站确认功能正常，才可冻结为新的基线。
 
-## 5. Task 状态
-
-正式任务使用以下状态：
-
-- `DRAFT`：仍在讨论，Codex 不得实施。
-- `READY_FOR_CODEX`：方案已批准，可以开始。
-- `IN_PROGRESS`：Codex 已开始实现。
-- `BLOCKED`：因依赖、风险或决策无法继续。
-- `IMPLEMENTED`：Codex 已完成并 Push，等待审查。
-- `ACCEPTED`：ChatGPT/用户审查通过。
-
-Codex 不得自行把任务从 `IMPLEMENTED` 改成 `ACCEPTED`。
+任何角色不得提前宣称下一阶段已通过。
 
 ## 6. 实现范围
 
@@ -138,67 +121,32 @@ python manage.py backup_local_db
 
 更细的历史公式规则目前仍可参考 `agent.md`；未来逐步迁入 `docs/architecture/`。
 
-## 11. 测试与检查
+## 11. 测试职责
 
-根据改动类型，至少执行适用的检查：
-
-### 后端
-
-- `python manage.py check`
-- 相关 Django tests
-- 涉及模型时检查 migrations
-
-### 前端
-
-- `npm run build`
-- 相关 lint/test（仓库存在时）
-
-### 通用
-
-- `git diff --check`
-- 检查 Git diff 仅包含任务范围
-- 检查没有秘密、本地数据库、日志或构建产物被意外加入
-
-如果某项检查因环境条件无法运行，必须明确报告原因，不得写成“通过”。
+- ChatGPT 开发时尽可能运行适用的语法、针对性 Django、数据库迁移、前端及逻辑测试，未运行的如实标注。
+- Codex 仅做一次必要的**构建门槛检查**：Django check、必要的迁移及保护测试、相关自动化测试、前端构建和 `git diff --check`。失败时报告并等待 ChatGPT 改代码。
+- 部署后 Codex 仅核对固定容器、目标 Digest、受控 `status` / `health` 和基本 HTTP 状态；**不重复进行复杂业务功能验证**。页面检查由 ChatGPT 协助，用户最终验收。
+- 密钥、数据库、私有公式及用户资料绝不能进入日志或 Git。
 
 ## 12. 生产环境原则
 
-当前仓库仍包含开发配置。正式上线前必须通过独立任务处理至少：
+网站已正式上线，使用受控 `siftalpha-web-admin`、`siftalpha-web-compose` 和持久化 SQLite。需要迁移时必须先进行真实备份、独立恢复校验与白名单核验，禁止直接对生产数据库 `migrate`。不操作 Cloudflare、Crypto、Options Monitor 或其他无关容器。
 
-- `DEBUG=False` 与环境化配置；
-- 正式 `ALLOWED_HOSTS`；
-- PostgreSQL 或其他生产数据库方案；
-- 静态文件部署；
-- HTTPS、HSTS、Secure Cookie；
-- CSRF / CORS 正式策略；
-- 正式邮件服务；
-- AI 服务与支付/点数的凭据、幂等、审计和合规；
-- 日志、备份、监控、恢复和发布回滚。
+Codex 在本地构建 `linux/arm64` 镜像并推送 GHCR，以不可变 Digest 预检与受控部署。**禁止 GitHub Actions 构建**。数据库恢复需要单独授权。详见 `docs/DEVELOPMENT_HANDBOOK.md`。
 
-不得为了“先上线再说”跳过安全边界。
+## 13. 分工交接报告
 
-## 13. Codex 完成报告
+ChatGPT 交付：修改范围、版本号、开发分支、PR/Commit、针对性检查结果及未验证项。
 
-每个任务完成后必须报告：
+Codex 交付：合并后正式 HEAD、本地必要构建检查、ARM64 镜像/真实 GHCR Digest、数据库备份和迁移预检、部署及最小健康检查结论。不要向 Codex 要求反复的部署后人工功能巡检。
 
-- 实现摘要；
-- 修改文件；
-- 测试/检查及结果；
-- 重要设计选择；
-- 未解决问题或风险；
-- 分支名；
-- commit hash；
-- Push 是否成功；
-- PR（如有）。
+异常停止并报告，由 ChatGPT 定位代码问题；不可擅自更改全局服务器设置。
 
-若 Push、测试、认证或网络失败，保留现场并报告具体错误，不要擅自修改全局系统设置。
+## 14. 审查与最终验收
 
-## 14. 审查与合并
+1. ChatGPT 完成业务开发修复并提交独立 PR。
+2. Codex 在本地做必要检查，成功后按发布流程合并、构建 ARM64 镜像并推送 GHCR。
+3. 依据用户发布授权，Codex 经受控工具完成备份、迁移预检、部署和最小技术检查。
+4. ChatGPT 协助真实网页检查；**用户最终决定验收是否通过、是否冻结为新基线**。
 
-当状态为 `IMPLEMENTED`：
-
-1. ChatGPT 从 GitHub 检查实际 diff、提交和测试证据；
-2. 若不通过，任务继续修改；
-3. 若通过，任务标记 `ACCEPTED`；
-4. 再按约定合并到 `main`；
-5. 涉及上线的任务还需通过部署/测试环境验证，不能仅以代码合并代表生产上线成功。
+`docs/DEVELOPMENT_HANDBOOK.md` 优先于旧角色和发布描述。

@@ -12,27 +12,40 @@ from .providers.base import MarketDataProviderError
 class MarketDataRouter:
     """Route by MarketProfile and Provider priority with whole-window failover."""
 
-    def __init__(self, cache: MarketDataCache | None = None):
+    def __init__(self, cache: MarketDataCache | None = None, selection_resolver=None):
         self._providers: dict[str, list[MarketDataProvider]] = {}
         self.cache = cache or MarketDataCache()
+        self.selection_resolver = selection_resolver
 
     def register(self, provider: MarketDataProvider) -> None:
         market_id = normalize_market_id(provider.profile.market_id)
         self._providers.setdefault(market_id, []).append(provider)
 
     def provider_ids(self, market_id: str) -> tuple[str, ...]:
-        return tuple(provider.provider_id for provider in self._providers.get(normalize_market_id(market_id), ()))
+        return tuple(provider.provider_id for provider in self.all_providers_for(market_id))
+
+    def all_providers_for(self, market_id: str):
+        """Registered sources irrespective of the operator's quote/K-line choice."""
+        return tuple(self._providers.get(normalize_market_id(market_id), ()))
 
     def providers_for(self, market_id: str):
-        """Return the ordered provider objects for one market profile."""
-        return tuple(self._providers.get(normalize_market_id(market_id), ()))
+        """Auto: existing priority/failover. Manual: the selected source only."""
+        market = normalize_market_id(market_id)
+        registered = self.all_providers_for(market)
+        selected = self.selection_resolver(market) if self.selection_resolver else "auto"
+        if selected in ("auto", None):
+            return registered
+        chosen = tuple(provider for provider in registered if provider.provider_id == selected)
+        if not chosen:
+            raise MarketDataProviderError(f"{market}: 手动指定的行情源不可用：{selected}", status="not_configured")
+        return chosen
 
     def provider_for(self, market_id: str, provider_id: str | None = None):
         return self._provider(market_id, provider_id)
 
     def fetch_window(self, market_id: str, symbol: str, timeframe: str, **kwargs: Any) -> MarketDataFetch:
         market = normalize_market_id(market_id)
-        providers = self._providers.get(market) or []
+        providers = self.providers_for(market)
         if not providers:
             raise RuntimeError(f"没有可用行情供应商：{market}")
 
@@ -86,7 +99,7 @@ class MarketDataRouter:
         provider is tried.  No fields are merged across providers.
         """
         market = normalize_market_id(market_id)
-        providers = self._providers.get(market) or []
+        providers = self.providers_for(market)
         if not providers:
             raise MarketDataProviderError(f"没有可用行情供应商：{market}", status="not_configured")
         errors: list[str] = []
@@ -115,7 +128,7 @@ class MarketDataRouter:
         return dict(method(market_id, symbol) if callable(method) else {"status": "unknown", "provider": provider.provider_id})
 
     def _provider(self, market_id: str, provider_id: str | None):
-        providers = self._providers.get(normalize_market_id(market_id)) or []
+        providers = self.providers_for(market_id)
         if provider_id is None:
             if not providers:
                 raise RuntimeError(f"没有可用行情供应商：{normalize_market_id(market_id)}")

@@ -83,6 +83,36 @@ class MarketSymbol(models.Model):
         return f"{self.code} · {self.name}"
 
 
+
+class MarketDataSourceSetting(models.Model):
+    """One global market-data routing preference per market, set by superusers."""
+
+    class Market(models.TextChoices):
+        US = "us", "美股"
+        CN = "cn", "沪深 A 股"
+        HK = "hk", "港股"
+        CRYPTO = "crypto", "加密货币"
+
+    market = models.CharField("市场", max_length=8, primary_key=True, choices=Market.choices)
+    provider = models.CharField("行情来源", max_length=32, default="auto")
+    updated_at = models.DateTimeField("修改时间", auto_now=True)
+
+    class Meta:
+        verbose_name = "行情来源"
+        verbose_name_plural = "行情来源"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        from .marketdata.selection import PROVIDERS_BY_MARKET
+
+        if self.provider not in PROVIDERS_BY_MARKET.get(self.market, ()):
+            raise ValidationError({"provider": "该市场不支持所选行情来源"})
+
+    def __str__(self):
+        return self.get_market_display()
+
+
+
 class WatchlistEntry(models.Model):
     """A durable account-to-security relationship, without copied quote data."""
 

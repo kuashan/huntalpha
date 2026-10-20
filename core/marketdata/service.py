@@ -10,6 +10,7 @@ from .providers.tushare import TushareMarketDataProvider
 from .providers.tencent import TencentPublicMarketDataProvider
 from .providers.yahoo import YahooFinanceMarketDataProvider
 from .router import MarketDataRouter
+from .selection import selected_provider
 
 
 def legacy_coinbase_client():
@@ -64,7 +65,7 @@ def market_id_for_symbol(symbol: str) -> str:
 
 
 def build_market_data_router() -> MarketDataRouter:
-    router = MarketDataRouter()
+    router = MarketDataRouter(selection_resolver=selected_provider)
     # Public sources are always first. Optional private providers remain
     # available as whole-request fallbacks, but are never prerequisites.
     router.register(YahooFinanceMarketDataProvider(CN_A_SHARE))
@@ -117,7 +118,7 @@ class MarketDataService:
             raise ProviderSyncError("unsupported_market")
         profile_id = {"cn": CN_A_SHARE.market_id, "hk": HK_EQUITY.market_id, "us": US_EQUITY.market_id}[normalized]
         errors = []
-        for provider in self.router.providers_for(profile_id):
+        for provider in self.router.all_providers_for(profile_id):
             try:
                 rows = provider.list_securities(profile_id, query="", page=1)
                 symbols = tuple(self._catalog_symbol(row, normalized, provider.provider_id) for row in (rows or []))

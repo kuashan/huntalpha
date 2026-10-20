@@ -672,13 +672,15 @@ def request_page(client, code, period, count, before=None):
     return rows, bool(rows), None
 
 
-def merge_realtime_rows(rows, code, period, calculation_snapshot=None):
+def merge_realtime_rows(rows, code, period, calculation_snapshot=None, expected_provider=None):
     """Overlay the shared authoritative current bar on a historical response."""
     if calculation_snapshot is None:
         registry = get_realtime_registry()
         calculation_snapshot = registry.state_store.capture(registry.key_for(code, period))
     if calculation_snapshot.current_bar is None:
         return rows
+    if expected_provider is not None and calculation_snapshot.current_bar.provider != expected_provider:
+        return rows  # Administrator changed the source; never merge the prior source's candle.
     current = calculation_snapshot.current_bar.to_dict()
     bar = {field: current.get(field) for field in (
         "time", "open", "high", "low", "close", "volume", "amount", "turnover_rate"
@@ -795,7 +797,7 @@ def kline(request, code):
                 data_status = fetch.meta.get("data_status", "historical")
             registry = get_realtime_registry()
             if before is None:
-                bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)))
+                bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)), expected_provider=source if normalized_code.startswith("CC.") else fetch.provider_id)
             return json({
                 "code": normalized_code, "period": period, "bars": bars, "source": source,
                 "adjustment": adjustment, "has_more": len(bars) >= count,
@@ -821,7 +823,7 @@ def kline(request, code):
         bars = fetch.completed
         if before is None:
             registry = get_realtime_registry()
-            bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)))
+            bars = merge_realtime_rows(bars, normalized_code, period, registry.state_store.capture(registry.key_for(normalized_code, period)), expected_provider=source if normalized_code.startswith("CC.") else fetch.provider_id)
         return json({"code": code.upper(), "period": period, "bars": bars, "source": fetch.provider_id, "adjustment": fetch.meta.get("adjustment", "前复权"), "has_more": len(bars) >= count, "data_status": fetch.meta.get("data_status", "historical"), "delay_seconds": fetch.meta.get("delay_seconds")})
     except Exception as exc:
         status = getattr(exc, "status", "unavailable")

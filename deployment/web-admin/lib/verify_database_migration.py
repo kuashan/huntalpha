@@ -26,6 +26,7 @@ APPROVED_MIGRATIONS = {
     "core.0012_auth_verification": "2e02a54d4869e10dcb4da50a66a9656a63c2d120cd33ab8ec9cd757187effdc9",
     "core.0013_chartworkspace": "e398a835684bbf3fd216fc57a6539f2f990d92b9862f0f9f96a17974c4ff2cea",
     "core.0014_accountmembership_expires_at": "8e3ce97ca723bceb21a62e59fa9e9f4055180e9304f88a7daf84c9f5f923669e",
+    "core.0015_marketdatasourcesetting": "d7bb0c73401a5680c2cdbc0fa3af252f21144fc7ee5cc312942d20bca82527f0",
 }
 PROTECTED_TABLES = (
     "auth_user",
@@ -116,6 +117,8 @@ def validate_probe_state(payload: Any) -> dict[str, list[str]]:
     if "core.0013_chartworkspace" in applied and "core.0012_auth_verification" not in applied:
         raise _reject()
     if "core.0014_accountmembership_expires_at" in pending + applied and "core.0013_chartworkspace" not in applied:
+        raise _reject()
+    if "core.0015_marketdatasourcesetting" in pending + applied and "core.0014_accountmembership_expires_at" not in applied:
         raise _reject()
     return {"pending": pending, "applied": applied}
 
@@ -278,6 +281,8 @@ def validate_approved_migration_result(before_path: str | Path, after_path: str 
         return _validate_core_0012_result(before_path, after_path)
     if added == {"core_chartworkspace"}:
         return _validate_core_0013_result(before_path, after_path)
+    if added == {"core_marketdatasourcesetting"}:
+        return _validate_core_0015_result(before_path, after_path)
     if not added:
         return _validate_core_0014_result(before_path, after_path)
     migration_name = "0002_fixedindicatorstate"
@@ -725,6 +730,113 @@ def _validate_core_0014_result(before_path: str | Path, after_path: str | Path) 
             raise ValueError("unapproved migration sequence update")
         if any(new_seq[key] != value for key, value in old_seq.items() if key != "django_migrations"):
             raise ValueError("existing SQLite sequence changed")
+
+
+
+MARKET_SOURCE_TABLE_SQL = (
+    'CREATE TABLE "core_marketdatasourcesetting" '
+    '("market" varchar(8) NOT NULL PRIMARY KEY, '
+    '"provider" varchar(32) NOT NULL, "updated_at" datetime NOT NULL)'
+)
+
+
+def _validate_core_0015_result(before_path: str | Path, after_path: str | Path) -> None:
+    """Accept only one initially empty table and its exact Django permissions."""
+    table = "core_marketdatasourcesetting"
+    with closing(_connect_readonly(before_path)) as before, closing(_connect_readonly(after_path)) as after:
+        old_tables, new_tables = _table_names(before), _table_names(after)
+        if new_tables - old_tables != {table} or old_tables - new_tables:
+            raise ValueError("unexpected market source migration tables")
+        actual = after.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not actual or _normalize_sql(actual[0]) != _normalize_sql(MARKET_SOURCE_TABLE_SQL):
+            raise ValueError("unapproved market source schema")
+        columns = [(r[1], r[2].lower(), r[3], r[4], r[5], r[6]) for r in
+                   after.execute(f'PRAGMA table_xinfo("{table}")')]
+        if columns != [
+            ("market", "varchar(8)", 1, None, 1, 0),
+            ("provider", "varchar(32)", 1, None, 0, 0),
+            ("updated_at", "datetime", 1, None, 0, 0),
+        ]:
+            raise ValueError("unapproved market source columns")
+        indexes = list(after.execute(f'PRAGMA index_list("{table}")'))
+        if len(indexes) != 1 or indexes[0][2:4] != (1, "pk") or [
+            row[2] for row in after.execute(f'PRAGMA index_info("{indexes[0][1]}")')
+        ] != ["market"]:
+            raise ValueError("unexpected market source primary key")
+        if list(after.execute(f'PRAGMA foreign_key_list("{table}")')):
+            raise ValueError("unapproved market source foreign key")
+        if after.execute(
+            "SELECT 1 FROM sqlite_master WHERE tbl_name=? AND type NOT IN ('table', 'index')",
+            (table,),
+        ).fetchone():
+            raise ValueError("unapproved market source trigger or view")
+        if after.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]:
+            raise ValueError("market source table not empty on installation")
+        if [r for r in _schema_rows(before) if r[2] != table] != [
+            r for r in _schema_rows(after) if r[2] != table
+        ]:
+            raise ValueError("migration changed existing schema")
+        if not {"django_content_type", "auth_permission", "django_migrations", "sqlite_sequence"} <= old_tables:
+            raise ValueError("Django metadata tables missing")
+        for item in ("django_content_type", "auth_permission", "django_migrations"):
+            if not _rows_equal_schema(before, after, item):
+                raise ValueError("Django metadata schema changed")
+        for item in old_tables - {"django_content_type", "auth_permission", "django_migrations", "sqlite_sequence"}:
+            if not _rows_equal(before, after, item):
+                raise ValueError("existing account or application data changed")
+
+        ct_cols = [r[1] for r in before.execute('PRAGMA table_info("django_content_type")')]
+        ct_idx = {key: ct_cols.index(key) for key in ("id", "app_label", "model")}
+        old_ct, new_ct = (Counter(db.execute("SELECT * FROM django_content_type")) for db in (before, after))
+        added_ct = list((new_ct - old_ct).elements())
+        if old_ct - new_ct or len(added_ct) != 1 or (
+            added_ct[0][ct_idx["app_label"]], added_ct[0][ct_idx["model"]]
+        ) != ("core", "marketdatasourcesetting"):
+            raise ValueError("unapproved market source content type")
+        ct_id = added_ct[0][ct_idx["id"]]
+        if type(ct_id) is not int or ct_id < 1:
+            raise ValueError("invalid market source content type id")
+
+        perm_cols = [r[1] for r in before.execute('PRAGMA table_info("auth_permission")')]
+        perm_idx = {key: perm_cols.index(key) for key in ("id", "name", "content_type_id", "codename")}
+        old_perm, new_perm = (Counter(db.execute("SELECT * FROM auth_permission")) for db in (before, after))
+        added_perm = list((new_perm - old_perm).elements())
+        expected = {
+            (ct_id, f"{action}_marketdatasourcesetting", f"Can {action} 行情来源")
+            for action in ("add", "change", "delete", "view")
+        }
+        if old_perm - new_perm or len(added_perm) != 4 or {
+            (row[perm_idx["content_type_id"]], row[perm_idx["codename"]], row[perm_idx["name"]])
+            for row in added_perm
+        } != expected:
+            raise ValueError("unapproved market source permissions")
+
+        history_cols = [r[1] for r in before.execute('PRAGMA table_info("django_migrations")')]
+        hist_idx = {key: history_cols.index(key) for key in ("id", "app", "name", "applied")}
+        old_hist, new_hist = (Counter(db.execute("SELECT * FROM django_migrations")) for db in (before, after))
+        added_hist = list((new_hist - old_hist).elements())
+        if old_hist - new_hist or len(added_hist) != 1 or (
+            added_hist[0][hist_idx["app"]], added_hist[0][hist_idx["name"]]
+        ) != ("core", "0015_marketdatasourcesetting") or not added_hist[0][hist_idx["applied"]]:
+            raise ValueError("unapproved market source migration history")
+
+        old_seq = dict(before.execute("SELECT name, seq FROM sqlite_sequence"))
+        new_seq = dict(after.execute("SELECT name, seq FROM sqlite_sequence"))
+        expected_seq = {
+            "django_migrations": added_hist[0][hist_idx["id"]],
+            "django_content_type": ct_id,
+            "auth_permission": max(row[perm_idx["id"]] for row in added_perm),
+        }
+        if set(new_seq) != set(old_seq) | set(expected_seq):
+            raise ValueError("unexpected SQLite sequence changes")
+        for name in set(old_seq) | set(expected_seq):
+            if name in expected_seq:
+                if new_seq[name] != expected_seq[name] or new_seq[name] < old_seq.get(name, 0):
+                    raise ValueError("unapproved SQLite metadata sequence")
+            elif new_seq[name] != old_seq[name]:
+                raise ValueError("protected SQLite sequence changed")
 
 
 def _rows_equal_schema(before: sqlite3.Connection, after: sqlite3.Connection, table: str) -> bool:

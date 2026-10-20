@@ -16,6 +16,7 @@ import django
 
 django.setup()
 
+from django.apps import apps
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
@@ -25,7 +26,11 @@ targets = executor.loader.graph.leaf_nodes()
 pending = executor.migration_plan(targets)
 migrations = []
 for migration, backwards in pending:
-    module = importlib.import_module(f"{migration.app_label}.migrations.{migration.name}")
+    # Migration labels are not always Python package names (e.g.
+    # contenttypes lives under django.contrib.contenttypes).
+    module = importlib.import_module(
+        f"{apps.get_app_config(migration.app_label).name}.migrations.{migration.name}"
+    )
     source_path = Path(module.__file__).resolve(strict=True)
     source_bytes = source_path.read_bytes().replace(b"\r\n", b"\n")
     migrations.append(
@@ -42,9 +47,12 @@ for approved_key in (
     ("core", "0012_auth_verification"),
     ("core", "0013_chartworkspace"),
     ("core", "0014_accountmembership_expires_at"),
+    ("core", "0015_marketdatasourcesetting"),
 ):
     if approved_key in executor.loader.applied_migrations:
-        module = importlib.import_module(f"{approved_key[0]}.migrations.{approved_key[1]}")
+        module = importlib.import_module(
+            f"{apps.get_app_config(approved_key[0]).name}.migrations.{approved_key[1]}"
+        )
         source_path = Path(module.__file__).resolve(strict=True)
         source_bytes = source_path.read_bytes().replace(b"\r\n", b"\n")
         approved_applied.append(
