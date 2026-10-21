@@ -311,7 +311,7 @@ inspect_migration_plan() {
     --cap-drop ALL --security-opt no-new-privileges \
     --mount "type=bind,src=$database_path,dst=/deploy/db.sqlite3,readonly" \
     --mount "type=bind,src=$SIFTALPHA_MIGRATION_PROBE,dst=/deploy/migration_probe.py,readonly" \
-    --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 \
+    --env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 --env HOME=/tmp \
     "$image" python /deploy/migration_probe.py 2>&1)" \
     || { die "candidate migration plan inspection failed ($(migration_probe_failure_category "$raw_plan"))"; return 1; }
   validated_plan="$(printf '%s\n' "$raw_plan" | "$PYTHON_BIN" "$SIFTALPHA_MIGRATION_GUARD" validate-state)" \
