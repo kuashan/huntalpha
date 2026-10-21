@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# This contract asserts Linux POSIX ownership/mode and deployment semantics.
+# Run it in an isolated Linux test environment. In particular, do not
+# download a Docker image from Windows Git Bash merely to run these checks.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    printf 'SKIP: web-admin contract requires Linux POSIX semantics; run in the ChatGPT Linux test environment\n' >&2
+    exit 2
+    ;;
+esac
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 LIB="$ROOT/deployment/web-admin/lib/siftalpha-web-admin-lib.sh"
 TEST_ROOT="$(mktemp -d)"
@@ -334,16 +344,6 @@ case "${1:-}" in
 esac
 EOF
 chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/curl" "$FAKE_BIN/gh"
-cat > "$FAKE_BIN/chmod" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-if [[ "${FAKE_CHMOD_FAIL:-0}" == 1 ]]; then
-  printf 'chmod: simulated read-only filesystem\n' >&2
-  exit 1
-fi
-exec /usr/bin/chmod "$@"
-EOF
-chmod +x "$FAKE_BIN/chmod"
 cat > "$FAKE_BIN/stat" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -436,20 +436,88 @@ finally:
 PY
 
 source "$LIB"
+
+# Verify failed candidate probes report only a bounded error class, not raw
+# Python exceptions, database details, credentials, or container stderr.
+for expected in missing-python-module database-operational-error django-configuration-error docker-runtime-error unknown; do
+  case "$expected" in
+    missing-python-module) simulated="ModuleNotFoundError: No module named secret-db-path-sentinel" ;;
+    database-operational-error) simulated='OperationalError: secret-db-path-sentinel' ;;
+    django-configuration-error) simulated='ImproperlyConfigured: secret-db-path-sentinel' ;;
+    docker-runtime-error) simulated='Error response from daemon: secret-db-path-sentinel' ;;
+    unknown) simulated='secret-db-path-sentinel' ;;
+  esac
+  (
+    # This isolated probe test runs before load_config; provide the normally
+    # configured env-file path so nounset cannot abort before docker_cli runs.
+    ENV_FILE="$TEST_ROOT/probe-only.env"
+    docker_cli() { printf '%s\n' "$simulated" >&2; return 1; }
+    if response="$(inspect_migration_plan 'unused-image' '/unused-db' 2>&1)"; then
+      fail "candidate migration probe failure was accepted: $expected"
+    fi
+    [[ "$response" == *"candidate migration plan inspection failed ($expected)"* ]] \
+      || fail "candidate probe failure classification was incorrect: $expected"
+    [[ "$response" != *secret-db-path-sentinel* ]] \
+      || fail "raw candidate stderr was exposed to the caller"
+  )
+done
+
 load_config "$TEST_ROOT/web-admin.conf"
+# On Windows Git Bash, chmod/stat report NTFS metadata rather than Linux
+# owner/permission semantics. Emulate only this synthetic Brevo fixture's
+# metadata; keep production verify_brevo_secret_file() unchanged.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    test_brevo_file_mode=600
+    test_brevo_dir_mode=700
+    stat() {
+      if [[ "$#" == 4 && "$1" == -c && "$2" == '%u %a' && "$3" == -- ]]; then
+        case "$4" in
+          "$BREVO_ENV_FILE")
+            printf '%s %s\n' "$EUID" "$test_brevo_file_mode"
+            return 0 ;;
+          "$(dirname -- "$BREVO_ENV_FILE")")
+            printf '%s %s\n' "$EUID" "$test_brevo_dir_mode"
+            return 0 ;;
+        esac
+      fi
+      command stat "$@"
+    }
+    ;;
+esac
 assert_ok verify_brevo_secret_file
 chmod 644 "$BREVO_ENV_FILE"
+if [[ -n "${test_brevo_file_mode:-}" ]]; then test_brevo_file_mode=644; fi
 assert_fail verify_brevo_secret_file
 chmod 600 "$BREVO_ENV_FILE"
+if [[ -n "${test_brevo_file_mode:-}" ]]; then
+  test_brevo_file_mode=600
+  test_brevo_dir_mode=755
+  assert_fail verify_brevo_secret_file
+  test_brevo_dir_mode=700
+fi
 printf 'BREVO_API_KEY=\n' > "$BREVO_ENV_FILE"
 assert_fail verify_brevo_secret_file
 printf 'BREVO_API_KEY=synthetic-not-real-key-for-tests-only\n' > "$BREVO_ENV_FILE"
 assert_ok verify_brevo_secret_file
+if [[ -n "${test_brevo_file_mode:-}" ]]; then
+  unset -f stat
+  unset test_brevo_file_mode test_brevo_dir_mode
+fi
 for template in "$ROOT/deployment/web-admin/compose.yaml.template" "$ROOT/deployment/web-admin/compose.selftest.yaml.template"; do
   grep -F -- '- __BREVO_ENV_FILE__' "$template" >/dev/null || fail "Compose must inject Brevo secret only into website service"
 done
 assert_ok render_compose "$FAKE_DIGEST"
-grep -F "$BREVO_ENV_FILE" "$COMPOSE_FILE" >/dev/null || fail "rendered website Compose lacks secret env_file"
+# Git Bash converts POSIX argv paths to native Windows paths when invoking
+# Windows Python. Assert the exact path Python received during rendering,
+# not the unconverted Bash spelling of the synthetic fixture path.
+rendered_brevo_path="$("$PYTHON_BIN" - "$BREVO_ENV_FILE" <<'PY'
+import sys
+print(sys.argv[1])
+PY
+)"
+tr -d '\r' < "$COMPOSE_FILE" | grep -Fx -- "      - $rendered_brevo_path" >/dev/null \
+  || fail "rendered website Compose lacks secret env_file"
 
 
 PATH="$FAKE_BIN:$PATH"
@@ -546,7 +614,18 @@ assert_fail validate_command status unexpected
 assert_fail validate_command
 
 log_before="$(wc -l < "$FAKE_LOG")"
-FAKE_CHMOD_FAIL=1 assert_fail verify_trusted_source "$FAKE_DIGEST"
+# Intercept only the chmod invoked by this one negative test. Do not pass
+# fault switches through the process environment: Windows Git Bash can reuse
+# native/Unix subprocess environments differently across executable shims.
+# The shell function exists only in this subshell, so the next preflight must
+# use the real chmod binary.
+(
+  chmod() {
+    printf 'chmod: simulated read-only filesystem\n' >&2
+    return 1
+  }
+  assert_fail verify_trusted_source "$FAKE_DIGEST"
+)
 [[ "$(wc -l < "$FAKE_LOG")" == "$log_before" ]] || fail "read-only state failure continued into Docker verification"
 find "$RECOVERY_DIR" -mindepth 1 -print -quit | grep -q . && fail "read-only state failure left a temporary provenance copy"
 
