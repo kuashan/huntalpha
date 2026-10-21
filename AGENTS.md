@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件定义仓库协作和安全边界。**SiftAlpha.com 网站的最新分工、开发、构建及发布流程以 [docs/DEVELOPMENT_HANDBOOK.md](docs/DEVELOPMENT_HANDBOOK.md) 为准**；旧的 Codex 开发、`main` 或 GitHub Actions 构建约定不适用于网站。
+本文件定义仓库协作和安全边界。**SiftAlpha.com 网站的最新分工、开发、构建及发布流程以 [docs/DEVELOPMENT_HANDBOOK.md](docs/DEVELOPMENT_HANDBOOK.md) 为准**；旧的 Codex 本地构建与 `main` 发布约定不适用于网站；V1.1.6 起，正式分支使用 GitHub Actions 云端 ARM64 构建。
 
 ## 1. 项目定位
 
@@ -16,7 +16,8 @@ HuntAlpha 是准备正式上线、长期维护的真实产品，不是演示项�
 
 - **用户：**需求与发布授权、最终真实网站验收、认可基线。
 - **ChatGPT：**负责定位问题、修改代码、**执行发布前必要的 Linux Bash/Django/迁移/前端自动测试**、提升版本号、提交并 Push GitHub；部署后协助核查真实页面。
-- **Codex：**只负责本地 ARM64 构建及其固有的依赖/前端构建步骤、GHCR 推送、服务器受控预检/备份/迁移与部署，以及**一次最小技术健康检查**。不重复 ChatGPT 已负责的 Linux Bash/Django/迁移回归，不承担业务开发修复。
+- **GitHub Actions：**正式分支自动运行发布检查、构建 `linux/arm64`、推送 GHCR 并返回真实 Digest；不连接生产环境。
+- **Codex：**在用户授权 Digest 后负责服务器受控预检/备份/迁移与部署，以及**一次最小技术健康检查**；不承担业务开发修复。
 - **GitHub：**代码和审查记录事实源。以 `docs/DEVELOPMENT_HANDBOOK.md` 为完整操作依据。
 
 ## 3. 开始工作前
@@ -31,14 +32,14 @@ Codex 执行构建与部署时必须先读 `AGENTS.md`、`docs/DEVELOPMENT_HANDB
 
 - 网站正式分支是 **`release/siftalpha-web-v1`**，当前已认可基线 V1.1.4；后续修复必须升级版本号。
 - ChatGPT 在独立 `feat/`、`fix/`、`docs/` 分支上开发和提交 PR，不直接在正式分支或生产环境开发。
-- Codex 使用**合并后正式分支的完整 Commit SHA**本地构建；禁止 GitHub Actions 或生产服务器构建。
+- GitHub Actions 仅对**合并后正式分支的完整 Commit SHA**云端构建；生产服务器禁止构建。
 - 其他项目若使用 `main`，遵循其各自规则，不将网站发布流程混入其他项目。
 - 不得未经授权 force push、重写历史、大范围删除或不可逆操作。
 
 ## 5. 状态与验收
 
 - **开发完成：**ChatGPT 完成代码、版本号、GitHub 提交及已执行的针对性检查。
-- **构建完成：**Codex 完成本地 ARM64 镜像并验证 GHCR Digest。
+- **构建完成：**GitHub Actions 构建 ARM64 镜像并验证 GHCR Digest。
 - **部署完成：**受控预检、数据保护、部署和最小技术健康检查通过。
 - **最终验收完成：**用户在真实网站确认功能正常，才可冻结为新的基线。
 
@@ -124,7 +125,7 @@ python manage.py backup_local_db
 ## 11. 测试职责
 
 - ChatGPT 负责运行适用的语法、Linux POSIX Bash 契约、Django、数据库迁移、前端及逻辑测试；未运行的必须明确记录，不得当作通过。
-- Codex 不重跑 ChatGPT 的发布前自动测试；仅做镜像构建自身不可省略的依赖安装、前端构建及产物、平台、OCI 标签与 Digest 校验。失败时报告并等待 ChatGPT 改代码。受控工具内的数据库备份、恢复副本与迁移预检仍不可省略。
+- GitHub Actions 运行发布前检查、镜像构建、平台、OCI 标签与 Digest 校验；失败后由 ChatGPT 定位和修复。Codex 不重跑云端测试；受控部署工具内的数据库备份、恢复副本与迁移预检仍不可省略。
 - 部署后 Codex 仅核对固定容器、目标 Digest、受控 `status` / `health` 和基本 HTTP 状态；**不重复进行复杂业务功能验证**。页面检查由 ChatGPT 协助，用户最终验收。
 - 密钥、数据库、私有公式及用户资料绝不能进入日志或 Git。
 
@@ -132,20 +133,20 @@ python manage.py backup_local_db
 
 网站已正式上线，使用受控 `siftalpha-web-admin`、`siftalpha-web-compose` 和持久化 SQLite。需要迁移时必须先进行真实备份、独立恢复校验与白名单核验，禁止直接对生产数据库 `migrate`。不操作 Cloudflare、Crypto、Options Monitor 或其他无关容器。
 
-Codex 在本地构建 `linux/arm64` 镜像并推送 GHCR，以不可变 Digest 预检与受控部署。**禁止 GitHub Actions 构建**。数据库恢复需要单独授权。详见 `docs/DEVELOPMENT_HANDBOOK.md`。
+GitHub Actions 从正式分支构建 `linux/arm64` 镜像并推送 GHCR，用户明确批准不可变 Digest 后 Codex 才能受控预检和部署。**构建不等于部署**。数据库恢复需要单独授权。详见 `docs/DEVELOPMENT_HANDBOOK.md`。
 
 ## 13. 分工交接报告
 
 ChatGPT 交付：修改范围、版本号、开发分支、PR/Commit、针对性检查结果及未验证项。
 
-Codex 交付：合并后正式 HEAD、本地必要构建检查、ARM64 镜像/真实 GHCR Digest、数据库备份和迁移预检、部署及最小健康检查结论。不要向 Codex 要求反复的部署后人工功能巡检。
+Codex 交付：用户批准 Digest 后的数据库备份和迁移预检、部署及最小健康检查结论。云端构建的正式 HEAD、ARM64 镜像和真实 GHCR Digest 由 GitHub Actions 提供。不要向 Codex 要求反复的部署后人工功能巡检。
 
 异常停止并报告，由 ChatGPT 定位代码问题；不可擅自更改全局服务器设置。
 
 ## 14. 审查与最终验收
 
 1. ChatGPT 完成业务开发修复并提交独立 PR。
-2. ChatGPT 提交发布前测试结论后，Codex 按正常保护流程合并 PR，在本地构建 ARM64 镜像并推送 GHCR，不重复执行 Linux 测试。
+2. 按正常保护流程合并 PR 后，由 GitHub Actions 执行发布门禁并构建 ARM64 镜像、推送 GHCR，记录真实 Digest。
 3. 依据用户发布授权，Codex 经受控工具完成备份、迁移预检、部署和最小技术检查。
 4. ChatGPT 协助真实网页检查；**用户最终决定验收是否通过、是否冻结为新基线**。
 

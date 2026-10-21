@@ -9,13 +9,13 @@
 - 仓库 `kuashan/huntalpha`；GHCR 镜像仓库 `ghcr.io/kuashan/siftalpha-web`。
 - **ChatGPT 修改代码、提升版本、提交 PR；Codex 本地构建及部署；用户最终验收。**
 
-## Codex 构建前及本地构建
+## GitHub Actions 云端构建与发布门禁
 
-1. Fetch GitHub 最新 HEAD，阅读 `AGENTS.md`、`docs/DEVELOPMENT_HANDBOOK.md` 与当前任务文档，核对 PR 代码和版本。
-2. **一次**执行必要的构建门槛检查，覆盖此次变化的 Django 业务、迁移、安全保护及前端构建。测试失败就暂停，通知 ChatGPT 修复，不由 Codex 长期开发，也不无休止验证。
-3. 通过后按批准的发布流程合并，记录 `release/siftalpha-web-v1` 的**合并后完整 40 位 Commit**，不要使用开发分支旧 SHA 冒充正式来源。
-4. 使用 Codex 所在**本地**计算机 Docker Buildx 构建 `linux/arm64`，OCI source、revision、版本标签必须与正式分支/版本一致。推送 GHCR 后，重新读取**Registry 真实 Digest** 并核实 ARM64 manifest。
-5. 不触发 GitHub Actions；不得将构建移至 Oracle 生产服务器。若本地构建工具不可用，暂停并报告。
+1. ChatGPT 审查正式 PR、必要的 Django/前端/部署契约检查；测试失败立即停止，定位修复，不绕过安全门禁。
+2. 代码合并到 `release/siftalpha-web-v1` 后，由 GitHub Actions 在标准 ARM64 Linux 运行器构建 **V1.1.6** 的 `linux/arm64` 镜像，推送 GHCR；不依赖本地 Windows，也不在 Oracle 生产服务器构建。
+3. 构建前后核对正式分支完整 Commit、OCI source/revision、SHA-256 Registry **Digest** 和 ARM64 manifest；保留 BuildKit OCI provenance 及镜像来源验证，不把未经验证的标签当作发布许可。
+4. 生产部署与云端构建隔离：构建成功**不自动部署**；须经用户单独授权指定 Digest，方可使用现有受控工具进行 `preflight` 和 `deploy`。Codex 不修改网站业务或数据库。
+5. 受控预检用既有 SQLite `sqlite3.Connection.backup()` 生成备份并验证完整性；迁移白名单、独立恢复副本检查及回滚约束均保持不变。
 
 ## 服务器只走固定受控工具
 

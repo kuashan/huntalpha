@@ -39,7 +39,7 @@ class BuildkitProvenanceTests(unittest.TestCase):
                     "source_ref": SOURCE_REF,
                     "workflow": WORKFLOW,
                     "platform": "linux/arm64",
-                    "tags": [f"sha-{COMMIT}", f"v1.1.0-sha-{COMMIT}"],
+                    "tags": [f"sha-{COMMIT}", f"v1.1.6-sha-{COMMIT}"],
                 }
             ),
             encoding="utf-8",
