@@ -24,15 +24,15 @@ def main():
     for fragment in (
         "release/siftalpha-web-v1",
         "packages: write",
-        "docker/setup-qemu-action@v3",
+        "runs-on: ubuntu-24.04-arm",
         "docker/setup-buildx-action@v3",
         "platforms: linux/arm64",
         "ghcr.io/${{ github.repository_owner }}/siftalpha-web",
         "type=raw,value=sha-${{ github.sha }}",
-        "type=raw,value=v1.1.0-sha-${{ github.sha }}",
+        "type=raw,value=v1.1.6-sha-${{ github.sha }}",
         "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}",
         "org.opencontainers.image.revision=${{ github.sha }}",
-        "org.opencontainers.image.version=V1.1.0",
+        "org.opencontainers.image.version=V1.1.6",
         "io.siftalpha.build.run-id=${{ github.run_id }}",
         "io.siftalpha.build.ref=${{ github.ref_name }}",
         "provenance: mode=max",
@@ -52,12 +52,17 @@ def main():
         "push: true",
     ):
         require(source, fragment)
-    # PR #53 switched the legacy Actions builder to manual-only; it is not
-    # required for locally built, digest-pinned release images.
-    require(source, "\non:\n  workflow_dispatch:\n")
+    # Only the official release branch may trigger automatic builds.
+    # Manual dispatch remains available for recovery or verification.
+    expected_triggers = (
+        "push:\n"
+        "    branches:\n"
+        "      - release/siftalpha-web-v1\n"
+        "  workflow_dispatch:"
+    )
     triggers = source.split("\non:\n", 1)[1].split("\npermissions:", 1)[0].strip()
-    if triggers != "workflow_dispatch:":
-        raise ValueError("release workflow must remain manual-only")
+    if triggers != expected_triggers:
+        raise ValueError("release workflow triggers must be official push or manual dispatch")
     for fragment in (
         "attestations: write",
         "id-token: write",
@@ -73,7 +78,7 @@ def main():
     ):
         reject(source.lower(), fragment)
     if "pull_request:" in source:
-        raise ValueError("phase-one workflow must not build from pull requests")
+        raise ValueError("release workflow must not build from pull requests")
     print("release workflow contract: ok")
 
 
