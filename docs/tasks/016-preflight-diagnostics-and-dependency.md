@@ -15,7 +15,7 @@
 
 ## 下一次受控操作
 
-- ChatGPT 提交代码和 PR；Codex 在**本地**做一次必要检查，并按既有方式本地构建 ARM64、推送 GHCR，从新正式 HEAD 取得**新 Digest**。
+- ChatGPT 负责全部可执行的发布前自动测试并提交测试结论与 PR；Codex **不重复 Linux Bash/Django 回归**，只在本地完成镜像构建必需的依赖安装、ARM64 构建、推送 GHCR，并从新正式 HEAD 取得**新 Digest**。
 - 必要时通过已批准的 `upgrade <正式 HEAD>` 更新 root-owned 管理工具；服务器只运行受控 `status`、`health`、`preflight <新 Digest>`。
 - 若探针仍失败，Codex 提供**固定错误类别**，不重复复杂排查、不直接 Docker 调试生产或修改数据库。由 ChatGPT 基于类别继续定位最小根因。
 - 只有 `preflight: ok`、备份/恢复副本及 0015 迁移演练全部通过，并获得用户明确授权，方可 `deploy`。之后用户实际网页验收。
