@@ -1,28 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# This contract tests Linux ownership/mode semantics, root-controlled
-# deployment, and a fail-closed migration guard. Git Bash/NTFS does not
-# implement those semantics. Run the *whole unchanged contract* in an
-# isolated Linux Docker container instead of faking POSIX metadata on Windows.
+# This contract asserts Linux POSIX ownership/mode and deployment semantics.
+# Run it in an isolated Linux test environment. In particular, do not
+# download a Docker image from Windows Git Bash merely to run these checks.
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
-    command -v docker >/dev/null 2>&1 || {
-      printf 'FAIL: Linux Docker is required for web-admin contract tests on Windows\n' >&2
-      exit 1
-    }
-    repo_for_docker="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -W)" || exit 1
-    MSYS_NO_PATHCONV=1 docker run --rm --network none --read-only \
-      --tmpfs /tmp:rw,exec,nosuid,size=256m \
-      --cap-drop ALL --security-opt no-new-privileges \
-      --mount "type=bind,src=$repo_for_docker,dst=/src,readonly" \
-      --workdir /src \
-      --env GIT_CONFIG_COUNT=1 \
-      --env GIT_CONFIG_KEY_0=safe.directory \
-      --env GIT_CONFIG_VALUE_0=/src \
-      python:3.11-bookworm \
-      bash deployment/web-admin/tests/test_web_admin.sh
-    exit $?
+    printf 'SKIP: web-admin contract requires Linux POSIX semantics; run in the ChatGPT Linux test environment\n' >&2
+    exit 2
     ;;
 esac
 
