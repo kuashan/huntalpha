@@ -140,8 +140,8 @@ class ReleaseWorkflowContractTests(SimpleTestCase):
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
 
-    def test_release_workflow_verifier_rejects_automatic_triggers(self):
-        """The retained Actions fallback must not start on push, PR or schedule."""
+    def test_release_workflow_verifier_rejects_unapproved_triggers(self):
+        """Automatic builds may start only from the official release branch."""
         import importlib.util
         from unittest.mock import patch
 
@@ -151,23 +151,18 @@ class ReleaseWorkflowContractTests(SimpleTestCase):
         verifier = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(verifier)
         original = verifier.WORKFLOW.read_text(encoding="utf-8")
-        for event, additional_trigger in (
-            ("push", "  push:\n"),
-            ("pull_request", "  pull_request:\n"),
-            ("schedule", "  schedule:\n"),
-        ):
+        candidates = (
+            ("pull_request", original.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request:\n", 1)),
+            ("schedule", original.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  schedule:\n", 1)),
+            ("wrong_branch", original.replace("      - release/siftalpha-web-v1\n", "      - main\n", 1)),
+            ("wildcard_branch", original.replace("      - release/siftalpha-web-v1\n", "      - '**'\n", 1)),
+        )
+        for event, source in candidates:
             with self.subTest(event=event), TemporaryDirectory() as temporary_directory:
                 candidate = Path(temporary_directory) / "release.yml"
-                candidate.write_text(
-                    original.replace(
-                        "  workflow_dispatch:\n",
-                        "  workflow_dispatch:\n" + additional_trigger,
-                        1,
-                    ),
-                    encoding="utf-8",
-                )
+                candidate.write_text(source, encoding="utf-8")
                 with patch.object(verifier, "WORKFLOW", candidate):
-                    with self.assertRaisesRegex(ValueError, "manual-only"):
+                    with self.assertRaises(ValueError):
                         verifier.main()
 
 
@@ -177,22 +172,19 @@ class WebReleaseRunbookContractTests(SimpleTestCase):
         base_dir = Path(__file__).resolve().parents[1]
         runbook = (base_dir / "docs" / "operations" / "siftalpha-web-releases.md").read_text(encoding="utf-8")
         required_phrases = (
-            "GitHub Actions Run",
-            "build manifest",
+            "GitHub Actions",
+            "V1.1.6",
+            "release/siftalpha-web-v1",
+            "linux/arm64",
             "BuildKit OCI provenance",
-            "buildkit-oci-slsa",
-            "provenance is not GitHub official encrypted signature proof",
-            "OCI labels are only a locator",
-            "separate user deployment approval",
+            "SHA-256",
+            "Digest",
             "preflight",
             "sqlite3.Connection.backup()",
-            "first-adoption",
-            "legacy",
-            "Compose",
-            "different container names",
-            "does not run migrations",
-            "does not restore the database automatically",
-            "rollback only with separate approval",
+            "迁移白名单",
+            "用户单独授权",
+            "数据库恢复不是自动回滚",
+            "Cloudflare",
         )
         for phrase in required_phrases:
             with self.subTest(phrase=phrase):
