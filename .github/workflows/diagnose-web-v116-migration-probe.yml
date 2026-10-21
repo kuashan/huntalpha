@@ -1,0 +1,55 @@
+name: Isolated V1.1.6 Migration Probe Diagnosis
+on:
+  push:
+    branches:
+      - diagnose/web-v1-1-6-migration-probe-20261022
+permissions:
+  contents: read
+  packages: read
+jobs:
+  synthetic-only-probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Probe the exact immutable V1.1.6 image with an isolated synthetic SQLite DB
+        shell: bash
+        env:
+          CANDIDATE: ghcr.io/kuashan/siftalpha-web@sha256:5673a15eeb2abfa67f442cfc0d32678c2f3338c96cf2109576724e4398970d20
+          DJANGO_SECRET_KEY: synthetic-ci-only-not-a-real-secret
+          DJANGO_DEBUG: '0'
+          HUNTALPHA_ALLOWED_HOSTS: localhost
+        run: |
+          set -Eeuo pipefail
+          test "$(uname -m)" = "aarch64"
+          echo "SYNTHETIC_TEST_ONLY=1"
+          docker pull "$CANDIDATE"
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
+          # All database contents and env values are synthetic; no production
+          # database, tokens or website environment files are present here.
+          docker run --rm \
+            --env DJANGO_SECRET_KEY --env DJANGO_DEBUG --env HUNTALPHA_ALLOWED_HOSTS \
+            --env HUNTALPHA_DATABASE_PATH=/data/db.sqlite3 \
+            --mount "type=bind,src=$workdir,dst=/data" \
+            "$CANDIDATE" python manage.py migrate core 0014 --noinput
+          test -s "$workdir/db.sqlite3"
+          echo "SYNTHETIC_BASELINE_CREATED=1"
+          set +e
+          docker run --rm --network none --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --mount "type=bind,src=$workdir/db.sqlite3,dst=/deploy/db.sqlite3,readonly" \
+            --mount "type=bind,src=$PWD/deployment/web-admin/lib/migration_probe.py,dst=/deploy/migration_probe.py,readonly" \
+            --env DJANGO_SECRET_KEY --env DJANGO_DEBUG --env HUNTALPHA_ALLOWED_HOSTS \
+            --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 \
+            "$CANDIDATE" python /deploy/migration_probe.py
+          rc=$?
+          set -e
+          echo "ISOLATED_READONLY_PROBE_EXIT=$rc"
+          exit "$rc"
