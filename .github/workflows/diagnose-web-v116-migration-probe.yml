@@ -47,7 +47,7 @@ jobs:
             --mount "type=bind,src=$workdir/db.sqlite3,dst=/deploy/db.sqlite3,readonly" \
             --mount "type=bind,src=$PWD/deployment/web-admin/lib/migration_probe.py,dst=/deploy/migration_probe.py,readonly" \
             --env DJANGO_SECRET_KEY --env DJANGO_DEBUG --env HUNTALPHA_ALLOWED_HOSTS \
-            --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 \
+            --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 --env HOME=/tmp \
             "$CANDIDATE" python /deploy/migration_probe.py
           rc=$?
           set -e
