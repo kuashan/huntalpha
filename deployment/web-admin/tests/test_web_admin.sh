@@ -35,6 +35,10 @@ if ! sed -n '/^isolated_deploy_and_rollback_test()/,/^record_snapshot_database_s
   | grep -F -- '--env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/data/db.sqlite3 --env HOME=/tmp' >/dev/null; then
   fail "isolated legacy container must use the writable temporary home"
 fi
+if ! sed -n '/^inspect_migration_plan()/,/^cleanup_migration_workspace()/p' "$LIB" \
+  | grep -F -- '--env-file "$ENV_FILE" --env HUNTALPHA_DATABASE_PATH=/deploy/db.sqlite3 --env HOME=/tmp' >/dev/null; then
+  fail "isolated read-only migration probe must use the writable temporary home"
+fi
 if ! grep -F 'HOME: /tmp' "$ROOT/deployment/web-admin/compose.selftest.yaml.template" >/dev/null; then
   fail "isolated candidate container must use the writable temporary home"
 fi
