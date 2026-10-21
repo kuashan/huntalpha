@@ -97,7 +97,7 @@ def main() -> None:
         fail("OCI provenance is not BuildKit SLSA provenance")
 
     expected_tag = f"sha-{commit}"
-    version_tag = f"v1.1.0-sha-{commit}"
+    version_tag = f"v1.1.6-sha-{commit}"
     tags = manifest.get("tags")
     def has_tag(candidate: str) -> bool:
         return any(tag == candidate or tag.endswith(f":{candidate}") for tag in tags or [])
