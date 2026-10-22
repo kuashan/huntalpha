@@ -24,7 +24,10 @@ const props = defineProps({
 
 const el = ref(null)
 const mainIndicators = computed(() => props.installedIndicators.filter(item => item.placement === 'main'))
+// This presentation-only exception must not change indicator values or other panes.
+const hideYiQiSanQingAxis = item => item?.placement === 'sub' && String(item.name || '').replace(/\s/g, '') === '一气三清'
 const subTitlePositions = ref([])
+const hiddenSubCrosshairValue = ref(null)
 const renderErrors = ref([])
 const historyStatus = ref('')
 const realtimeStatus = ref('connecting')
@@ -100,6 +103,32 @@ function syncSubTitlePositions(rendered) {
     const top = chart.panes()[paneIndex++]?.getHTMLElement()?.getBoundingClientRect().top
     return { code: result.item.code, name: result.item.name, top: (top === undefined ? 0 : top - chartTop) + 6 }
   })
+}
+
+function syncSubPanePriceAxes() {
+  if (!chart) return
+  renderedItems.filter(result => result.item.placement === 'sub').forEach(result => {
+    const pane = layerRefs.get(result.item.code)?.pane
+    if (pane != null) chart.priceScale('right', pane).applyOptions({ visible: !hideYiQiSanQingAxis(result.item) })
+  })
+}
+
+// The hidden pane's full values are still readable on hover / mobile long press.
+function updateHiddenSubCrosshairValue(param) {
+  const result = renderedItems.find(entry => hideYiQiSanQingAxis(entry.item) && layerRefs.get(entry.item.code)?.pane === param.paneIndex)
+  if (!result || !param.point || param.time == null) {
+    hiddenSubCrosshairValue.value = null
+    return
+  }
+  const layer = layerRefs.get(result.item.code)
+  const data = [...layer.lines, layer.anchor].map(series => param.seriesData.get(series))
+    .find(point => Number.isFinite(point?.value))
+  if (!data) {
+    hiddenSubCrosshairValue.value = null
+    return
+  }
+  const title = subTitlePositions.value.find(position => position.code === result.item.code)
+  hiddenSubCrosshairValue.value = { top: title?.top ?? 6, text: String(data.value) }
 }
 
 function saveSubPaneHeights(rendered) {
@@ -749,6 +778,7 @@ async function draw(options = {}) {
     handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     kineticScroll: { mouse: true, touch: true },
   })
+  chart.subscribeCrosshairMove(updateHiddenSubCrosshairValue)
   const formulaCandleLayer = formulaOwnsMainCandles(rendered, bars)
   const candle = chart.addSeries(CandlestickSeries, formulaCandleLayer ? {
     upColor: 'transparent', downColor: 'transparent', borderVisible: false,
@@ -768,6 +798,7 @@ async function draw(options = {}) {
     if (result.item.placement === 'sub') chart.panes()[pane]?.setHeight(savedHeights[result.item.code] || 150)
   }
   chart.panes()[0]?.setHeight(440)
+  syncSubPanePriceAxes()
   panePointerUp = () => window.setTimeout(() => {
     saveSubPaneHeights(renderedItems)
     syncSubTitlePositions(renderedItems)
@@ -803,11 +834,13 @@ function cancelIndicatorRefresh() {
 
 function syncIndicatorLayout() {
   if (!chart || !el.value) return
+  hiddenSubCrosshairValue.value = null
   const subCount = renderedItems.filter(result => result.item.placement === 'sub').length
   const chartHeight = 460 + subCount * 150
   el.value.style.height = `${chartHeight}px`
   chart.applyOptions({ height: chartHeight })
   chart.panes()[0]?.setHeight(440)
+  syncSubPanePriceAxes()
 }
 
 async function refreshIndicatorLayers() {
@@ -934,7 +967,10 @@ watch(() => props.marketColorTokens, tokens => {
     <div ref="el" class="chart" />
     <div class="main-titles"><b v-for="(item, index) in mainIndicators" :key="item.code" :style="{ top: `${10 + index * 26}px` }">{{ item.name }}</b></div>
     <div class="sub-titles"><b v-for="item in subTitlePositions" :key="item.code" :style="{ top: `${item.top}px` }">{{ item.name }}</b></div>
-    <div class="realtime-status" :class="`status-${realtimeStatus}`" role="status" aria-live="polite">{{ realtimeStatusText }}</div>
+    <Teleport to="#market-chart-status-host">
+      <span class="realtime-status" :class="`status-${realtimeStatus}`" role="status" aria-live="polite">{{ realtimeStatusText }}</span>
+    </Teleport>
+    <span v-if="hiddenSubCrosshairValue" class="hidden-sub-crosshair-value" :style="{ top: `${hiddenSubCrosshairValue.top}px` }" aria-hidden="true">{{ hiddenSubCrosshairValue.text }}</span>
     <div v-if="historyStatus" class="history-status">{{ historyStatus }}</div>
     <div v-if="renderErrors.length" class="chart-errors"><span v-for="message in renderErrors" :key="message">{{ message }}</span></div>
   </div>
@@ -945,7 +981,8 @@ watch(() => props.marketColorTokens, tokens => {
 .chart { width: 100%; min-height: 460px }
 .main-titles, .sub-titles { position: absolute; inset: 0; z-index: 5; pointer-events: none }
 .main-titles b, .sub-titles b { position: absolute; left: 9px; color: #f4f7fb; font-size: 14px; font-weight: 700; line-height: 1.1; letter-spacing: .2px; text-shadow: 0 1px 3px #000 }
-.realtime-status { position: absolute; top: 9px; right: 12px; z-index: 6; color: #94a3b8; font-size: 11px; pointer-events: none; text-shadow: 0 1px 3px #000 }
+.realtime-status { color: #94a3b8; font-size: 11px; white-space: nowrap; pointer-events: none; text-shadow: 0 1px 3px #000 }
+.hidden-sub-crosshair-value { position: absolute; right: 6px; z-index: 6; padding: 2px 4px; border-radius: 3px; background: #101a26; color: #b9c7d6; font-size: 11px; pointer-events: none }
 .status-live { color: #5eead4 }
 .status-reconnecting, .status-connecting { color: #facc15 }
 .status-unavailable { color: #94a3b8 }
