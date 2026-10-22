@@ -445,7 +445,7 @@ onBeforeUnmount(() => { cancelWorkspaceSync(); window.clearInterval(entitlementR
 @media(max-width:520px){.feed-dot,.feed>span:nth-child(2){display:none}.header-account-controls{gap:6px}.terminal-language{display:block;width:48px;min-width:48px;padding:4px 1px;font-size:10px}.account-tier-badge{width:46px;height:42px}}
 .terminal .market-index-values em,.terminal .symbol em,.terminal .price span{color:var(--market-up)}.terminal .market-index-values em.down,.terminal .symbol em.down,.terminal .price span.down{color:var(--market-down)}
 
-/* V1.1.8: show all four navigation labels within the single mobile header row. */
+/* Show all four navigation labels within the single mobile header row. */
 @media(max-width:800px){
   .terminal > header{flex-wrap:nowrap;padding-inline:clamp(8px,2vw,14px);gap:clamp(4px,1.2vw,12px)}
   .terminal > header .brand{flex:0 1 auto;min-width:0;gap:5px}
