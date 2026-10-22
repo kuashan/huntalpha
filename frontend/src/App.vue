@@ -444,4 +444,21 @@ onBeforeUnmount(() => { cancelWorkspaceSync(); window.clearInterval(entitlementR
 @media(max-width:800px){.markets{grid-template-columns:repeat(2,minmax(0,1fr))}.market-card{min-height:70px;padding:4px 8px;border-right:0;border-bottom:1px solid #233143}.market-card:nth-child(odd){border-right:1px solid #233143}.market-card:last-child{border-bottom:0}.market-card-title{margin-bottom:1px}.market-index{padding:0}.brand-name{font-size:16px}.brand-hub{display:none}header{gap:12px}.feed{display:flex;min-width:0}.feed>span:nth-child(2){max-width:100px;overflow:hidden;text-overflow:ellipsis}.header-account-controls{gap:8px}.account-tier-badge{width:50px;height:46px}.visitor-account{gap:7px}}
 @media(max-width:520px){.feed-dot,.feed>span:nth-child(2){display:none}.header-account-controls{gap:6px}.terminal-language{display:block;width:48px;min-width:48px;padding:4px 1px;font-size:10px}.account-tier-badge{width:46px;height:42px}}
 .terminal .market-index-values em,.terminal .symbol em,.terminal .price span{color:var(--market-up)}.terminal .market-index-values em.down,.terminal .symbol em.down,.terminal .price span.down{color:var(--market-down)}
+
+/* V1.1.8: show all four navigation labels within the single mobile header row. */
+@media(max-width:800px){
+  .terminal > header{flex-wrap:nowrap;padding-inline:clamp(8px,2vw,14px);gap:clamp(4px,1.2vw,12px)}
+  .terminal > header .brand{flex:0 1 auto;min-width:0;gap:5px}
+  .terminal > header .brand-logo{flex:0 0 auto;width:24px;height:24px}
+  .terminal > header .brand-name{font-size:clamp(12px,2.4vw,16px);white-space:nowrap}
+  .terminal > header nav{display:flex;flex:1 1 auto;min-width:0;align-items:center;justify-content:center;gap:clamp(3px,1vw,10px);white-space:nowrap}
+  .terminal > header nav a{display:grid;flex:0 0 auto;font-size:clamp(10px,2.4vw,13px);height:100%}
+  .terminal > header .header-account-controls{flex:0 0 auto;margin-left:0;gap:clamp(3px,1vw,8px)}
+}
+@media(max-width:380px){
+  .terminal > header{padding-inline:7px;gap:4px}
+  .terminal > header .brand-name{display:none}
+  .terminal > header .brand{gap:0}
+  .terminal > header nav{gap:clamp(4px,1.5vw,8px)}
+}
 </style>
