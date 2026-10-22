@@ -2,6 +2,7 @@
 """Tests binding BuildKit provenance to the reviewed Actions workflow run."""
 
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,11 @@ RUN_ID = "424242"
 SOURCE_REF = "refs/heads/release/siftalpha-web-v1"
 WORKFLOW = "SiftAlpha Web CI and ARM64"
 WORKFLOW_PATH = ".github/workflows/siftalpha-web-arm64.yml"
+FOOTER_SOURCE = (ROOT / "frontend/src/components/SiteVersionFooter.vue").read_text(encoding="utf-8")
+VERSION_MATCH = re.search(r"(?m)^const version = ['\"](V\d+\.\d+\.\d+)['\"]$", FOOTER_SOURCE)
+if VERSION_MATCH is None:
+    raise ValueError("site footer release version missing")
+VERSION = VERSION_MATCH.group(1).lower()
 
 
 class BuildkitProvenanceTests(unittest.TestCase):
@@ -39,7 +45,7 @@ class BuildkitProvenanceTests(unittest.TestCase):
                     "source_ref": SOURCE_REF,
                     "workflow": WORKFLOW,
                     "platform": "linux/arm64",
-                    "tags": [f"sha-{COMMIT}", f"v1.1.6-sha-{COMMIT}"],
+                    "tags": [f"sha-{COMMIT}", f"{VERSION}-sha-{COMMIT}"],
                 }
             ),
             encoding="utf-8",
@@ -112,6 +118,15 @@ class BuildkitProvenanceTests(unittest.TestCase):
     def test_accepts_manual_workflow_dispatch_provenance(self):
         result = self._run(self._provenance(event_name="workflow_dispatch"))
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_stale_or_unrelated_version_tag(self):
+        # Provenance must match the site version from this exact source tree.
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest["tags"][1] = f"v0.0.0-sha-{COMMIT}"
+        self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        result = self._run(self._provenance())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("build manifest tags do not identify the source commit", result.stderr)
 
     def test_rejects_unexpected_workflow_event(self):
         result = self._run(self._provenance(event_name="pull_request"))
