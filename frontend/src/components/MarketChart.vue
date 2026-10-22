@@ -6,6 +6,7 @@ import { TongdaxinStickPrimitive } from '../indicators/TongdaxinStickPrimitive'
 import { TongdaxinTextPrimitive } from '../indicators/TongdaxinTextPrimitive'
 import { TongdaxinFixedTextPrimitive } from '../indicators/TongdaxinFixedTextPrimitive'
 import { commonDrawing } from '../indicators/commonIndicators'
+import { hiddenIndicatorScaleId } from '../indicators/priceScalePolicy.mjs'
 import { createRealtimeUiBuffer, mergeHistoricalTail, mergeRealtimePayload } from '../realtime/realtimeUiBuffer.mjs'
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from '../realtime/realtimeGeneration.mjs'
 import { settleHistoryReconcile } from '../realtime/historyRecovery.mjs'
@@ -24,8 +25,8 @@ const props = defineProps({
 
 const el = ref(null)
 const mainIndicators = computed(() => props.installedIndicators.filter(item => item.placement === 'main'))
-// This presentation-only exception must not change indicator values or other panes.
-const hideYiQiSanQingAxis = item => item?.placement === 'sub' && String(item.name || '').replace(/\s/g, '') === '一气三清'
+// Reuse the hidden overlay-scale condition for hover values; never turn off the price-to-coordinate scale.
+const hideYiQiSanQingAxis = item => Boolean(hiddenIndicatorScaleId(item))
 const subTitlePositions = ref([])
 const hiddenSubCrosshairValue = ref(null)
 const renderErrors = ref([])
@@ -102,14 +103,6 @@ function syncSubTitlePositions(rendered) {
   subTitlePositions.value = rendered.filter(result => result.item.placement === 'sub').map(result => {
     const top = chart.panes()[paneIndex++]?.getHTMLElement()?.getBoundingClientRect().top
     return { code: result.item.code, name: result.item.name, top: (top === undefined ? 0 : top - chartTop) + 6 }
-  })
-}
-
-function syncSubPanePriceAxes() {
-  if (!chart) return
-  renderedItems.filter(result => result.item.placement === 'sub').forEach(result => {
-    const pane = layerRefs.get(result.item.code)?.pane
-    if (pane != null) chart.priceScale('right', pane).applyOptions({ visible: !hideYiQiSanQingAxis(result.item) })
   })
 }
 
@@ -292,7 +285,7 @@ async function fetchKlinePage(before = null) {
   return payload
 }
 
-function addLine(color, data, pane, style = 'solid', width = 1) {
+function addLine(color, data, pane, style = 'solid', width = 1, priceScaleId) {
   const lineWidth = Math.max(1, Math.min(9, Number(width) || 1))
   const markerStyle = style === 'circle-dot'
   const series = chart.addSeries(LineSeries, {
@@ -301,6 +294,7 @@ function addLine(color, data, pane, style = 'solid', width = 1) {
     pointMarkersVisible: markerStyle,
     pointMarkersRadius: markerStyle ? Math.max(2, Math.min(5, lineWidth + 1)) : undefined,
     priceLineVisible: false, lastValueVisible: false,
+    ...(priceScaleId ? { priceScaleId } : {}),
   }, pane)
   series.setData(data)
   return series
@@ -346,9 +340,10 @@ function formulaAnchorData(drawing) {
   return [...values.entries()].sort(([left], [right]) => left - right).map(([time, value]) => ({ time, value }))
 }
 
-function addFormulaAnchor(drawing, pane) {
+function addFormulaAnchor(drawing, pane, priceScaleId) {
   const anchor = chart.addSeries(LineSeries, {
     color: 'transparent', lineVisible: false, priceLineVisible: false, lastValueVisible: false,
+    ...(priceScaleId ? { priceScaleId } : {}),
   }, pane)
   anchor.setData(formulaAnchorData(drawing))
   return anchor
@@ -382,8 +377,11 @@ function setCandleMode(rendered) {
 }
 
 function installLayer(result, pane) {
-  const lines = result.drawing.lines.map(item => addLine(item.color, item.data, pane, item.style, item.width))
-  const layerAnchor = result.item.placement === 'main' ? candleSeries : (lines[0] || addFormulaAnchor(result.drawing, pane))
+  // Attach all series and the STICKLINE/text anchor to the same hidden overlay
+  // scale; hiding the normal right scale broke primitive rendering in V1.1.7.
+  const priceScaleId = hiddenIndicatorScaleId(result.item)
+  const lines = result.drawing.lines.map(item => addLine(item.color, item.data, pane, item.style, item.width, priceScaleId))
+  const layerAnchor = result.item.placement === 'main' ? candleSeries : (lines[0] || addFormulaAnchor(result.drawing, pane, priceScaleId))
   return {
     pane,
     lines,
@@ -798,7 +796,6 @@ async function draw(options = {}) {
     if (result.item.placement === 'sub') chart.panes()[pane]?.setHeight(savedHeights[result.item.code] || 150)
   }
   chart.panes()[0]?.setHeight(440)
-  syncSubPanePriceAxes()
   panePointerUp = () => window.setTimeout(() => {
     saveSubPaneHeights(renderedItems)
     syncSubTitlePositions(renderedItems)
@@ -840,7 +837,6 @@ function syncIndicatorLayout() {
   el.value.style.height = `${chartHeight}px`
   chart.applyOptions({ height: chartHeight })
   chart.panes()[0]?.setHeight(440)
-  syncSubPanePriceAxes()
 }
 
 async function refreshIndicatorLayers() {
