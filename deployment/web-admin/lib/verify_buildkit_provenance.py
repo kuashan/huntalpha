@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -96,8 +97,19 @@ def main() -> None:
     else:
         fail("OCI provenance is not BuildKit SLSA provenance")
 
+    # Bind the versioned image tag to this exact source tree's visible release
+    # version, rather than accepting a stale or arbitrary version tag.
+    footer = Path(__file__).resolve().parents[3] / "frontend/src/components/SiteVersionFooter.vue"
+    try:
+        footer_source = footer.read_text(encoding="utf-8")
+    except OSError:
+        fail("release version source is unavailable")
+    version_match = re.search(r"(?m)^const version = ['\"](V\d+\.\d+\.\d+)['\"]$", footer_source)
+    if not version_match:
+        fail("release version source is invalid")
+
     expected_tag = f"sha-{commit}"
-    version_tag = f"v1.1.6-sha-{commit}"
+    version_tag = f"{version_match.group(1).lower()}-sha-{commit}"
     tags = manifest.get("tags")
     def has_tag(candidate: str) -> bool:
         return any(tag == candidate or tag.endswith(f":{candidate}") for tag in tags or [])
