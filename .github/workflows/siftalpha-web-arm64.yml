@@ -55,6 +55,7 @@ jobs:
           npm run test:indicators
           npm run test:realtime
           npm run test:chart
+          npm run test:ui
           node src/mobileNavigation.test.mjs
           npm run test:workspace
           node src/components/SiteVersionFooter.test.mjs
@@ -76,11 +77,11 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/siftalpha-web
           tags: |
             type=raw,value=sha-${{ github.sha }}
-            type=raw,value=v1.1.9-sha-${{ github.sha }}
+            type=raw,value=v1.1.10-sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=V1.1.9
+            org.opencontainers.image.version=V1.1.10
             io.siftalpha.build.run-id=${{ github.run_id }}
             io.siftalpha.build.ref=${{ github.ref_name }}
 
