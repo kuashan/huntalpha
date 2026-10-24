@@ -17,6 +17,8 @@ assert.match(panel, /current !== generation/)
 assert.match(panel, /String\(data.code\).toUpperCase\(\) !== code.toUpperCase\(\)/)
 assert.match(panel, /data.period !== '1d'/)
 assert.match(panel, /state === 'ready' && result/)
+assert.doesNotMatch(panel, /href="https:\/\/github\.com\/iwanlebron\/stock-analysis"/)
+assert.doesNotMatch(panel, /t\('fgSource'\)/)
 assert.match(panel, /fgNotConfigured/)
 assert.doesNotMatch(panel, /Math.random|mockScore|fakeScore|iframe/i)
 
