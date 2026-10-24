@@ -1,0 +1,50 @@
+name: V1.1.12 Technical Momentum PR Checks
+
+on:
+  pull_request:
+    branches:
+      - release/siftalpha-web-v1
+    paths:
+      - "core/vendor/daily_stock_analysis/**"
+      - "core/stock_technical_momentum.py"
+      - "core/test_stock_technical_momentum.py"
+      - "core/views.py"
+      - "quant_site/urls.py"
+      - "frontend/**"
+      - "scripts/verify_web_release_workflow.py"
+      - ".github/workflows/siftalpha-web-arm64.yml"
+      - ".github/workflows/stock-technical-momentum-pr.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  momentum-integration:
+    runs-on: ubuntu-latest
+    env:
+      DJANGO_SECRET_KEY: pr-test-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Original six-factor algorithm and market-data boundaries
+        run: |
+          python -m pip install -r requirements.txt
+          python manage.py check
+          python manage.py test core.test_stock_technical_momentum core.test_stock_fear_greed
+          python manage.py makemigrations --check --dry-run
+          python scripts/verify_web_release_workflow.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: UI contracts and frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run test:ui
+          node src/components/SiteVersionFooter.test.mjs
+          npm run build
