@@ -27,7 +27,7 @@ def provider_ticker(code):
     if re.fullmatch(r"SZ\.\d{6}", code):
         return code[3:] + ".SZ"
     if re.fullmatch(r"HK\.\d{1,5}", code):
-        return code[3:].zfill(4) + ".HK"
+        return code[3:].lstrip("0").zfill(4) + ".HK"
     if re.fullmatch(r"CC\.[A-Z0-9]{2,15}[-/][A-Z0-9]{2,15}", code):
         return code[3:].replace("/", "-")
     if re.fullmatch(r"CC\.[A-Z0-9]{2,15}(USD|USDT)", code):
