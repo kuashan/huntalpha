@@ -939,6 +939,10 @@ onMounted(async () => {
   resize.observe(el.value)
 })
 onBeforeUnmount(() => {
+  // The previous symbol's queued requests must not draw after Vue replaces
+  // its keyed MarketChart instance.
+  drawVersion += 1
+  cancelIndicatorRefresh()
   disconnectRealtime({ clearRecovery: true })
   if (visibilityHandler) document.removeEventListener('visibilitychange', visibilityHandler)
   if (panePointerUp) el.value?.removeEventListener('pointerup', panePointerUp)
