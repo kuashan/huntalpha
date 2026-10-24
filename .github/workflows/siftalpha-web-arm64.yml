@@ -77,11 +77,11 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/siftalpha-web
           tags: |
             type=raw,value=sha-${{ github.sha }}
-            type=raw,value=v1.1.12-sha-${{ github.sha }}
+            type=raw,value=v2.0.0-sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=V1.1.12
+            org.opencontainers.image.version=V2.0.0
             io.siftalpha.build.run-id=${{ github.run_id }}
             io.siftalpha.build.ref=${{ github.ref_name }}
 
