@@ -15,6 +15,7 @@ import pandas as pd
 from .marketdata.profiles import profile_for
 from .marketdata.service import get_market_data_service, market_id_for_symbol
 from .vendor.daily_stock_analysis.stock_analyzer import StockTrendAnalyzer
+from .vendor.daily_stock_analysis.decision_scale import decision_band_for_score
 
 
 MIN_DAILY_BARS = 60
@@ -206,6 +207,7 @@ def analyze_technical_momentum(code: str, *, service=None, now=None):
     if not (0 <= result.signal_score <= 100):
         raise TechnicalMomentumUnavailable("invalid_result")
 
+    score_band = decision_band_for_score(result.signal_score)
     return {
         "status": "ready",
         "code": code.upper(),
@@ -214,10 +216,7 @@ def analyze_technical_momentum(code: str, *, service=None, now=None):
         "provider": fetch.provider_id,
         "score": result.signal_score,
         "signal": result.buy_signal.value,
-        "score_band": {
-            "min": (result.signal_score // 20) * 20,
-            "max": min(100, (result.signal_score // 20) * 20 + 19),
-        },
+        "score_band": score_band.signal_key if score_band else None,
         "date": last["date"],
         "intraday": bool(intraday),
         "dimensions": [
