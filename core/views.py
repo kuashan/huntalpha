@@ -55,6 +55,7 @@ from .realtime import (
 from .realtime.formula_scheduler import FormulaRunRegistry, calculation_input_fingerprint
 from .realtime.provider import REALTIME_PERIOD_SUBTYPES
 from .symbol_catalog import COINBASE_PROVIDER, MARKET_DEFINITIONS, SUPPORTED_MARKETS
+from .etf_discovery import ETFDiscoveryUnavailable, discover_etfs, lookup_etf
 from .watchlist import account_tier_payload, active_watchlist_entry_ids, watchlist_limit_for_user, resolve_account_tier
 from .python_indicators import (
     PythonIndicatorExecutionError,
@@ -529,15 +530,30 @@ def _watchlist_create(request):
     if not code or len(code) > 32:
         return _watchlist_error("证券代码无效", "invalid_symbol_code", request, 400)
     symbol = MarketSymbol.objects.filter(code__iexact=code).first()
+    verified_etf = None
     if symbol is None:
-        return _watchlist_error("未找到真实证券", "symbol_not_found", request, 404)
-    if not symbol.active:
+        try:
+            verified_etf = lookup_etf(code)
+        except ETFDiscoveryUnavailable:
+            return _watchlist_error("ETF 证券验证服务暂不可用", "etf_lookup_unavailable", request, 503)
+        if verified_etf is None:
+            return _watchlist_error("未找到真实证券", "symbol_not_found", request, 404)
+    if symbol is not None and not symbol.active:
         return _watchlist_error("该证券当前不可用", "symbol_inactive", request, 409)
-    if symbol.security_type not in {"STOCK", "CRYPTO_SPOT"}:
+    if symbol is not None and symbol.security_type not in {"STOCK", "ETF", "CRYPTO_SPOT"}:
         return _watchlist_error("该证券类型暂不支持自选", "symbol_unavailable", request, 409)
     try:
         with transaction.atomic():
             locked_user = get_user_model().objects.select_for_update().get(pk=request.user.pk)
+            if symbol is None:
+                # Create only an exact exchange-listed ETF verified from the
+                # real provider. Never insert unverified or synthetic symbols.
+                metadata = dict(verified_etf)
+                metadata.pop("code")
+                metadata["market_cap_currency"] = {"cn": "CNY", "hk": "HKD", "us": "USD"}[metadata["market"]]
+                symbol, _ = MarketSymbol.objects.get_or_create(code=verified_etf["code"], defaults=metadata)
+                if not symbol.active or symbol.security_type != "ETF":
+                    return _watchlist_error("该 ETF 证券当前不可用", "symbol_unavailable", request, 409)
             entry = WatchlistEntry.objects.select_related("symbol").filter(
                 user=locked_user, symbol=symbol
             ).first()
@@ -727,12 +743,17 @@ def merge_calculation_snapshot_rows(rows, calculation_snapshot, expected_provide
 def stock_technical_momentum(request, code):
     """Return unchanged upstream daily technical score for an active symbol."""
     symbol = MarketSymbol.objects.filter(code__iexact=code.upper(), active=True).first()
-    if symbol is None:
+    try:
+        verified_etf = lookup_etf(code) if symbol is None else None
+    except ETFDiscoveryUnavailable:
+        return json({"status": "unavailable"}, 503)
+    verified_code = symbol.code if symbol is not None else (verified_etf or {}).get("code")
+    if verified_code is None:
         return json({"status": "unknown_symbol"}, 404)
     try:
-        payload = analyze_technical_momentum(symbol.code)
+        payload = analyze_technical_momentum(verified_code)
     except TechnicalMomentumUnavailable as exc:
-        return json({"status": exc.status, "code": symbol.code}, 503)
+        return json({"status": exc.status, "code": verified_code}, 503)
     return json(payload)
 
 
@@ -742,13 +763,18 @@ def stock_fear_greed(request, code):
     """Proxy a verified catalog symbol to the optional standalone upstream service."""
     normalized = code.upper()
     symbol = MarketSymbol.objects.filter(code__iexact=normalized, active=True).first()
-    if symbol is None:
+    try:
+        verified_etf = lookup_etf(normalized) if symbol is None else None
+    except ETFDiscoveryUnavailable:
+        return json({"status": "unavailable"}, 503)
+    verified_code = symbol.code if symbol is not None else (verified_etf or {}).get("code")
+    if verified_code is None:
         return json({"status": "unknown_symbol"}, 404)
     try:
-        result = fetch_stock_fear_greed(symbol.code)
+        result = fetch_stock_fear_greed(verified_code)
     except FearGreedUnavailable as exc:
         status = 400 if exc.status == "unsupported_symbol" else 503
-        return json({"status": exc.status, "code": symbol.code}, status)
+        return json({"status": exc.status, "code": verified_code}, status)
     return json(result)
 
 
@@ -1045,8 +1071,8 @@ def watchlist_item_data(entry):
 
 
 def _market_catalog_queryset(market):
-    security_type = "CRYPTO_SPOT" if market == "crypto" else "STOCK"
-    return MarketSymbol.objects.filter(market=market, active=True, security_type=security_type)
+    supported_types = ("CRYPTO_SPOT",) if market == "crypto" else ("STOCK", "ETF")
+    return MarketSymbol.objects.filter(market=market, active=True, security_type__in=supported_types)
 
 
 def _catalog_status(market, leaders_available=None):
@@ -1192,7 +1218,7 @@ def symbol_search(request):
         return json({"error": error}, 400)
 
     stock_markets = tuple(market for market in SUPPORTED_MARKETS if market != "crypto")
-    valid_types = Q(market__in=stock_markets, security_type="STOCK") | Q(
+    valid_types = Q(market__in=stock_markets, security_type__in=("STOCK", "ETF")) | Q(
         market="crypto", security_type="CRYPTO_SPOT"
     )
     queryset = MarketSymbol.objects.filter(active=True).filter(valid_types).filter(
@@ -1209,6 +1235,34 @@ def symbol_search(request):
     items = list(queryset[start:start + limit])
     totals = _watchlist_totals(request)
     watchlisted_codes = _watchlisted_codes(request, items)
+    results = [_catalog_item_data(request, item, watchlisted_codes) for item in items]
+    # Existing local matches remain authoritative. Search the real provider
+    # only for a short ETF-like query on the first page with spare slots.
+    # Neither GET nor chart browsing ever writes new catalog rows.
+    if page == 1 and len(results) < limit:
+        try:
+            discovered = discover_etfs(query)
+        except ETFDiscoveryUnavailable:
+            discovered = ()
+        existing_codes = {item["code"] for item in results}
+        # A persisted but inactive/different-page ticker must never be
+        # displayed again from transient Yahoo search results.
+        existing_codes.update(MarketSymbol.objects.filter(
+            code__in=[row["code"] for row in discovered]
+        ).values_list("code", flat=True))
+        extras = []
+        for metadata in discovered:
+            if metadata["code"] in existing_codes:
+                continue
+            extras.append({
+                **metadata, "source": metadata["provider"], "watchlisted": False,
+                "market_cap": None, "market_cap_currency": {"cn": "CNY", "hk": "HKD", "us": "USD"}[metadata["market"]],
+                "market_cap_updated_at": None, "catalog_updated_at": None,
+            })
+            existing_codes.add(metadata["code"])
+        extras.sort(key=lambda item: (item["code"].upper() != query.upper(), item["code"]))
+        results = sorted(results + extras, key=lambda item: (item["code"].upper() != query.upper(), item["code"]))[:limit]
+        total += len(extras)
     return json({
         "query": query,
         "page": page,
@@ -1216,7 +1270,7 @@ def symbol_search(request):
         "total": total,
         "mode": "search",
         "market_scope": list(SUPPORTED_MARKETS),
-        "items": [_catalog_item_data(request, item, watchlisted_codes) for item in items],
+        "items": results,
         "watchlist_total": totals["total"],
         "watchlist_limit": totals["limit"],
         "watchlist_remaining": totals["remaining"],

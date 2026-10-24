@@ -5,7 +5,7 @@ const footer = readFileSync(new URL('./SiteVersionFooter.vue', import.meta.url),
 const trading = readFileSync(new URL('../App.vue', import.meta.url), 'utf8')
 const account = readFileSync(new URL('./PersonalCenter.vue', import.meta.url), 'utf8')
 
-assert.match(footer, /const version = 'V2\.0\.2'/)
+assert.match(footer, /const version = 'V2\.0\.3'/)
 assert.match(footer, /<footer class="site-version-footer">SiftAlpha • \{\{ version \}\}<\/footer>/)
 assert.doesNotMatch(footer, /<(a|button)\b/i)
 assert.doesNotMatch(footer, /update.*(?:history|record)|changelog/i)
