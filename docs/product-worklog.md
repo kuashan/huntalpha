@@ -15,11 +15,16 @@
 
 ## 当前进行中
 
+### V2.0.2 — 分析卡片来源链接隐藏
+
+状态：`IN_DEVELOPMENT`。用户要求隐藏恐慌与贪婪、技术动能卡片顶部的“来源”显示，算法、数据和后台来源元数据不变；详见 `docs/tasks/023-v2-0-2-analysis-card-source-visibility.md`。焦点科技 2026-09-04 Yahoo 26.46 元 vs 腾讯前复权 25.96 元差异已定位为 2026-09-09 每股 0.50 元现金分红调整；目前不授权改变行情复权口径。
+
+
 ### V2.0.1 — 行情来源切换与日/周/月时间戳一致性
 
-状态：`DEVELOPMENT_CANDIDATE`。独立分支 `fix/web-v2-0-1-market-calendar-timestamps`；详见 `docs/tasks/022-v2-0-1-market-calendar-timestamps.md`。
+状态：`DEPLOYED / USER PAGE ACCEPTANCE PENDING`。正式 Commit `60f8ea71ab9e7fe91c2223d7d0477ac5473dd734`，ARM64 Digest `sha256:d41d6bb8b9b6fc646fc4807702223740aeee5629d3cf7f54cc6d251257fb1102`。2026-10-24 受控备份和预检通过、生产部署成功，状态/Health/HTTP 检查正常。**用户页面最终验收待确认，不提前标记 ACCEPTED。**
 
-从 Yahoo Finance 切换到腾讯财经导致日线重复。已定位交易所日期与 Unix 时间锚点不一致，及旧来源实时状态残留。已提出覆盖所有五类 Provider、中港美/加密市场的统一规范，并加入前后端定点修复。**待 PR 自动测试、代码审查、正式构建、用户单独批准 Digest 后受控部署与页面验收。生产仍运行 V2.0.0。**
+从 Yahoo Finance 切换到腾讯财经导致日线重复。已定位交易所日期与 Unix 时间锚点不一致，及旧来源实时状态残留。已提出覆盖所有五类 Provider、中港美/加密市场的统一规范，并加入前后端定点修复。**PR/CI/正式构建/受控生产部署已完成，当前仅待实际页面验收。生产现运行 V2.0.1。**
 
 
 ### Task 006 — SLTD 对齐的统一行情基础设施
