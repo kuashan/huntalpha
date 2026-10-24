@@ -7,7 +7,7 @@ const i18n = readFileSync(new URL('../i18n.js', import.meta.url), 'utf8')
 
 assert.match(app, /<StockFearGreed v-if="selected" :key="'fg:' \+ selected.code" :symbol="selected"\s*\/>/)
 const chartIndex = app.indexOf('<MarketChart v-if="selected"')
-const panelIndex = app.indexOf('<StockFearGreed v-if="selected"')
+const panelIndex = app.indexOf('<StockFearGreed :key="')
 const footerIndex = app.indexOf("<footer>{{ t('disclaimer') }}</footer>")
 assert.ok(chartIndex >= 0 && panelIndex > chartIndex && footerIndex > panelIndex,
   'Fear-greed panel must follow all chart panes and precede the page disclaimer')
