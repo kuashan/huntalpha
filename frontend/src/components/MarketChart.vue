@@ -626,6 +626,7 @@ async function reconcileHistoryTail(streamGenerationAtStart = streamGeneration) 
       : mergeHistoricalTail(loadedBars, payload.bars, latestPayload)
     const visibleRange = chart?.timeScale().getVisibleLogicalRange()
     loadedBars = merged.bars
+    if (sourceChanged) hasMoreHistory = Boolean(payload.has_more)
     loadedSource = payload.source || loadedSource
     if (merged.changed) {
       invalidateFormulaResults({ clearPending: false })
