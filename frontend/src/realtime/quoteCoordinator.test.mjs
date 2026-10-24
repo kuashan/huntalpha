@@ -4,8 +4,8 @@ import { createQuoteCoordinator } from './quoteCoordinator.mjs'
 
 const app = readFileSync(new URL('../App.vue', import.meta.url), 'utf8')
 const chart = readFileSync(new URL('../components/MarketChart.vue', import.meta.url), 'utf8')
-assert.match(app, /<MarketChart v-if="selected" :key="selected\.code" :symbol="selected"/)
-assert.match(app, /selected\.value = item\s*\/\/[^\n]*\n[^\n]*\n\s*void quoteCoordinator\.refresh\(item\.code\)/)
+assert.match(app, /<MarketChart v-if="selectedSymbol" :key="selectedSymbol\.code" :symbol="selectedSymbol"/)
+assert.match(app, /selected\.value = target[\s\S]*?void quoteCoordinator\.refresh\(target\.code\)/)
 assert.match(chart, /onBeforeUnmount\(\(\) => \{[\s\S]*?drawVersion \+= 1[\s\S]*?disconnectRealtime/)
 assert.doesNotMatch(app, /quoteRequestVersion/)
 
