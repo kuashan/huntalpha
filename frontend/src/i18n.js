@@ -52,6 +52,72 @@ const workspaceMessages = {
 }
 Object.entries(workspaceMessages).forEach(([code, values]) => { messages[code] = { ...messages[code], ...values } })
 
+const fearGreedMessages = {
+  'zh-CN': {
+    fgTitle:'个股恐慌与贪婪指数', fgDaily:'固定日线', fgSource:'来源：stock-analysis',
+    fgAsOf:'数据日期：', fgLoading:'正在获取个股恐贪指数…',
+    fgNotConfigured:'恐贪数据服务尚未配置', fgUnsupported:'此标的暂不支持恐贪指数',
+    fgNoScore:'暂无足够数据计算个股恐贪指数', fgUnavailable:'恐贪数据暂不可用',
+    fgUnknown:'未分类', fgExtremeFear:'极度恐惧', fgFear:'恐惧',
+    fgNeutral:'中性', fgGreed:'贪婪', fgExtremeGreed:'极度贪婪',
+    fgTrend:'趋势', fgMomentum:'动量', fgRsi:'RSI', fgMacd:'MACD',
+    fgDrawdown:'回撤', fgVolatility:'波动率', fgMfi:'资金流 MFI', fgBollinger:'布林带位置',
+  },
+  'zh-TW': {
+    fgTitle:'個股恐慌與貪婪指數', fgDaily:'固定日線', fgSource:'來源：stock-analysis',
+    fgAsOf:'資料日期：', fgLoading:'正在取得個股恐貪指數…',
+    fgNotConfigured:'恐貪資料服務尚未設定', fgUnsupported:'此標的暫不支援恐貪指數',
+    fgNoScore:'資料不足，無法計算恐貪指數', fgUnavailable:'恐貪資料暫不可用',
+    fgUnknown:'未分類', fgExtremeFear:'極度恐懼', fgFear:'恐懼',
+    fgNeutral:'中性', fgGreed:'貪婪', fgExtremeGreed:'極度貪婪',
+    fgTrend:'趨勢', fgMomentum:'動能', fgRsi:'RSI', fgMacd:'MACD',
+    fgDrawdown:'回撤', fgVolatility:'波動率', fgMfi:'資金流 MFI', fgBollinger:'布林通道位置',
+  },
+  en: {
+    fgTitle:'Single-stock Fear & Greed', fgDaily:'Daily candles', fgSource:'Source: stock-analysis',
+    fgAsOf:'Data date:', fgLoading:'Loading stock sentiment…',
+    fgNotConfigured:'Fear & Greed service is not configured', fgUnsupported:'This symbol is not supported',
+    fgNoScore:'Not enough data for a sentiment score', fgUnavailable:'Sentiment data is temporarily unavailable',
+    fgUnknown:'Unclassified', fgExtremeFear:'Extreme fear', fgFear:'Fear',
+    fgNeutral:'Neutral', fgGreed:'Greed', fgExtremeGreed:'Extreme greed',
+    fgTrend:'Trend', fgMomentum:'Momentum', fgRsi:'RSI', fgMacd:'MACD',
+    fgDrawdown:'Drawdown', fgVolatility:'Volatility', fgMfi:'Money flow MFI', fgBollinger:'Bollinger %B',
+  },
+  ja: {
+    fgTitle:'個別銘柄の恐怖・強欲指数', fgDaily:'日足固定', fgSource:'提供元：stock-analysis',
+    fgAsOf:'データ日付：', fgLoading:'指数を読み込み中…',
+    fgNotConfigured:'データサービスが未設定です', fgUnsupported:'この銘柄には対応していません',
+    fgNoScore:'指数の算出に十分なデータがありません', fgUnavailable:'指数データを取得できません',
+    fgUnknown:'未分類', fgExtremeFear:'極度の恐怖', fgFear:'恐怖',
+    fgNeutral:'中立', fgGreed:'強欲', fgExtremeGreed:'極度の強欲',
+    fgTrend:'トレンド', fgMomentum:'モメンタム', fgRsi:'RSI', fgMacd:'MACD',
+    fgDrawdown:'ドローダウン', fgVolatility:'変動率', fgMfi:'資金フロー MFI', fgBollinger:'ボリンジャー %B',
+  },
+  ms: {
+    fgTitle:'Indeks Takut & Tamak Saham', fgDaily:'Carta harian', fgSource:'Sumber: stock-analysis',
+    fgAsOf:'Tarikh data:', fgLoading:'Memuatkan indeks sentimen…',
+    fgNotConfigured:'Perkhidmatan indeks belum dikonfigurasi', fgUnsupported:'Simbol ini tidak disokong',
+    fgNoScore:'Data tidak mencukupi untuk skor', fgUnavailable:'Data sentimen tidak tersedia',
+    fgUnknown:'Tidak diklasifikasikan', fgExtremeFear:'Ketakutan melampau', fgFear:'Takut',
+    fgNeutral:'Neutral', fgGreed:'Tamak', fgExtremeGreed:'Ketamakan melampau',
+    fgTrend:'Trend', fgMomentum:'Momentum', fgRsi:'RSI', fgMacd:'MACD',
+    fgDrawdown:'Penurunan', fgVolatility:'Volatiliti', fgMfi:'Aliran wang MFI', fgBollinger:'Bollinger %B',
+  },
+  fr: {
+    fgTitle:'Peur et avidité par action', fgDaily:'Bougies journalières', fgSource:'Source : stock-analysis',
+    fgAsOf:'Date des données :', fgLoading:'Chargement du sentiment…',
+    fgNotConfigured:'Le service de sentiment est non configuré', fgUnsupported:'Ce symbole est non pris en charge',
+    fgNoScore:'Données insuffisantes pour le score', fgUnavailable:'Données de sentiment indisponibles',
+    fgUnknown:'Non classé', fgExtremeFear:'Peur extrême', fgFear:'Peur',
+    fgNeutral:'Neutre', fgGreed:'Avidité', fgExtremeGreed:'Avidité extrême',
+    fgTrend:'Tendance', fgMomentum:'Momentum', fgRsi:'RSI', fgMacd:'MACD',
+    fgDrawdown:'Repli', fgVolatility:'Volatilité', fgMfi:'Flux MFI', fgBollinger:'Bollinger %B',
+  },
+}
+Object.entries(fearGreedMessages).forEach(([code, values]) => {
+  messages[code] = { ...messages[code], ...values }
+})
+
 export const t = key => messages[locale.value]?.[key] ?? messages.en[key] ?? key
 export const languageName = computed(() => languages.find(item => item.code === locale.value)?.label ?? '简体中文')
 export function setLocale(code) { if (!messages[code]) return; locale.value = code; localStorage.setItem('quantscope:locale', code); document.documentElement.lang = code }
