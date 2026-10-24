@@ -92,9 +92,6 @@ onBeforeUnmount(() => {
         <h2>{{ t('fgTitle') }}</h2>
         <small>{{ t('fgDaily') }} · {{ symbol?.name || symbol?.code }}</small>
       </div>
-      <a href="https://github.com/iwanlebron/stock-analysis" target="_blank" rel="noopener noreferrer">
-        {{ t('fgSource') }}
-      </a>
     </div>
     <div v-if="state === 'ready' && result" class="fg-content">
       <div class="fg-score">
@@ -122,7 +119,6 @@ onBeforeUnmount(() => {
 .fg-heading { display:flex; align-items: flex-start; justify-content:space-between; gap:12px; }
 .fg-heading h2 { font-size: 15px; margin:0 0 4px; font-weight:600; }
 .fg-heading small,.fg-score small,.fg-status { font-size:11px; color:#94a7ba; }
-.fg-heading a { font-size: 10px; color:#7abec9; text-decoration:underline; white-space:nowrap; }
 .fg-content { margin-top:14px; display:grid; grid-template-columns:minmax(170px,1fr) minmax(180px,2fr); gap:18px; }
 .fg-score { display:flex; flex-direction:column; gap:7px; }
 .fg-score strong { font-size:32px; color:#e5f5f6; font-variant-numeric:tabular-nums; }
