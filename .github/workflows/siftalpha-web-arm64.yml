@@ -55,6 +55,7 @@ jobs:
           npm run test:indicators
           npm run test:realtime
           npm run test:chart
+          npm run test:ui
           node src/mobileNavigation.test.mjs
           npm run test:workspace
           node src/components/SiteVersionFooter.test.mjs
