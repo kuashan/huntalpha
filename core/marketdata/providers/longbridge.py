@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import os
 from typing import Any
 
@@ -22,18 +23,20 @@ def provider_symbol_for(symbol: str) -> str:
     return normalized
 
 
-def _stamp(value: Any) -> int | None:
+def _stamp(value: Any, market_timezone: str = "UTC") -> int | None:
     if isinstance(value, (int, float)):
         return int(value)
-    if hasattr(value, "timestamp") and callable(value.timestamp):
-        return int(value.timestamp())
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=ZoneInfo(market_timezone))
+        return int(value.astimezone(timezone.utc).timestamp())
     text = str(value or "").strip().replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=ZoneInfo(market_timezone))
     return int(parsed.astimezone(timezone.utc).timestamp())
 
 
@@ -108,7 +111,7 @@ class LongbridgeMarketDataProvider:
         rows = context.candlesticks(provider_symbol_for(symbol), period, adjust, count)
         completed = []
         for row in rows or []:
-            stamp = _stamp(_attr(row, "timestamp", "time"))
+            stamp = _stamp(_attr(row, "timestamp", "time"), self.profile.timezone)
             values = {key: _attr(row, key) for key in ("open", "high", "low", "close", "volume", "turnover")}
             if stamp is None or any(values[key] is None for key in ("open", "high", "low", "close")):
                 continue
