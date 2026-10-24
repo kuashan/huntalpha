@@ -13,22 +13,22 @@ const momentumPanel = app.indexOf('<StockTechnicalMomentum :key=')
 const disclaimer = app.indexOf("<footer>{{ t('disclaimer') }}</footer>")
 assert.ok(chart >= 0 && chart < wrapper && wrapper < fearPanel &&
   fearPanel < momentumPanel && momentumPanel < disclaimer,
-  'Both panels must display below the complete chart and above disclaimer')
-assert.match(app, /grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/)
-assert.match(app, /@media\(max-width:900px\)/)
-assert.match(momentum, /\/api\/stock-technical-momentum\//)
-assert.match(momentum, /controller\?\.abort\(\)/)
-assert.match(momentum, /request !== generation/)
-assert.match(momentum, /data.period !== '1d'/)
-assert.match(momentum, /data.dimensions.length !== 6/)
-assert.match(momentum, /result.value\\?\\.signal/)
-assert.match(momentum, /state === 'ready' && result/)
-assert.doesNotMatch(momentum, /Math.random|mockScore|fakeScore|iframe/i)
-assert.match(fear, /\/api\/stock-fear-greed\//, 'existing module retained')
+  'Both panels must follow complete chart panes and precede disclaimer')
+for (const term of ['grid-template-columns:repeat(2,minmax(0,1fr))',
+  '@media(max-width:900px)', 'StockTechnicalMomentum']) {
+  assert.ok(app.includes(term), `Layout contract missing: ${term}`)
+}
+for (const term of ['/api/stock-technical-momentum/', 'controller?.abort()',
+  'request !== generation', "data.period !== '1d'", 'data.dimensions.length !== 6',
+  'result.value?.signal', "state === 'ready' && result"]) {
+  assert.ok(momentum.includes(term), `Momentum contract missing: ${term}`)
+}
+assert.ok(!/Math.random|mockScore|fakeScore|iframe/i.test(momentum))
+assert.ok(fear.includes('/api/stock-fear-greed/'), 'Accepted sentiment panel retained')
 for (const key of ['tmTitle', 'tmDaily', 'tmLoading', 'tmUnavailable', 'tmInsufficient',
   'tmTrend', 'tmBias', 'tmVolume', 'tmSupport', 'tmMacd', 'tmRsi',
   'tmStrongBuy', 'tmBuy', 'tmWatch', 'tmSell', 'tmStrongSell']) {
-  assert.equal((languages.match(new RegExp(key + ':', 'g')) || []).length, 6,
-    `Expected exactly six translations for ${key}`)
+  assert.equal(languages.split(key + ':').length - 1, 6,
+    `Exactly six language translations required for ${key}`)
 }
 console.log('V1.1.12 technical momentum UI contract: PASS')
