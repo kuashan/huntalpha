@@ -10,6 +10,7 @@ import { hiddenIndicatorScaleId } from '../indicators/priceScalePolicy.mjs'
 import { createRealtimeUiBuffer, mergeHistoricalTail, mergeRealtimePayload } from '../realtime/realtimeUiBuffer.mjs'
 import { isFormulaResponseGenerationSafe, reconcileRealtimeVersion } from '../realtime/realtimeGeneration.mjs'
 import { settleHistoryReconcile } from '../realtime/historyRecovery.mjs'
+import { hasChangedBarSource } from '../realtime/sourceSwitch.mjs'
 import { isCurrentFormulaResult, shouldScheduleFormulaRefresh } from '../realtime/formulaRefreshScheduler.mjs'
 import { classifyChartUpdate, diffIndicatorSets, indicatorKey } from '../realtime/chartUpdatePolicy.mjs'
 import { createChartTimeFormatters } from '../realtime/chartTimeFormat.mjs'
@@ -58,6 +59,7 @@ let drawVersion = 0
 let drawQueue = Promise.resolve()
 let loadedBars = []
 let loadedKey = ''
+let loadedSource = ''
 let hasMoreHistory = false
 let loadingHistory = false
 let renderedItems = []
@@ -526,6 +528,13 @@ function processRealtimePayload(payload, payloadGeneration = realtimeStatusGener
     if (version.reason !== 'stale_revision') setRealtimeStatus('unavailable')
     return
   }
+  if (hasChangedBarSource(loadedSource, payload)) {
+    latestRealtimePayload = undefined
+    invalidateFormulaResults({ clearPending: false })
+    markHistoryReconcileNeeded()
+    requestHistoryTailReconcile()
+    return
+  }
   if (payload.status) setRealtimeStatus(payload.status)
   if (payload.data_status || payload.bar?.data_status) realtimeDataStatus.value = payload.data_status || payload.bar.data_status
   const hasClosedBar = Number.isFinite(Number(payload.last_closed_bar?.time))
@@ -546,6 +555,13 @@ function queueRealtimePayload(payload) {
   const version = acceptRealtimeVersion(payload)
   if (!version.accepted) {
     if (version.reason !== 'stale_revision') setRealtimeStatus('unavailable')
+    return
+  }
+  if (hasChangedBarSource(loadedSource, payload)) {
+    latestRealtimePayload = undefined
+    invalidateFormulaResults({ clearPending: false })
+    markHistoryReconcileNeeded()
+    requestHistoryTailReconcile()
     return
   }
   if (payload.bar || payload.last_closed_bar) {
@@ -583,8 +599,16 @@ async function reconcileHistoryTail(streamGenerationAtStart = streamGeneration) 
   try {
     const query = new URLSearchParams({ period: props.period, count: '100' })
     const reply = await fetch(`${API_BASE}/api/kline/${encodeURIComponent(props.symbol.code)}/?${query}`, { credentials: 'include' })
-    const payload = await reply.json()
+    let payload = await reply.json()
     if (!reply.ok) throw new Error(payload.error || '行情历史不可用')
+    if (version !== drawVersion || key !== chartKey() || streamGenerationAtStart !== streamGeneration) {
+      current = false
+      return
+    }
+    const sourceChanged = Boolean(loadedSource && payload.source && payload.source !== loadedSource)
+    // Replacing the source requires its *complete* historical window, not
+    // the short tail used for ordinary reconnect recovery.
+    if (sourceChanged) payload = await fetchKlinePage()
     if (version !== drawVersion || key !== chartKey() || streamGenerationAtStart !== streamGeneration) {
       current = false
       return
@@ -599,14 +623,20 @@ async function reconcileHistoryTail(streamGenerationAtStart = streamGeneration) 
       && String(latestRealtimePayload.epoch || '') === String(realtimeEpoch || '')
       ? latestRealtimePayload
       : null
-    const merged = mergeHistoricalTail(loadedBars, payload.bars, latestPayload)
+    const merged = sourceChanged
+      ? { bars: orderedUniqueBars(payload.bars), changed: true }
+      : mergeHistoricalTail(loadedBars, payload.bars, latestPayload)
     const visibleRange = chart?.timeScale().getVisibleLogicalRange()
     loadedBars = merged.bars
+    if (sourceChanged) hasMoreHistory = Boolean(payload.has_more)
+    loadedSource = payload.source || loadedSource
     if (merged.changed) {
       invalidateFormulaResults({ clearPending: false })
       if (candleSeries) {
         candleSeries.setData(loadedBars)
-        if (visibleRange) chart?.timeScale().setVisibleLogicalRange(visibleRange)
+        if (sourceChanged && loadedBars.length) {
+          chart?.timeScale().setVisibleLogicalRange({ from: Math.max(0, loadedBars.length - 90), to: loadedBars.length - 1 })
+        } else if (visibleRange) chart?.timeScale().setVisibleLogicalRange(visibleRange)
       }
       refreshBuiltInLayers()
       queueFormulaRefresh(realtimeRevision)
@@ -736,11 +766,13 @@ async function draw(options = {}) {
   if (!options.keepBars || loadedKey !== key || !loadedBars.length) {
     loadedKey = key
     loadedBars = []
+    loadedSource = ''
     hasMoreHistory = false
     try {
       const payload = await fetchKlinePage()
       if (payload.bars?.length) {
         loadedBars = orderedUniqueBars(payload.bars)
+        loadedSource = payload.source || ''
         hasMoreHistory = Boolean(payload.has_more)
         if (payload.data_status) realtimeDataStatus.value = payload.data_status
       } else {
@@ -763,7 +795,12 @@ async function draw(options = {}) {
     .reduce((sum, result) => sum + (savedHeights[result.item.code] || 150), 0)
   const chartHeight = 460 + subHeight
   el.value.style.height = `${chartHeight}px`
-  const chartTime = createChartTimeFormatters(props.period)
+  // Calendar labels are dates of the exchange, not of the browser's locale.
+  const marketZone = {
+    SH: 'Asia/Shanghai', SZ: 'Asia/Shanghai', HK: 'Asia/Hong_Kong',
+    US: 'America/New_York', CC: 'UTC',
+  }[String(props.symbol?.code || '').split('.')[0]] || 'UTC'
+  const chartTime = createChartTimeFormatters(props.period, marketZone)
   chart = createChart(el.value, {
     width: el.value.clientWidth, height: chartHeight,
     layout: { background: { color: '#080d17' }, textColor: '#8798ab', panes: { separatorColor: '#263241' } },

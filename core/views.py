@@ -694,7 +694,7 @@ def merge_realtime_rows(rows, code, period, calculation_snapshot=None, expected_
     return rows
 
 
-def merge_calculation_snapshot_rows(rows, calculation_snapshot):
+def merge_calculation_snapshot_rows(rows, calculation_snapshot, expected_provider=None):
     """Build Formula input bounded by one captured realtime bar.
 
     Formula calculation must describe the exact state represented by the
@@ -705,8 +705,8 @@ def merge_calculation_snapshot_rows(rows, calculation_snapshot):
     """
     history = list(rows or [])
     current = calculation_snapshot.current_bar
-    if current is None:
-        return history
+    if current is None or (expected_provider is not None and current.provider != expected_provider):
+        return history  # Never overlay a previous provider after an admin source switch.
     captured_time = current.time
     bounded = {
         row["time"]: row
@@ -966,7 +966,7 @@ def history_bars(code, period, calculation_snapshot=None, calculation_limit=KLIN
         fetch = get_market_data_service().window_for_symbol(
             str(code).upper(), period, limit=calculation_limit,
         )
-        bars = merge_calculation_snapshot_rows(fetch.completed, calculation_snapshot)
+        bars = merge_calculation_snapshot_rows(fetch.completed, calculation_snapshot, expected_provider=fetch.provider_id)
         return bars, None, None
     except Exception as exc:
         return None, None, f"统一行情不可用：{exc}"

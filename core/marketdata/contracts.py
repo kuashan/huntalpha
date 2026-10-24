@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from .calendar import canonical_calendar_bar, canonical_calendar_rows
 from .profiles import MarketProfile
 
 
@@ -55,8 +56,8 @@ class MarketDataFetch:
             provider_label_zh=provider_label_zh,
             symbol=symbol,
             timeframe=timeframe,
-            completed=list(completed),
-            forming=forming,
+            completed=canonical_calendar_rows(completed, market_id, timeframe),
+            forming=canonical_calendar_bar(forming, market_id, timeframe),
             meta=meta,
             stream_url=stream_url,
         )

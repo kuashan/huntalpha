@@ -15,6 +15,13 @@
 
 ## 当前进行中
 
+### V2.0.1 — 行情来源切换与日/周/月时间戳一致性
+
+状态：`DEVELOPMENT_CANDIDATE`。独立分支 `fix/web-v2-0-1-market-calendar-timestamps`；详见 `docs/tasks/022-v2-0-1-market-calendar-timestamps.md`。
+
+从 Yahoo Finance 切换到腾讯财经导致日线重复。已定位交易所日期与 Unix 时间锚点不一致，及旧来源实时状态残留。已提出覆盖所有五类 Provider、中港美/加密市场的统一规范，并加入前后端定点修复。**待 PR 自动测试、代码审查、正式构建、用户单独批准 Digest 后受控部署与页面验收。生产仍运行 V2.0.0。**
+
+
 ### Task 006 — SLTD 对齐的统一行情基础设施
 
 状态：`IMPLEMENTED_AND_VERIFIED`（分支 `codex/006-unified-marketdata-siftalpha`，待审查；未推送、未合并）

@@ -60,7 +60,7 @@ def _timestamp(value: Any) -> int | None:
             continue
     for fmt in ("%Y%m%d", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
         try:
-            parsed = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+            parsed = datetime.strptime(text, fmt).replace(tzinfo=ZoneInfo(CN_A_SHARE.timezone))
             return int(parsed.timestamp())
         except ValueError:
             continue
