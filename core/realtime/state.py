@@ -1,7 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Condition, RLock
 from uuid import uuid4
 
+from ..marketdata.calendar import canonical_calendar_time
 from .contracts import NormalizedBar, merge_realtime_bar
 
 
@@ -72,6 +73,15 @@ class RealtimeStateStore:
     def apply_bar(self, key, bar, status="live", mode="streaming", source=None):
         with self._condition:
             state = self._state(key)
+            # Real-time and historical windows must use the same exchange-local bucket.
+            normalized_time = canonical_calendar_time(bar.time, bar.market, bar.period)
+            if normalized_time != bar.time:
+                bar = replace(bar, time=normalized_time)
+            # The public polling registry survives an admin source switch: never
+            # carry a previous provider's closed/current bar into the new source.
+            if state.current_bar is not None and state.current_bar.provider != bar.provider:
+                state.current_bar = None
+                state.last_closed_bar = None
             result = merge_realtime_bar(state.current_bar, bar)
             if not result.accepted:
                 return RealtimeState(**state.__dict__), result
