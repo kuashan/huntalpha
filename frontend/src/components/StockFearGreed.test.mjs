@@ -17,7 +17,7 @@ assert.match(panel, /current !== generation/)
 assert.match(panel, /String\(data.code\).toUpperCase\(\) !== code.toUpperCase\(\)/)
 assert.match(panel, /data.period !== '1d'/)
 assert.match(panel, /state === 'ready' && result/)
-assert.match(panel, /t\('fgNotConfigured'\)/.source ? /fgNotConfigured/ : /fgNotConfigured/)
+assert.match(panel, /fgNotConfigured/)
 assert.doesNotMatch(panel, /Math.random|mockScore|fakeScore|iframe/i)
 
 for (const language of ["'zh-CN'", "'zh-TW'", 'en:', 'ja:', 'ms:', 'fr:']) {
