@@ -6,8 +6,8 @@ const momentum = readFileSync(new URL('./StockTechnicalMomentum.vue', import.met
 const fear = readFileSync(new URL('./StockFearGreed.vue', import.meta.url), 'utf8')
 const languages = readFileSync(new URL('../i18n.js', import.meta.url), 'utf8')
 
-const chart = app.indexOf('<MarketChart v-if="selected"')
-const wrapper = app.indexOf('<div v-if="selected" class="stock-analysis-panels">')
+const chart = app.indexOf('<MarketChart v-if="selectedSymbol"')
+const wrapper = app.indexOf('<div v-if="selectedSymbol" class="stock-analysis-panels">')
 const fearPanel = app.indexOf('<StockFearGreed :key=')
 const momentumPanel = app.indexOf('<StockTechnicalMomentum :key=')
 const disclaimer = app.indexOf("<footer>{{ t('disclaimer') }}</footer>")
