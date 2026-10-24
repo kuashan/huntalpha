@@ -523,15 +523,16 @@ async function runFormulaRefresh() {
 function processRealtimePayload(payload, payloadGeneration = realtimeStatusGeneration) {
   if (!payload || !props.symbol || payload.symbol !== props.symbol.code.toUpperCase() || payload.period !== props.period) return
   if (payloadGeneration !== realtimeStatusGeneration) return
-  if (hasChangedBarSource(loadedSource, payload)) {
-    latestRealtimePayload = undefined
-    markHistoryReconcileNeeded()
-    requestHistoryTailReconcile()
-    return
-  }
   const version = acceptRealtimeVersion(payload)
   if (!version.accepted) {
     if (version.reason !== 'stale_revision') setRealtimeStatus('unavailable')
+    return
+  }
+  if (hasChangedBarSource(loadedSource, payload)) {
+    latestRealtimePayload = undefined
+    invalidateFormulaResults({ clearPending: false })
+    markHistoryReconcileNeeded()
+    requestHistoryTailReconcile()
     return
   }
   if (payload.status) setRealtimeStatus(payload.status)
@@ -551,15 +552,16 @@ function processRealtimePayload(payload, payloadGeneration = realtimeStatusGener
 
 function queueRealtimePayload(payload) {
   if (!payload || !props.symbol || payload.symbol !== props.symbol.code.toUpperCase() || payload.period !== props.period) return
-  if (hasChangedBarSource(loadedSource, payload)) {
-    latestRealtimePayload = undefined
-    markHistoryReconcileNeeded()
-    requestHistoryTailReconcile()
-    return
-  }
   const version = acceptRealtimeVersion(payload)
   if (!version.accepted) {
     if (version.reason !== 'stale_revision') setRealtimeStatus('unavailable')
+    return
+  }
+  if (hasChangedBarSource(loadedSource, payload)) {
+    latestRealtimePayload = undefined
+    invalidateFormulaResults({ clearPending: false })
+    markHistoryReconcileNeeded()
+    requestHistoryTailReconcile()
     return
   }
   if (payload.bar || payload.last_closed_bar) {
