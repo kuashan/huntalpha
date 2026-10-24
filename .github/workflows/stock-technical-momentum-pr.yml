@@ -9,6 +9,7 @@ on:
       - "core/stock_technical_momentum.py"
       - "core/test_stock_technical_momentum.py"
       - "core/views.py"
+      - "core/tests.py"
       - "quant_site/urls.py"
       - "frontend/**"
       - "scripts/verify_web_release_workflow.py"
@@ -33,7 +34,7 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
           python manage.py check
-          python manage.py test core.test_stock_technical_momentum core.test_stock_fear_greed
+          python manage.py test core.test_stock_technical_momentum core.test_stock_fear_greed core.tests.SiftAlphaBrandHeaderContractTests
           python manage.py makemigrations --check --dry-run
           python scripts/verify_web_release_workflow.py
       - uses: actions/setup-node@v4
