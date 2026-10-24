@@ -5,7 +5,7 @@ const app = readFileSync(new URL('../App.vue', import.meta.url), 'utf8')
 const panel = readFileSync(new URL('./StockFearGreed.vue', import.meta.url), 'utf8')
 const i18n = readFileSync(new URL('../i18n.js', import.meta.url), 'utf8')
 
-assert.match(app, /<StockFearGreed :key="'fg:' \\+ selected.code" :symbol="selected"\\s*\\/>/)
+assert.ok(app.includes(`<StockFearGreed :key="'fg:' + selected.code" :symbol="selected" />`))
 const chartIndex = app.indexOf('<MarketChart v-if="selected"')
 const panelIndex = app.indexOf('<StockFearGreed :key="')
 const footerIndex = app.indexOf("<footer>{{ t('disclaimer') }}</footer>")
