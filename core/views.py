@@ -24,6 +24,7 @@ from formula_editor.models import Formula
 from formula_editor.fixed_indicators import installed_fixed_indicators, is_fixed_indicator_enabled
 from .models import AccountMembership, AccountProfile, MarketSymbol, WatchlistEntry
 from .chart_workspace import InvalidWorkspace, WorkspacePermissionDenied, get_workspace, put_workspace
+from .stock_fear_greed import FearGreedUnavailable, fetch_stock_fear_greed
 from .account_security import (RateLimited, VerificationUnavailable, client_ip, take_limit,
                                limit_reached, clear_limit, issue_signup, resend_signup, claim_signup)
 from .account import (
@@ -718,6 +719,22 @@ def merge_calculation_snapshot_rows(rows, calculation_snapshot):
     }
     bounded[captured_time] = {**bounded.get(captured_time, {}), **captured}
     return [bounded[key] for key in sorted(bounded)]
+
+
+@require_GET
+@api_terminal_required
+def stock_fear_greed(request, code):
+    """Proxy a verified catalog symbol to the optional standalone upstream service."""
+    normalized = code.upper()
+    symbol = MarketSymbol.objects.filter(code__iexact=normalized, active=True).first()
+    if symbol is None:
+        return json({"status": "unknown_symbol"}, 404)
+    try:
+        result = fetch_stock_fear_greed(symbol.code)
+    except FearGreedUnavailable as exc:
+        status = 400 if exc.status == "unsupported_symbol" else 503
+        return json({"status": exc.status, "code": symbol.code}, status)
+    return json(result)
 
 
 @require_GET
