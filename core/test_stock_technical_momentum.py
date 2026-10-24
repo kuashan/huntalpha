@@ -56,7 +56,8 @@ class TechnicalMomentumDataTests(SimpleTestCase):
             ]), "US.ORCL")
         self.assertEqual(output["score"], original.signal_score)
         self.assertEqual(output["signal"], original.buy_signal.value)
-        self.assertEqual(output["score_band"], "buy" if 60 <= original.signal_score <= 79 else output["score_band"])
+        from .vendor.daily_stock_analysis.decision_scale import decision_band_for_score
+        self.assertEqual(output["score_band"], decision_band_for_score(original.signal_score).signal_key)
         self.assertEqual(output["period"], "1d")
         self.assertEqual([d["max_score"] for d in output["dimensions"]], [30, 20, 15, 10, 15, 10])
         self.assertEqual(len(output["dimensions"]), 6)
