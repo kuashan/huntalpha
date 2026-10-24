@@ -1,0 +1,53 @@
+name: Verify pinned upstream stock-analysis image
+
+on:
+  pull_request:
+    branches: [release/siftalpha-web-v1]
+    paths:
+      - .github/workflows/stock-analysis-image-contract.yml
+
+permissions:
+  contents: read
+
+jobs:
+  image-contract:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 12
+    steps:
+      - name: Pull upstream image by immutable registry digest
+        run: |
+          docker pull docker.io/iwanlebron/stock-analysis@sha256:62f5680d6aafeea2f5a5472730f45068e9487e6b62ab11ac6460a51ef1a12d04
+          test "$(docker image inspect --format '{{.Architecture}}' docker.io/iwanlebron/stock-analysis@sha256:62f5680d6aafeea2f5a5472730f45068e9487e6b62ab11ac6460a51ef1a12d04)" = "arm64"
+      - name: Run isolated stock-analysis container
+        run: |
+          docker run -d --name fg-upstream-smoke \
+            -p 127.0.0.1:18080:8000 \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 64 --memory 256m \
+            docker.io/iwanlebron/stock-analysis@sha256:62f5680d6aafeea2f5a5472730f45068e9487e6b62ab11ac6460a51ef1a12d04
+          curl --retry 8 --retry-delay 2 --retry-connrefused -fsS http://127.0.0.1:18080/healthz
+      - name: Validate actual API response schema (one symbol only)
+        run: |
+          python3 - <<'PY'
+          import json
+          import urllib.request
+          import urllib.error
+          url = "http://127.0.0.1:18080/fear-greed?ticker=AAPL&freq=1d&window=252&lang=zh&tail=3"
+          try:
+              with urllib.request.urlopen(url, timeout=35) as response:
+                  raw = response.read(1048576)
+          except urllib.error.HTTPError as exc:
+              print(f"upstream_http_status={exc.code}; upstream_error={exc.read(500).decode('utf-8','replace')}")
+              raise
+          data = json.loads(raw)
+          assert data.get("ticker") == "AAPL", "upstream symbol mismatch"
+          latest = data.get("latest")
+          assert isinstance(latest, dict), "upstream did not return a score"
+          assert isinstance(latest.get("score"), (int, float)) and 0 <= latest["score"] <= 100
+          assert isinstance(latest.get("date"), str) and len(latest["date"]) == 10
+          assert isinstance(data.get("latest_subscores"), dict)
+          print(f"schema=PASS ticker=AAPL score={latest['score']} date={latest['date']} factor_count={len(data['latest_subscores'])}")
+          PY
+      - name: Remove isolated test container
+        if: always()
+        run: docker rm -f fg-upstream-smoke 2>/dev/null || true
