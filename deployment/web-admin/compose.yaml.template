@@ -5,8 +5,33 @@ services:
     env_file:
       - __ENV_FILE__
       - __BREVO_ENV_FILE__
+    environment:
+      SIFTALPHA_STOCK_FEAR_GREED_URL: http://stock-fear-greed:8000
     volumes:
       - __DATA_DIR__:/data
     ports:
       - "__LOOPBACK_PORT__:8000"
     restart: unless-stopped
+
+  # Optional standalone upstream engine. Its fixed ARM64 Docker Hub digest was
+  # independently validated in GitHub Actions Run 40063296966.
+  # No host port, website/database mounts, or access to other SiftAlpha services.
+  stock-fear-greed:
+    container_name: siftalpha-web-stock-fear-greed
+    image: docker.io/iwanlebron/stock-analysis@sha256:62f5680d6aafeea2f5a5472730f45068e9487e6b62ab11ac6460a51ef1a12d04
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=8m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -41,3 +41,14 @@ SIFTALPHA_STOCK_FEAR_GREED_URL=http://stock-fear-greed:8000
 ## 交付状态
 
 代码仅在独立开发分支，待 PR CI 验证及审查；未合并正式分支、未生成正式 ARM64 Digest、未部署、未触碰数据库或其他容器。用户真实网站验收前不宣称功能上线。
+
+
+## 2026-10-24：个人使用环境的受控接通补充记录
+
+- 用户明确要求先作为个人使用在 Oracle 服务器接通现成服务，不等待商业使用许可核实；**不视为已获得商业软件或 Yahoo 数据再分发许可**，公开商用前仍需单独确认。
+- 网站 V1.1.11 已经通过 GitHub Actions #40062482177 构建及全部发布测试，原正式镜像 Digest `sha256:d66ae2f1db55db503cbfae41e1cd773087ad7e2e17656529ec20b48176a5a8fb` 已经受控部署，实际运行、健康、首页和后台均通过。
+- 作者原版 ARM64 镜像已通过独立隔离测试 GitHub Actions #40063296966；固定 Docker Hub Manifest Digest `sha256:62f5680d6aafeea2f5a5472730f45068e9487e6b62ab11ac6460a51ef1a12d04`。
+- 新的最小改动：只更新被现有受控 `upgrade` 机制允许的 `deployment/web-admin/compose.yaml.template`，增加同一网站 Compose 网络内无公网端口的 `stock-fear-greed` 服务；网站通过固定内部地址 `http://stock-fear-greed:8000` 获取原版结果。
+- 原版算法不修改。侧车无数据库、密钥挂载和额外 Linux capabilities，使用只读根文件系统以及固定镜像 Digest。独立 PR CI 检查模板渲染、安全边界及既有 Bash 管理器契约。
+- 受控上线次序：审查合并 PR → 正式 ARM64 构建成功并取得**新的**不可变 Digest → `siftalpha-web-admin upgrade <正式Commit>`（只更新受白名单限制的管理器文件）→ `preflight <新Digest>` → `deploy <新Digest>` → `status`、`health`、实际镜像 Digest 与真实个股 API 一次性检查。失败立即停止，不改 Crypto、其他业务容器或 Cloudflare。
+- 当前文档中早期标记的“上游 ARM64 未核实”“V1.1.11 尚未部署”均为**当时历史状态**，本节为后续更新，不覆盖历史记录。

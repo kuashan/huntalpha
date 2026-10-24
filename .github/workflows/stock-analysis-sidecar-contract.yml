@@ -1,0 +1,65 @@
+name: Website stock-analysis sidecar contract
+
+on:
+  pull_request:
+    branches:
+      - release/siftalpha-web-v1
+    paths:
+      - deployment/web-admin/compose.yaml.template
+      - .github/workflows/stock-analysis-sidecar-contract.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sidecar-contract:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate fixed-target admin shell contracts
+        run: |
+          python scripts/verify_web_release_workflow.py
+          bash deployment/web-admin/tests/test_web_admin.sh
+          python -m unittest discover -s deployment/web-admin/tests -p test_upgrade_web_admin.py
+
+      - name: Render and validate production Compose without deploying
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path("deployment/web-admin/compose.yaml.template").read_text()
+          values = {
+            "__COMPOSE_CONTAINER__": "siftalpha-web-compose",
+            "__IMAGE_REFERENCE__": "ghcr.io/kuashan/siftalpha-web@sha256:d66ae2f1db55db503cbfae41e1cd773087ad7e2e17656529ec20b48176a5a8fb",
+            "__ENV_FILE__": "/tmp/siftalpha-test.env",
+            "__BREVO_ENV_FILE__": "/tmp/siftalpha-brevo-test.env",
+            "__DATA_DIR__": "/tmp/siftalpha-testdata",
+            "__LOOPBACK_PORT__": "127.0.0.1:19091",
+          }
+          for key, value in values.items():
+              text = text.replace(key, value)
+          assert "__" not in text, "unresolved template placeholders"
+          Path("/tmp/siftalpha-testdata").mkdir(exist_ok=True)
+          Path("/tmp/siftalpha-test.env").write_text("DJANGO_SECRET_KEY=synthetic-test-only\n")
+          Path("/tmp/siftalpha-brevo-test.env").write_text("BREVO_API_KEY=synthetic-test-only\n")
+          Path("/tmp/siftalpha-test-compose.yml").write_text(text)
+          PY
+          docker compose --project-name siftalpha-web -f /tmp/siftalpha-test-compose.yml config --format json >/tmp/siftalpha-test-compose.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          cfg = json.loads(Path("/tmp/siftalpha-test-compose.json").read_text())
+          services = cfg["services"]
+          assert set(services) == {"web", "stock-fear-greed"}
+          web = services["web"]
+          sidecar = services["stock-fear-greed"]
+          assert web["environment"]["SIFTALPHA_STOCK_FEAR_GREED_URL"] == "http://stock-fear-greed:8000"
+          assert web["ports"][0]["published"] == "19091"
+          assert sidecar["image"] == "docker.io/iwanlebron/stock-analysis@sha256:62f5680d6aafeea2f5a5472730f45068e9487e6b62ab11ac6460a51ef1a12d04"
+          assert not sidecar.get("ports"), "upstream must not publish any host ports"
+          assert not sidecar.get("volumes"), "upstream must not mount database or secrets"
+          assert sidecar["read_only"] is True
+          assert "ALL" in sidecar["cap_drop"]
+          assert "no-new-privileges:true" in sidecar["security_opt"]
+          print("sidecar contract: PASS - immutable ARM64 image, no public port, no mounts, private web API URL")
+          PY
