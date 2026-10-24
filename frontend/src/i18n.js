@@ -118,6 +118,66 @@ Object.entries(fearGreedMessages).forEach(([code, values]) => {
   messages[code] = { ...messages[code], ...values }
 })
 
+const technicalMomentumMessages = {
+  'zh-CN': {
+    tmTitle:'个股技术动能', tmDaily:'固定日线', tmSource:'来源：daily_stock_analysis',
+    tmAsOf:'数据日期：', tmIntraday:'盘中更新', tmClosed:'已完成日线',
+    tmLoading:'正在计算个股技术动能…', tmUnavailable:'技术动能数据暂不可用',
+    tmInsufficient:'有效日线不足，暂无法计算技术评分', tmUnsupported:'此标的暂不支持技术动能',
+    tmTrend:'趋势', tmBias:'MA5 乖离率', tmVolume:'成交量', tmSupport:'均线支撑',
+    tmMacd:'MACD', tmRsi:'RSI', tmStrongBuy:'强烈买入', tmBuy:'买入',
+    tmWatch:'观望', tmReduce:'减仓', tmSell:'卖出', tmHold:'持有', tmStrongSell:'强烈卖出',
+  },
+  'zh-TW': {
+    tmTitle:'個股技術動能', tmDaily:'固定日線', tmSource:'來源：daily_stock_analysis',
+    tmAsOf:'資料日期：', tmIntraday:'盤中更新', tmClosed:'已完成日線',
+    tmLoading:'正在計算個股技術動能…', tmUnavailable:'技術動能資料暫不可用',
+    tmInsufficient:'有效日線不足，暫無法計算技術評分', tmUnsupported:'此標的暫不支援技術動能',
+    tmTrend:'趨勢', tmBias:'MA5 乖離率', tmVolume:'成交量', tmSupport:'均線支撐',
+    tmMacd:'MACD', tmRsi:'RSI', tmStrongBuy:'強烈買入', tmBuy:'買入',
+    tmWatch:'觀望', tmReduce:'減倉', tmSell:'賣出', tmHold:'持有', tmStrongSell:'強烈賣出',
+  },
+  en: {
+    tmTitle:'Individual technical momentum', tmDaily:'Fixed daily candles', tmSource:'Source: daily_stock_analysis',
+    tmAsOf:'Data date:', tmIntraday:'Updating intraday', tmClosed:'Completed daily candle',
+    tmLoading:'Calculating technical score…', tmUnavailable:'Technical score unavailable',
+    tmInsufficient:'Insufficient valid daily candles', tmUnsupported:'Symbol not supported',
+    tmTrend:'Trend', tmBias:'MA5 deviation', tmVolume:'Volume', tmSupport:'MA support',
+    tmMacd:'MACD', tmRsi:'RSI', tmStrongBuy:'Strong buy', tmBuy:'Buy',
+    tmWatch:'Watch', tmReduce:'Reduce', tmSell:'Sell', tmHold:'Hold', tmStrongSell:'Strong sell',
+  },
+  ja: {
+    tmTitle:'個別銘柄のテクニカルモメンタム', tmDaily:'日足固定', tmSource:'提供元：daily_stock_analysis',
+    tmAsOf:'データ日付：', tmIntraday:'ザラ場更新', tmClosed:'確定日足',
+    tmLoading:'スコアを計算中…', tmUnavailable:'スコアを取得できません',
+    tmInsufficient:'日足データが不足しています', tmUnsupported:'この銘柄は非対応です',
+    tmTrend:'トレンド', tmBias:'MA5乖離率', tmVolume:'出来高', tmSupport:'移動平均サポート',
+    tmMacd:'MACD', tmRsi:'RSI', tmStrongBuy:'強い買い', tmBuy:'買い',
+    tmWatch:'様子見', tmReduce:'縮小', tmSell:'売り', tmHold:'保有', tmStrongSell:'強い売り',
+  },
+  ms: {
+    tmTitle:'Momentum teknikal saham', tmDaily:'Carta harian tetap', tmSource:'Sumber: daily_stock_analysis',
+    tmAsOf:'Tarikh data:', tmIntraday:'Dikemas kini intrahari', tmClosed:'Carta harian lengkap',
+    tmLoading:'Mengira skor teknikal…', tmUnavailable:'Skor teknikal tidak tersedia',
+    tmInsufficient:'Data harian tidak mencukupi', tmUnsupported:'Simbol tidak disokong',
+    tmTrend:'Trend', tmBias:'Sisihan MA5', tmVolume:'Volum', tmSupport:'Sokongan MA',
+    tmMacd:'MACD', tmRsi:'RSI', tmStrongBuy:'Beli kuat', tmBuy:'Beli',
+    tmWatch:'Pantau', tmReduce:'Kurangkan', tmSell:'Jual', tmHold:'Pegang', tmStrongSell:'Jual kuat',
+  },
+  fr: {
+    tmTitle:'Momentum technique par titre', tmDaily:'Bougies journalières fixes', tmSource:'Source : daily_stock_analysis',
+    tmAsOf:'Date des données :', tmIntraday:'Mise à jour intraday', tmClosed:'Bougie journalière clôturée',
+    tmLoading:'Calcul du score technique…', tmUnavailable:'Score technique indisponible',
+    tmInsufficient:'Historique journalier insuffisant', tmUnsupported:'Titre non pris en charge',
+    tmTrend:'Tendance', tmBias:'Écart MA5', tmVolume:'Volume', tmSupport:'Support moyennes',
+    tmMacd:'MACD', tmRsi:'RSI', tmStrongBuy:'Achat fort', tmBuy:'Achat',
+    tmWatch:'Attendre', tmReduce:'Réduire', tmSell:'Vendre', tmHold:'Conserver', tmStrongSell:'Vente forte',
+  },
+}
+Object.entries(technicalMomentumMessages).forEach(([code, entries]) => {
+  messages[code] = { ...messages[code], ...entries }
+})
+
 export const t = key => messages[locale.value]?.[key] ?? messages.en[key] ?? key
 export const languageName = computed(() => languages.find(item => item.code === locale.value)?.label ?? '简体中文')
 export function setLocale(code) { if (!messages[code]) return; locale.value = code; localStorage.setItem('quantscope:locale', code); document.documentElement.lang = code }
