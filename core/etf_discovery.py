@@ -121,6 +121,12 @@ def lookup_etf(code: str) -> dict | None:
     normalized = str(code or "").strip().upper()
     if not re.fullmatch(r"(?:SH|SZ)\.\d{6}|HK\.\d{1,5}|US\.[A-Z][A-Z0-9.\-]{0,11}", normalized):
         return None
+    if normalized.startswith(("SH.", "SZ.")):
+        # Only probe exchange-traded fund code families; never send ordinary
+        # A-share stock searches to this optional ETF discovery source.
+        digits = normalized.split(".", 1)[1]
+        if not digits.startswith(("15", "16", "50", "51", "52", "56", "58")):
+            return None
     for record in discover_etfs(normalized):
         if record["code"] == normalized:
             return record
