@@ -10,6 +10,7 @@ import AccountPopover from './components/AccountPopover.vue'
 import PersonalCenter from './components/PersonalCenter.vue'
 import SiteVersionFooter from './components/SiteVersionFooter.vue'
 import { commonIndicators, markets } from './data/marketData'
+import { createQuoteCoordinator } from './realtime/quoteCoordinator.mjs'
 import { hydrateWorkspace, serializeWorkspace } from './workspaceState.mjs'
 import { languages, locale, setLocale, t } from './i18n'
 const market = ref(markets[0]); const query = ref(''); const symbols = ref([]); const selected = ref(null); const period = ref('日线'); const mainInstalled = ref([]); const subInstalled = ref([]); const manager = ref(null)
@@ -25,7 +26,7 @@ const routeFromLocation = () => {
 }
 const initialRoute = routeFromLocation(); const route = ref(initialRoute.page); const accountSection = ref(initialRoute.section)
 const indexSnapshots = ref([]); const cryptoOverviewQuotes = ref({}); const indexLoading = ref(false); const indexError = ref(''); let indexRequestVersion = 0; let cryptoOverviewRequestVersion = 0; let indexRefreshTimer
-const catalogLoading = ref(false); const catalogError = ref(''); let symbolRequestVersion = 0; let quoteRequestVersion = 0; let searchTimer
+const catalogLoading = ref(false); const catalogError = ref(''); let symbolRequestVersion = 0; let searchTimer
 const watchlistTotal = ref(null); const watchlistLimit = ref(null); const watchlistRemaining = ref(null); const watchlistError = ref('')
 const watchlistExpanded = ref(true)
 const analysisCode = new URLSearchParams(window.location.search).get('analysis')
@@ -53,7 +54,7 @@ const indexTitle = index => {
   return [index.name, displayIndexPrice(index.price), displayIndexChange(index.change_percent), index.updated_at ? `更新时间：${index.updated_at}` : status].join(' · ')
 }
 const list = computed(() => symbols.value)
-const selectedQuote = computed(() => quotes.value[selected.value?.code] || { status: 'idle' })
+const selectedQuote = computed(() => quotes.value[String(selected.value?.code || '').toUpperCase()] || { status: 'idle' })
 const quoteData = computed(() => selectedQuote.value.status === 'ready' ? selectedQuote.value.data : null)
 const quoteStatusText = computed(() => {
   if (selectedQuote.value.status === 'ready') {
@@ -67,8 +68,8 @@ const displayPrice = value => typeof value === 'number' && Number.isFinite(value
 const displayChange = value => typeof value === 'number' && Number.isFinite(value) ? `${value > 0 ? '+' : ''}${value}%` : '—'
 const displayIndexPrice = value => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'
 const displayIndexChange = value => typeof value === 'number' && Number.isFinite(value) ? `${value > 0 ? '+' : ''}${value.toFixed(2)}%` : '—'
-const itemQuote = item => quotes.value[item.code]?.data
-const itemQuoteError = item => quotes.value[item.code]?.error || ''
+const itemQuote = item => quotes.value[String(item.code || '').toUpperCase()]?.data
+const itemQuoteError = item => quotes.value[String(item.code || '').toUpperCase()]?.error || ''
 const symbolTitle = item => [item.name + ' · ' + item.code + ' · ' + marketTitle(item.market), itemQuoteError(item)].filter(Boolean).join(' · ')
 const marketColorTokens = computed(() => priceColorMode.value === 'international' ? { up: '#3acba3', down: '#ef6671' } : { up: '#ef6671', down: '#3acba3' })
 const marketChangeStyle = value => {
@@ -249,24 +250,19 @@ function toggleCommon(item) { const active = (item.placement === 'main' ? mainIn
 function openAiAnalysis() { const url = `/?analysis=${encodeURIComponent(selected.value.code)}&name=${encodeURIComponent(selected.value.name)}&market=${encodeURIComponent(market.value.name)}`; window.open(url, '_blank', 'noopener') }
 async function requestAiAccess() { if (!visitor.value) return openAiAnalysis(); await fetch(`${API_BASE}/api/auth/logout/`, { method: 'POST', credentials: 'include' }); user.value = null; visitor.value = false; window.location.assign('/?register=1') }
 function backToTerminal() { window.location.assign('/') }
-async function signOut() { cancelWorkspaceSync(); await fetch(`${API_BASE}/api/auth/logout/`, { method: 'POST', credentials: 'include' }); user.value = null; paneHeights.value = {}; visitor.value = false; initialPreferencesApplied = false; mainInstalled.value = []; subInstalled.value = []; symbols.value = []; selected.value = null; watchlistTotal.value = null; watchlistLimit.value = null; watchlistRemaining.value = null; watchlistError.value = ''; navigateToTerminal() }
-async function refreshQuotes(items) {
-  const version = ++quoteRequestVersion
-  const selectedCode = selected.value?.code
-  const next = Object.fromEntries(items.map(item => [item.code, quotes.value[item.code] || { status: 'loading' }]))
-  if (selectedCode && quotes.value[selectedCode] && !next[selectedCode]) next[selectedCode] = quotes.value[selectedCode]
-  quotes.value = next
-  await Promise.all(items.map(async item => {
-    try {
-      const reply = await fetch(`${API_BASE}/api/quote/${encodeURIComponent(item.code)}/`, { credentials: 'include' })
-      const payload = await reply.json()
-      if (!reply.ok) throw new Error(payload.error || t('quoteUnavailable'))
-      next[item.code] = { status: 'ready', data: payload }
-    } catch (error) {
-      next[item.code] = { status: 'error', error: error.message || t('quoteUnavailable') }
-    }
-  }))
-  if (version === quoteRequestVersion) quotes.value = { ...next }
+async function signOut() { cancelWorkspaceSync(); quoteCoordinator.reset(); await fetch(`${API_BASE}/api/auth/logout/`, { method: 'POST', credentials: 'include' }); user.value = null; paneHeights.value = {}; visitor.value = false; initialPreferencesApplied = false; mainInstalled.value = []; subInstalled.value = []; symbols.value = []; selected.value = null; watchlistTotal.value = null; watchlistLimit.value = null; watchlistRemaining.value = null; watchlistError.value = ''; navigateToTerminal() }
+const quoteCoordinator = createQuoteCoordinator({
+  readQuotes: () => quotes.value,
+  writeQuotes: next => { quotes.value = next },
+  fetchQuote: async code => {
+    const reply = await fetch(`${API_BASE}/api/quote/${encodeURIComponent(code)}/`, { credentials: 'include' })
+    const payload = await reply.json()
+    if (!reply.ok) throw new Error(payload.error || t('quoteUnavailable'))
+    return payload
+  },
+})
+function refreshQuotes(items) {
+  return quoteCoordinator.refreshList(items, selected.value?.code)
 }
 async function toggleWatchlist(item) {
   if (visitor.value) {
@@ -364,29 +360,33 @@ async function loadSymbols() {
     const selectedItem = items.find(item => item.code === selected.value?.code)
     if (selectedItem) selected.value = selectedItem
     else if (!selected.value && items[0]) selectSymbol(items[0])
-    if (user.value && items.length) refreshQuotes(items)
-    else quoteRequestVersion += 1
+    if (user.value && items.length) void refreshQuotes(items)
+    else void quoteCoordinator.refreshList([], selected.value?.code)
     if (!items.length && !search && payload.error) catalogError.value = payload.error
   } catch (error) {
     if (version !== symbolRequestVersion) return
-    symbols.value = []; quoteRequestVersion += 1; catalogError.value = error.message || t('catalogUnavailable')
+    symbols.value = []; void quoteCoordinator.refreshList([], selected.value?.code); catalogError.value = error.message || t('catalogUnavailable')
   } finally {
     if (version === symbolRequestVersion) catalogLoading.value = false
   }
 }
 function selectSymbol(item) {
+  if (!item?.code) return
   market.value = markets.find(candidate => candidate.code === item.market) || market.value
   selected.value = item
+  // The selected symbol must obtain its own fresh quote immediately; a prior
+  // watchlist batch cannot replace it after a faster symbol switch.
+  void quoteCoordinator.refresh(item.code)
 }
 function switchMarket(item) { market.value = item }
 watch(query, () => { window.clearTimeout(searchTimer); searchTimer = window.setTimeout(loadSymbols, 280) })
 watch(user, currentUser => {
   if (currentUser) { if (route.value === 'terminal') loadSymbols(); startMarketIndexRefresh() }
-  else { symbolRequestVersion += 1; quoteRequestVersion += 1; indexRequestVersion += 1; stopMarketIndexRefresh(); indexSnapshots.value = []; quotes.value = {}; symbols.value = []; selected.value = null; watchlistTotal.value = null; watchlistLimit.value = null; watchlistRemaining.value = null }
+  else { symbolRequestVersion += 1; quoteCoordinator.reset(); indexRequestVersion += 1; stopMarketIndexRefresh(); indexSnapshots.value = []; quotes.value = {}; symbols.value = []; selected.value = null; watchlistTotal.value = null; watchlistLimit.value = null; watchlistRemaining.value = null }
 })
 function handleRouteChange() { syncRoute(); if (route.value === 'terminal' && user.value) { loadSymbols(); startMarketIndexRefresh(); refreshIndicatorEntitlements() } else stopMarketIndexRefresh() }
 onMounted(async () => { syncRoute(); document.addEventListener('visibilitychange', handleVisibilityChange); window.addEventListener('popstate', handleRouteChange); try { const reply = await fetch(`${API_BASE}/api/auth/session/`, { credentials: 'include' }); const data = await reply.json(); if (reply.ok && data.authenticated) { applyInitialPreferences(data.user); user.value = data.user; visitor.value = Boolean(data.visitor) ; if (!visitor.value) await restoreWorkspace(); await refreshIndicatorEntitlements() } } catch {} finally { checkingSession.value = false } entitlementRefreshTimer = window.setInterval(refreshIndicatorEntitlements, 30000) })
-onBeforeUnmount(() => { cancelWorkspaceSync(); window.clearInterval(entitlementRefreshTimer); window.clearTimeout(searchTimer); stopMarketIndexRefresh(); document.removeEventListener('visibilitychange', handleVisibilityChange); window.removeEventListener('popstate', handleRouteChange) })
+onBeforeUnmount(() => { quoteCoordinator.reset(); cancelWorkspaceSync(); window.clearInterval(entitlementRefreshTimer); window.clearTimeout(searchTimer); stopMarketIndexRefresh(); document.removeEventListener('visibilitychange', handleVisibilityChange); window.removeEventListener('popstate', handleRouteChange) })
 </script>
 <template>
   <div v-if="checkingSession" class="boot-screen">SiftAlpha…</div>
@@ -399,7 +399,7 @@ onBeforeUnmount(() => { cancelWorkspaceSync(); window.clearInterval(entitlementR
     <div class="workspace" :class="{ 'watchlist-collapsed': !watchlistExpanded }"><aside><div class="aside-title"><div v-if="watchlistExpanded" class="watchlist-title-details" :title="watchlistRemaining == null ? '' : `${watchlistRemaining} ${t('watchlistRemaining')}`"><span>{{ t('watchlistList') }}</span><b>{{ watchlistTotal == null ? '—' : watchlistTotal }} / {{ watchlistLimit == null ? '—' : watchlistLimit }}</b></div><button type="button" class="watchlist-toggle" :aria-expanded="watchlistExpanded" aria-controls="watchlist-contents" :aria-label="watchlistExpanded ? t('watchlistCollapse') : t('watchlistExpand')" @click="watchlistExpanded = !watchlistExpanded">{{ watchlistExpanded ? t('watchlistCollapse') : t('watchlistExpand') }}</button></div><div v-show="watchlistExpanded" id="watchlist-contents"><label class="search">⌕ <input v-model="query" :placeholder="t('search')" /></label><div class="heads"><span>{{ t('nameCode') }}</span><span>{{ t('latest') }}</span><span>{{ t('change') }}</span><span aria-label="收藏">☆</span></div><div v-for="item in list" :key="item.code" class="symbol" :class="{selected: selected?.code === item.code}" :title="symbolTitle(item)" :aria-label="symbolTitle(item)" role="button" tabindex="0" @click="selectSymbol(item)" @keydown.enter.prevent="selectSymbol(item)"><span class="symbol-name"><strong>{{ item.name }}</strong><small class="symbol-meta"><span class="symbol-code">{{ item.code }}</span><span class="market-label" :title="marketTitle(item.market)">{{ marketName(item.market) }}</span></small></span><b :style="marketChangeStyle(itemQuote(item)?.change)">{{ displayPrice(itemQuote(item)?.price) }}</b><em :style="marketChangeStyle(itemQuote(item)?.change)" :class="{down:itemQuote(item)?.change < 0}">{{ displayChange(itemQuote(item)?.change) }}</em><button type="button" class="star" :class="{active:item.watchlisted}" :aria-label="item.watchlisted ? t('watchlistUnstar') : t('watchlistStar')" :aria-pressed="item.watchlisted" @click.stop="toggleWatchlist(item)">{{ item.watchlisted ? '★' : '☆' }}</button></div><p v-if="catalogStatusText">{{ catalogStatusText }}</p><p v-if="!catalogLoading && !list.length && !catalogStatusText" class="watchlist-empty">{{ emptyWatchlistText }}<small v-if="!query.trim()">{{ market.code === 'crypto' ? '搜索 BTC 或 ETH 并点击 ☆ 添加' : t('watchlistSearchHint') }}</small></p><p v-if="watchlistError" class="watchlist-message">{{ watchlistError }}</p></div></aside>
       <section class="content"><div class="security"><div><p>{{ marketTitle(selected?.market || market.code) }} · {{ quoteStatusText }}</p><h1>{{ selected?.name || '—' }} <small>{{ selected?.code || '' }}</small><button v-if="selected && !selected.code.startsWith('CC.')" class="ai-button" @click="requestAiAccess">AI 分析</button></h1></div><div class="price"><strong :style="marketChangeStyle(quoteData?.change)">{{ displayPrice(quoteData?.price) }}</strong><span :style="marketChangeStyle(quoteData?.change)" :class="{down:quoteData?.change < 0}">{{ displayChange(quoteData?.change) }}</span></div><dl><div><dt>{{ t('open') }}</dt><dd>{{ displayPrice(quoteData?.open) }}</dd></div><div><dt>{{ t('high') }}</dt><dd>{{ displayPrice(quoteData?.high) }}</dd></div><div><dt>{{ t('low') }}</dt><dd>{{ displayPrice(quoteData?.low) }}</dd></div></dl></div>
         <div class="toolbar"><div><button v-for="item in ['分时','1分','5分','15分','30分','60分','2小时','4小时','日线','周线','月线']" :key="item" :class="{active:period === item}" @click="period=item">{{ item }}</button></div><div class="common-tools"><button v-for="item in commonIndicators" :key="item.code" :class="{on:installedIndicators.some(current=>current.code===item.code)}" @click="toggleCommon(item)">{{item.name}}</button><button @click="manager.open()">{{ t('manager') }}</button></div></div>
-        <div class="labels"><span class="chart-main-heading">{{ t('main') }}{{ mainInstalled.map(item => item.name).join(' · ') || t('candle') }}<span id="market-chart-status-host" class="chart-status-host"></span></span><small v-if="workspaceError" role="status">{{ workspaceError }}</small></div><MarketChart v-if="selected" :symbol="selected" :period="period" :installed-indicators="installedIndicators" :pane-heights="paneHeights" :market-color-tokens="marketColorTokens" @indicator-denied="removeIndicator" @pane-heights-changed="handlePaneHeightsChanged" /><div v-else class="catalog-empty">{{ catalogStatusText }}</div><footer>{{ t('disclaimer') }}</footer>
+        <div class="labels"><span class="chart-main-heading">{{ t('main') }}{{ mainInstalled.map(item => item.name).join(' · ') || t('candle') }}<span id="market-chart-status-host" class="chart-status-host"></span></span><small v-if="workspaceError" role="status">{{ workspaceError }}</small></div><MarketChart v-if="selected" :key="selected.code" :symbol="selected" :period="period" :installed-indicators="installedIndicators" :pane-heights="paneHeights" :market-color-tokens="marketColorTokens" @indicator-denied="removeIndicator" @pane-heights-changed="handlePaneHeightsChanged" /><div v-else class="catalog-empty">{{ catalogStatusText }}</div><footer>{{ t('disclaimer') }}</footer>
       </section></div>
     <IndicatorManager ref="manager" :main="mainInstalled" :sub="subInstalled" :visitor="visitor" @add="addIndicator" @remove="removeIndicator" />
     <SiteVersionFooter />
