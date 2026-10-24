@@ -78,7 +78,6 @@ onBeforeUnmount(() => {
         <h2>{{ t('tmTitle') }}</h2>
         <small>{{ t('tmDaily') }} · {{ symbol?.name || symbol?.code }}</small>
       </div>
-      <a href="https://github.com/ZhuLinsen/daily_stock_analysis" target="_blank" rel="noopener noreferrer">{{ t('tmSource') }}</a>
     </div>
     <div v-if="state === 'ready' && result" class="tm-content">
       <div class="tm-score">
@@ -105,7 +104,6 @@ onBeforeUnmount(() => {
 .tm-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
 .tm-header h2{margin:0 0 4px;font-size:15px;font-weight:600}
 .tm-header small,.tm-score small,.tm-status{color:#94a7ba;font-size:11px}
-.tm-header a{font-size:10px;color:#7abec9;text-decoration:underline;white-space:nowrap}
 .tm-content{margin-top:14px;display:grid;grid-template-columns:minmax(125px,1fr) minmax(160px,1.6fr);gap:15px}
 .tm-score{display:flex;flex-direction:column;gap:7px}
 .tm-score strong{font-size:32px;color:#e5f5f6;font-variant-numeric:tabular-nums}
