@@ -21,10 +21,11 @@ const errorText = computed(() => ({
   not_configured: 'tmUnavailable',
   invalid_result: 'tmUnavailable',
 })[state.value] || 'tmUnavailable')
-const scoreLabel = computed(() => ({
-  strong_buy: 'tmStrongBuy', buy: 'tmBuy', watch: 'tmWatch',
-  reduce: 'tmReduce', sell: 'tmSell',
-})[result.value?.score_band] || 'tmWatch')
+// Display the upstream trend-gated action, NOT only the score-band label.
+const signalLabel = computed(() => ({
+  '强烈买入': 'tmStrongBuy', '买入': 'tmBuy', '持有': 'tmHold',
+  '观望': 'tmWatch', '卖出': 'tmSell', '强烈卖出': 'tmStrongSell',
+})[result.value?.signal] || 'tmWatch')
 
 async function refresh() {
   const code = String(props.symbol?.code || '')
@@ -82,7 +83,7 @@ onBeforeUnmount(() => {
     <div v-if="state === 'ready' && result" class="tm-content">
       <div class="tm-score">
         <strong>{{ result.score }}<small> / 100</small></strong>
-        <span>{{ t(scoreLabel) }}</span>
+        <span>{{ t(signalLabel) }}</span>
         <small>{{ t('tmAsOf') }} {{ result.date }} · {{ t(result.intraday ? 'tmIntraday' : 'tmClosed') }}</small>
         <div class="tm-meter" role="meter" :aria-valuenow="result.score" aria-valuemin="0" aria-valuemax="100" :aria-label="t('tmTitle')">
           <div :style="{ width: result.score + '%' }"></div>
