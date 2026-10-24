@@ -743,12 +743,17 @@ def merge_calculation_snapshot_rows(rows, calculation_snapshot, expected_provide
 def stock_technical_momentum(request, code):
     """Return unchanged upstream daily technical score for an active symbol."""
     symbol = MarketSymbol.objects.filter(code__iexact=code.upper(), active=True).first()
-    if symbol is None:
+    try:
+        verified_etf = lookup_etf(code) if symbol is None else None
+    except ETFDiscoveryUnavailable:
+        return json({"status": "unavailable"}, 503)
+    verified_code = symbol.code if symbol is not None else (verified_etf or {}).get("code")
+    if verified_code is None:
         return json({"status": "unknown_symbol"}, 404)
     try:
-        payload = analyze_technical_momentum(symbol.code)
+        payload = analyze_technical_momentum(verified_code)
     except TechnicalMomentumUnavailable as exc:
-        return json({"status": exc.status, "code": symbol.code}, 503)
+        return json({"status": exc.status, "code": verified_code}, 503)
     return json(payload)
 
 
@@ -758,13 +763,18 @@ def stock_fear_greed(request, code):
     """Proxy a verified catalog symbol to the optional standalone upstream service."""
     normalized = code.upper()
     symbol = MarketSymbol.objects.filter(code__iexact=normalized, active=True).first()
-    if symbol is None:
+    try:
+        verified_etf = lookup_etf(normalized) if symbol is None else None
+    except ETFDiscoveryUnavailable:
+        return json({"status": "unavailable"}, 503)
+    verified_code = symbol.code if symbol is not None else (verified_etf or {}).get("code")
+    if verified_code is None:
         return json({"status": "unknown_symbol"}, 404)
     try:
-        result = fetch_stock_fear_greed(symbol.code)
+        result = fetch_stock_fear_greed(verified_code)
     except FearGreedUnavailable as exc:
         status = 400 if exc.status == "unsupported_symbol" else 503
-        return json({"status": exc.status, "code": symbol.code}, status)
+        return json({"status": exc.status, "code": verified_code}, status)
     return json(result)
 
 
@@ -1235,6 +1245,11 @@ def symbol_search(request):
         except ETFDiscoveryUnavailable:
             discovered = ()
         existing_codes = {item["code"] for item in results}
+        # A persisted but inactive/different-page ticker must never be
+        # displayed again from transient Yahoo search results.
+        existing_codes.update(MarketSymbol.objects.filter(
+            code__in=[row["code"] for row in discovered]
+        ).values_list("code", flat=True))
         extras = []
         for metadata in discovered:
             if metadata["code"] in existing_codes:
