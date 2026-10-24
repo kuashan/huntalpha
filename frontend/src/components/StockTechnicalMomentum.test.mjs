@@ -25,6 +25,8 @@ for (const term of ['/api/stock-technical-momentum/', 'controller?.abort()',
 }
 assert.ok(!/Math.random|mockScore|fakeScore|iframe/i.test(momentum))
 assert.ok(fear.includes('/api/stock-fear-greed/'), 'Accepted sentiment panel retained')
+assert.doesNotMatch(momentum, /href="https:\/\/github\.com\/ZhuLinsen\/daily_stock_analysis"/)
+assert.doesNotMatch(momentum, /t\('tmSource'\)/)
 for (const key of ['tmTitle', 'tmDaily', 'tmLoading', 'tmUnavailable', 'tmInsufficient',
   'tmTrend', 'tmBias', 'tmVolume', 'tmSupport', 'tmMacd', 'tmRsi',
   'tmStrongBuy', 'tmBuy', 'tmWatch', 'tmSell', 'tmStrongSell']) {
