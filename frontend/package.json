@@ -11,7 +11,7 @@
     "test:realtime": "node src/realtime/realtimeUiBuffer.test.mjs",
     "test:chart": "node src/realtime/chartUpdatePolicy.test.mjs && node src/realtime/chartPresentation.test.mjs",
     "test:workspace": "node src/workspaceState.test.mjs",
-    "test:ui": "node src/watchlistDisclosure.test.mjs && node src/providerNeutralContract.test.mjs && node src/realtime/quoteCoordinator.test.mjs && node src/components/StockFearGreed.test.mjs"
+    "test:ui": "node src/watchlistDisclosure.test.mjs && node src/providerNeutralContract.test.mjs && node src/realtime/quoteCoordinator.test.mjs && node src/components/StockFearGreed.test.mjs && node src/components/StockTechnicalMomentum.test.mjs"
   },
   "dependencies": {
     "@dtrader/formula-ts": "github:DTrader-store/formula-ts",
