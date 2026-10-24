@@ -45,6 +45,7 @@ urlpatterns = [
     path('api/ai-analysis/', views.ai_analysis),
     path('api/ai-analysis/status/<str:task_id>/', views.ai_analysis_status),
     path('api/stock-fear-greed/<str:code>/', views.stock_fear_greed),
+    path('api/stock-technical-momentum/<str:code>/', views.stock_technical_momentum),
     path('api/quote/<str:code>/', views.quote),
     path('api/kline/<str:code>/', views.kline),
     path('api/realtime/market-stream/<str:code>/', views.realtime_market_stream),

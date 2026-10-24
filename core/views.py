@@ -25,6 +25,7 @@ from formula_editor.fixed_indicators import installed_fixed_indicators, is_fixed
 from .models import AccountMembership, AccountProfile, MarketSymbol, WatchlistEntry
 from .chart_workspace import InvalidWorkspace, WorkspacePermissionDenied, get_workspace, put_workspace
 from .stock_fear_greed import FearGreedUnavailable, fetch_stock_fear_greed
+from .stock_technical_momentum import TechnicalMomentumUnavailable, analyze_technical_momentum
 from .account_security import (RateLimited, VerificationUnavailable, client_ip, take_limit,
                                limit_reached, clear_limit, issue_signup, resend_signup, claim_signup)
 from .account import (
@@ -719,6 +720,20 @@ def merge_calculation_snapshot_rows(rows, calculation_snapshot):
     }
     bounded[captured_time] = {**bounded.get(captured_time, {}), **captured}
     return [bounded[key] for key in sorted(bounded)]
+
+
+@require_GET
+@api_terminal_required
+def stock_technical_momentum(request, code):
+    """Return unchanged upstream daily technical score for an active symbol."""
+    symbol = MarketSymbol.objects.filter(code__iexact=code.upper(), active=True).first()
+    if symbol is None:
+        return json({"status": "unknown_symbol"}, 404)
+    try:
+        payload = analyze_technical_momentum(symbol.code)
+    except TechnicalMomentumUnavailable as exc:
+        return json({"status": exc.status, "code": symbol.code}, 503)
+    return json(payload)
 
 
 @require_GET
